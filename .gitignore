@@ -1,0 +1,49 @@
+# TidyFiles — local-only reference material
+# These directories are deliberately excluded from the new repository.
+/legacy/
+/planning/
+
+# Python bytecode, caches, and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+junit.xml
+*.egg-info/
+
+# Local Python environments
+/.venv/
+/venv/
+/.build_venv/
+
+# Local IDE configuration
+/.vscode/
+/.idea/
+
+# Build output (retain PyInstaller .spec files when authored)
+/build/
+/dist/
+
+# Portable application state — not source-controlled
+/config.json
+/tidyfiles.log
+/tidyfiles.log.*
+/trash/
+
+# Local environment values and credentials
+.env
+.env.*
+!.env.example
+
+# Operating system metadata
+Thumbs.db
+.DS_Store
+desktop.ini
