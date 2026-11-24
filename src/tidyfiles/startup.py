@@ -25,10 +25,10 @@ def _show_startup_error(message: str) -> None:
         pass
 
 
-def _launch_gui() -> None:
+def _launch_gui(config: dict[str, object], config_path: str | os.PathLike[str]) -> None:
     from tidyfiles.app import create_main_window
 
-    create_main_window().mainloop()
+    create_main_window(config, config_path).mainloop()
 
 
 def main() -> int:
@@ -43,9 +43,9 @@ def main() -> int:
         else:
             location = resolve_storage_location()
             logger = configure_logging(location.log_path)
-            load_config(location.config_path)
+            config = load_config(location.config_path)
             logger.info("Starting TidyFiles using storage at %s", location.directory)
-            _launch_gui()
+            _launch_gui(config, location.config_path)
     except Exception as exc:
         if logger is not None:
             logger.exception("TidyFiles startup failed")

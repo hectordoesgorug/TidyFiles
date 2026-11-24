@@ -1,11 +1,21 @@
 # File Safety and Current Status
 
-The current GUI is a shell and does not import or process user files. A separate
-read-only discovery service and a collection-backed filename-evaluation
-service are implemented but are not connected to the GUI. No file operation
+The current GUI presents one empty shared collection across three modes, but
+does not import or process user files. A separate read-only discovery service
+and a collection-backed filename-evaluation service are implemented but are not
+connected to the GUI. Import, collection-management, sorting, reordering,
+evaluation, and processing controls remain disabled. No file operation
 renames, deletes, moves, repacks, or otherwise modifies user files. The
 collection domain can reorder or remove rows and clear its in-memory state;
-these operations never change source files. The GUI does not expose them yet.
+these operations never change source files, and their GUI controls remain
+disabled pending integration.
+
+The Auto-clean switch is disabled until its permanent-deletion disclosure and
+eligible-folder workflow are implemented. Its approved future deletion scope
+is limited to `Thumbs.db`, `.DS_Store`, `desktop.ini`, and empty eligible
+subdirectories. Counter is an off-by-default UI option only; no validation
+algorithm or post-processing action runs. Neither switch can start a filesystem
+operation.
 
 ## Implemented foundations
 

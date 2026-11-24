@@ -74,7 +74,11 @@ def test_startup_acquires_guard_before_foundations_and_releases_after_gui(
         "load_config",
         lambda path: events.append("config") or {},
     )
-    monkeypatch.setattr(startup, "_launch_gui", lambda: events.append("gui closed"))
+    monkeypatch.setattr(
+        startup,
+        "_launch_gui",
+        lambda _config, _path: events.append("gui closed"),
+    )
 
     assert startup.main() == 0
     assert events == [

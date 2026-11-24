@@ -6,10 +6,13 @@ bulk renaming, duplicate review, and media repacking.
 ## Development status
 
 The project is in early development. The current application provides a
-single-instance guard, configuration and logging foundations, and a minimal GUI
-shell with Bulk Rename, Duplicate Finder, and Repacker tabs. File import,
-renaming, duplicate analysis, repacking, and filesystem changes are not yet
-available. The application is not production-ready.
+single-instance guard, configuration and logging foundations, and a GUI with
+Bulk Rename, Duplicate Finder, and Repacker tabs sharing one empty collection
+table. Column visibility and widths are customizable per mode; appearance and
+window placement are saved in the existing configuration. File import,
+collection-management actions, renaming, duplicate analysis, repacking, and
+filesystem changes are not yet available. The application is not
+production-ready.
 
 ## Run locally
 

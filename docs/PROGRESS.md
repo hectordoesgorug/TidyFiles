@@ -14,11 +14,13 @@ discovery service with bounded background work, metadata snapshots, exclusions,
 cooperative cancellation, and incomplete-import records. The service is not
 connected to the GUI. M2-C adds deterministic collection sorting, manual
 ordering, non-destructive row management, persistent sort preferences, and
-snapshot revision checks. GUI import/settings integration, a filename-evaluator
-adapter with bounded directory counts, ordered evaluation, request-currency
-checks, progress and cancellation. These domain services are not connected to
-the GUI. M2-E GUI integration, final processing-readiness checks, destination
-planning and filesystem operations remain unimplemented.
+snapshot revision checks. M2-D adds a filename-evaluator adapter with bounded
+directory counts, ordered evaluation, request-currency checks, progress and
+cancellation. These domain services are not connected to the GUI. M2-E1 adds
+the main-window, shared empty collection presentation, and per-mode column
+customization foundation. Discovery/evaluation integration, collection
+management bindings, final processing-readiness checks, destination planning,
+and filesystem operations remain unimplemented.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -26,9 +28,11 @@ planning and filesystem operations remain unimplemented.
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
 | M1 | Complete | Pure parser/evaluator, extension resolution, and filename validation, including the M1-D.12 DD-061 diagnostic correction. Application and filesystem integration remain outside M1. |
-| M2 | In progress | M2-A through M2-D domain services implemented. M2-E GUI integration and filesystem processing remain planned. |
+| M2 | In progress | M2-A through M2-D domain services implemented; M2-E GUI integration is in progress. Filesystem processing remains planned. |
 | M2-D | Complete | Collection-backed filename evaluation, physical directory counts, bounded metadata cache, structured diagnostics, request currency, background progress and cancellation. |
-| M2-E | Planned | GUI integration, preview rendering and narrower evaluation-validity presentation. |
+| M2-E | In progress | GUI integration, preview rendering and narrower evaluation-validity presentation. |
+| M2-E1 | Complete | Main-window layout, shared empty collection presentation, context-specific columns, and persisted appearance and geometry preferences. |
+| M2-E2/E3 | Planned | Discovery/import integration and shared collection management bindings. |
 | M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
@@ -38,6 +42,97 @@ planning and filesystem operations remain unimplemented.
 
 The later milestone descriptions follow the local implementation roadmap; they
 are plans, not implementation evidence.
+
+## M2-E1 — Main window and shared collection presentation
+
+The main window uses a vertical, responsive layout with a compact Settings
+header, prominent Bulk Rename / Duplicate Finder / Repacker tabs, compact
+mode-specific panels, a common collection toolbar, a full-width Treeview with
+horizontal and vertical scrollbars, movement controls, a collection summary,
+and a shared progress/status/action area. The table receives the expandable
+window space. Fresh startup selects Bulk Rename and constructs one empty
+`WorkingCollection` from saved sort preferences. All tabs use that collection
+and the same Treeview; row IDs are stable collection entry IDs. Temporary
+collection membership, selection, manual order, and unsaved format edits are
+not saved.
+
+DD-079 through DD-085 are recorded as follows:
+
+| Decision | M2-E1 status |
+| --- | --- |
+| DD-079 — Horizontal window layout with full-width Treeview | Implemented with responsive grid geometry; no permanent sidebar. |
+| DD-080 — Context-specific, customizable columns | Implemented with the approved per-mode defaults, fixed order, required-column enforcement, optional visibility, saved widths, native header resizing, Restore Defaults, and header context-menu access. |
+| DD-081 — Shared collection toolbar and list interactions | Shared controls and movement buttons are present. Import, remove, clear, sort, and movement controls remain disabled pending M2-E2/E3 bindings. |
+| DD-082 — Compact Bulk Rename format controls | Editable format field and the three approved built-in presets are present. Insert Token, Profiles, Format Reference, and live evaluation remain disabled/deferred. Unsaved field edits are not persisted. |
+| DD-083 — Optional post-processing Counter | The switch is present, defaults OFF, and has no execution effect. The algorithm remains deferred. |
+| DD-084 — Native toggle switches for boolean operation options | Single Folder, Auto-clean, and Counter use CustomTkinter switches. Single Folder and Counter only change session-local UI state. Auto-clean is disabled. |
+| DD-085 — Problematic-row highlighting and expression-wide errors | A subtle problem-row Treeview style is available for later rendering. Live evaluation, row diagnostics, expression-wide invalidation, and preview clearing remain deferred. |
+
+The default visible columns are:
+
+| Mode | Default visible columns, in order |
+| --- | --- |
+| Bulk Rename | Row, Original filename, New filename, Size, Status |
+| Duplicate Finder | Row, Filename, Size, Group, Status |
+| Repacker | Row, Original filename, New filename, Size, Resolution, Length, Status |
+
+Initial widths in logical pixels are Row 50; Original filename 280; New
+filename 280; Filename 320; Status 130; Size 100; Group 90; Resolution 120;
+Length 100; Extension 85; File type 100; Date created and Date modified 160
+each; Parent directory and Import root 200 each; Full path 400. These are
+resizable starting values, and per-mode adjusted widths (including hidden
+columns) persist independently.
+
+Bulk Rename, Duplicate Finder, and Repacker have separate default column
+layouts. Optional columns include Resolution, Length, Extension, File type, Date
+created, Date modified, Parent directory, Import root, and Full path; Row and
+Size may be hidden. Filename, New filename where applicable, and Status cannot
+be hidden. Width preferences, including hidden columns, are independent per
+mode. Missing, invalid, and unknown saved preferences fall back safely without
+altering unrelated settings. “— (not probed)” identifies applicable media
+metadata that is not available yet; blank cells indicate non-applicability.
+Resolution and length probing, duplicate group data, proposed names, and
+processing statuses are not fabricated. File type is inferred from the
+filename extension using Python's MIME database; file contents are not checked.
+
+The header Settings dialog exposes System, Light, and Dark appearance modes.
+System is the default and updates the Treeview styling with the detected system
+appearance. Window size and position are saved in the existing configuration
+and clamped to the current Tk virtual-screen bounds. Physical monitor-layout and
+DPI-change acceptance remains a manual M2-E5 check.
+
+Representative empty-state Windows GUI captures are in
+[`screenshots/m2-e1/`](screenshots/m2-e1/): [Bulk Rename](screenshots/m2-e1/bulk-rename.png),
+[Duplicate Finder](screenshots/m2-e1/duplicate-finder.png), [Repacker](screenshots/m2-e1/repacker.png),
+and [Columns customization](screenshots/m2-e1/columns.png).
+
+Counter's deferred contract is read-only validation after a completed rename,
+deduplication, or repacking operation and applicable cleanup. It will validate
+resulting directories independently, inspect actual resulting filenames,
+infer varying numerical sequence components across files while ignoring
+constant numbers, and compare the inferred values with the contiguous range
+from 1 through the relevant file count. It will identify missing, repeated, and
+out-of-range values; report ambiguous or undetectable sequences as inconclusive;
+never guess between equally plausible components; never modify files; never
+block, reverse, or invalidate completed processing; and include findings in
+the operation summary. Mixed numbered/unnumbered files, partial operation
+outcomes, and unrelated files already in result directories remain open until
+Counter implementation is specified.
+
+The later DD-085 contract requires expression-wide syntax errors to highlight
+the format field, show one diagnostic, clear stale filename previews, and mark
+affected rows Invalid format while keeping row backgrounds neutral. File-specific
+errors highlight only affected rows subtly, retain textual status, and expose
+detailed diagnostics through a row context menu. Normal rows stay neutral;
+text supplements color; contrast and selection remain clear in Light and Dark
+modes; stale previews are not shown as current; any evaluation error invalidates
+the rename batch; and destination-collision checks remain assigned to M3.
+
+All unconnected controls remain disabled. No automatic import, evaluation,
+cleanup, or file operation occurs. The main window exposes the shared collection
+as `root.application.collection` and provides
+`root.application.refresh_collection()` for later GUI-thread integration. Actual
+discovery and evaluation services are not started by this slice.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 
@@ -262,9 +357,11 @@ is cooperative and has no bound while a filesystem call is blocked.
 M2-D integrates and preserves the applicable clauses of DD-007, DD-010,
 DD-020 through DD-026, DD-031, DD-048, DD-049, DD-051, DD-057, DD-060, DD-061,
 DD-065, DD-067, DD-069 through DD-075, DD-077 and DD-078. DD-076 destination
-selection remains for the future planner. M2-E GUI integration, incomplete
-import acknowledgment UI, duplicate analysis, destination collision checks,
-execution preflight and all filesystem mutations remain pending. M3 must force
+selection remains for the future planner. M2-E1 provides the main-window shell
+and shared collection presentation. Remaining M2-E integration includes
+discovery/import acknowledgment, collection management, duplicate analysis,
+preview evaluation and destination collision checks. Execution preflight and
+all filesystem mutations remain pending. M3 must force
 fresh required counts and independently revalidate sources, filesystem
 metadata, destination availability, target-volume constraints and collisions;
 metadata observations do not authorize execution.
