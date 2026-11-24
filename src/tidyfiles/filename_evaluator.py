@@ -16,7 +16,10 @@ from tidyfiles.filename_format import (
 
 @dataclass(frozen=True, slots=True)
 class FileEvaluationContext:
-    """Immutable per-file inputs; indexes are zero-based and counts are sizes."""
+    """Immutable per-file inputs; indexes are zero-based and counts are sizes.
+
+    Extension values may have a leading dot; an empty string means extensionless.
+    """
 
     original_stem: str
     file_identifier: str | None = None
@@ -29,6 +32,9 @@ class FileEvaluationContext:
     parent_collection_size: int | None = None
     physical_file_count: int | None = None
     physical_directory_count: int | None = None
+    source_extension: str | None = None
+    intended_output_extension: str | None = None
+    is_conversion: bool = False
 
 
 class FilenameEvaluationError(ValueError):
@@ -39,8 +45,8 @@ class FilenameEvaluationError(ValueError):
         reason: str,
         *,
         context: FileEvaluationContext,
-        position: int,
-        token: str,
+        position: int | None,
+        token: str | None,
     ) -> None:
         self.reason = reason
         self.file_identifier = context.file_identifier
@@ -48,15 +54,21 @@ class FilenameEvaluationError(ValueError):
         self.position = position
         self.token = token
         file_label = context.file_identifier or context.original_stem
-        super().__init__(f"{file_label}: {reason} at offset {position} in {token!r}")
+        detail = f"{file_label}: {reason}"
+        if position is not None:
+            detail += f" at offset {position}"
+        if token is not None:
+            detail += f" in {token!r}"
+        super().__init__(detail)
 
 
 @dataclass(frozen=True, slots=True)
 class FileEvaluationResult:
-    """One batch item's diagnostic preview result."""
+    """One batch item's raw value and extension-resolved candidate, if available."""
 
     context: FileEvaluationContext
     value: str | None = None
+    candidate_filename: str | None = None
     error: FilenameEvaluationError | None = None
 
 
@@ -144,6 +156,92 @@ def _padded_number(value: int, width: int) -> str:
 def _directory_key(identity: str) -> str:
     """Normalize Windows separators and case without consulting the filesystem."""
     return ntpath.normcase(ntpath.normpath(identity))
+
+
+def _normalize_extension(extension: str) -> str:
+    """Use extension text without its optional leading period."""
+    return extension[1:] if extension.startswith(".") else extension
+
+
+def _extension_error(
+    reason: str,
+    context: FileEvaluationContext,
+    token: TokenOccurrence | None = None,
+) -> NoReturn:
+    raise FilenameEvaluationError(
+        reason,
+        context=context,
+        position=None if token is None else token.start,
+        token=None if token is None else token.raw,
+    )
+
+
+def _output_extension(
+    context: FileEvaluationContext,
+    token: TokenOccurrence | None = None,
+) -> str:
+    extension = (
+        context.intended_output_extension if context.is_conversion else context.source_extension
+    )
+    label = "Intended conversion extension" if context.is_conversion else "Source extension"
+    if extension is None:
+        _extension_error(f"{label} is unavailable", context, token)
+    return _normalize_extension(extension)
+
+
+def _terminal_ext_token(parsed: ParsedFormat, index: int) -> bool:
+    return (
+        index == len(parsed.parts) - 1
+        and index > 0
+        and isinstance(parsed.parts[index], TokenOccurrence)
+        and parsed.parts[index].kind is TokenKind.EXT
+        and isinstance(parsed.parts[index - 1], LiteralSpan)
+        and parsed.parts[index - 1].text.endswith(".")
+    )
+
+
+def resolve_extension(
+    parsed: ParsedFormat,
+    raw_text: str,
+    context: FileEvaluationContext,
+) -> str:
+    """Assemble an extension-resolved candidate without filename validation."""
+    output_extension = _output_extension(context)
+    parts = parsed.parts
+    remove_length = 0
+
+    if parts and _terminal_ext_token(parsed, len(parts) - 1):
+        remove_length = len(output_extension) + 1
+        suffix = "." + output_extension
+        if not raw_text.casefold().endswith(suffix.casefold()):
+            _extension_error(
+                "Evaluated terminal extension does not match its declaration",
+                context,
+                parts[-1],
+            )
+    elif parts and isinstance(parts[-1], LiteralSpan):
+        recognized_extensions = [context.source_extension]
+        if context.is_conversion:
+            recognized_extensions.append(context.intended_output_extension)
+        candidates = {
+            value
+            for value in recognized_extensions
+            if value is not None and _normalize_extension(value)
+        }
+        for extension in sorted(candidates, key=len, reverse=True):
+            suffix = "." + _normalize_extension(extension)
+            literal = parts[-1].text
+            if literal.casefold().endswith(suffix.casefold()):
+                if not raw_text.casefold().endswith(suffix.casefold()):
+                    _extension_error(
+                        "Evaluated text does not match its terminal extension declaration",
+                        context,
+                    )
+                remove_length = len(suffix)
+                break
+
+    stem = raw_text[:-remove_length] if remove_length else raw_text
+    return stem + (f".{output_extension}" if output_extension else "")
 
 
 def _numeric_widths_for_file(
@@ -270,7 +368,7 @@ def evaluate_format(
     working_stem = context.original_stem
     widths = numeric_widths or _numeric_widths_for_file(parsed, context)
 
-    for part in parsed.parts:
+    for part_index, part in enumerate(parsed.parts):
         if isinstance(part, LiteralSpan):
             output.append(part.text)
             continue
@@ -282,6 +380,15 @@ def evaluate_format(
         if kind is TokenKind.NAME:
             _arguments(part, 0, context)
             output.append(context.original_stem)
+        elif kind is TokenKind.EXT:
+            _arguments(part, 0, context)
+            if _terminal_ext_token(parsed, part_index):
+                extension = _output_extension(context, part)
+            else:
+                extension = context.source_extension
+                if extension is None:
+                    _raise_error("Source extension is unavailable", context, part)
+            output.append(_normalize_extension(extension))
         elif kind is TokenKind.WORD:
             if len(part.arguments) > 1:
                 _raise_error("Malformed token arguments", context, part)
@@ -440,5 +547,12 @@ def evaluate_batch(
         except FilenameEvaluationError as error:
             results.append(FileEvaluationResult(context, error=error))
         else:
-            results.append(FileEvaluationResult(context, value=value))
+            try:
+                candidate = resolve_extension(parsed, value, context)
+            except FilenameEvaluationError as error:
+                results.append(FileEvaluationResult(context, value=value, error=error))
+            else:
+                results.append(
+                    FileEvaluationResult(context, value=value, candidate_filename=candidate)
+                )
     return BatchEvaluationResult(tuple(results))

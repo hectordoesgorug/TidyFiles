@@ -16,6 +16,7 @@ def _file(
     parent: str = "Photos",
     files: int | None = 4,
     directories: int | None = 0,
+    extension: str | None = "",
 ) -> FileEvaluationContext:
     return FileEvaluationContext(
         stem,
@@ -25,6 +26,7 @@ def _file(
         parent_identity=identity,
         physical_file_count=files,
         physical_directory_count=directories,
+        source_extension=extension,
     )
 
 
@@ -201,6 +203,7 @@ def test_batch_collects_all_file_errors_and_keeps_valid_diagnostic_values() -> N
 
     assert not result.is_valid
     assert [file.value for file in result.files] == ["two", None, "four"]
+    assert [file.candidate_filename for file in result.files] == ["two", None, "four"]
     assert [error.file_identifier for error in result.errors] == ["single"]
 
 

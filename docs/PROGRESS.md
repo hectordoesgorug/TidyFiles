@@ -6,15 +6,15 @@ The M0 foundation and minimal GUI shell are implemented. The application opens
 with an empty collection and exposes no file-processing or destructive actions.
 M1 parser and partial pure evaluator work is available in the working tree;
 neither is integrated into the GUI or connected to filesystem operations. The
-M1-B2 implementation baseline was `main` at
-`67af79a222473a27f9b1e9d7f46ffb3d0ed8ad75`.
+M1-C1 implementation baseline was `main` at
+`13cf6a6646177bbc68746fbeda090b7dc9c3e6a0`.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
 | M0-A | Complete | Baseline repository and legacy-reference inspection. |
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
-| M1 | In progress | Strict parser and pure per-file/batch evaluation for text, directory/count context, numeric and alphabetic sequences implemented; extension handling, filename validation, and filesystem planning remain planned. |
+| M1 | In progress | Strict parser and pure per-file/batch evaluation for all tokens, with extension-resolved candidates, implemented; Windows filename validation and filesystem planning remain planned. |
 | M2 | Planned | Shared collection, import, scanning, ordering, and cancellation. |
 | M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
 | M4 | Planned | Duplicate analysis and verification. |
@@ -47,6 +47,12 @@ The focused parser/evaluator run passed all 142 tests. These are local results;
 no GitHub Actions run or IDE type-checker result is claimed. Batch fixtures use
 immutable synthetic file metadata and do not access user files.
 
+For M1-C1, local Ruff, all 206 pytest tests, compileall, and `git diff --check`
+passed on the working tree based on `13cf6a6646177bbc68746fbeda090b7dc9c3e6a0`.
+The focused parser/evaluator/extension run passed all 169 tests. These are local
+results; no GitHub Actions run or IDE type-checker result is claimed. Extension
+tests use synthetic names and metadata and do not access user files.
+
 ## Open questions and deferred decisions
 
 - DD-061 comma clarification is approved: commas inside the final string
@@ -59,8 +65,18 @@ immutable synthetic file metadata and do not access user files.
 - M1-B2 batch evaluation derives effective indexes from the supplied ordered
   snapshot, uses per-file import roots and physical-count metadata, and blocks
   batch validity when any file fails. It does not enumerate directories or
-  authorize filesystem processing. `<Ext>`, extension management, filename
-  sanitization, and collision planning remain unimplemented.
+  authorize filesystem processing. M1-C1 adds source/output extension context
+  and extension-resolved candidates; it does not validate Windows filenames or
+  plan destination collisions.
+- `<Ext>` emits the source extension except when it is the terminal `.<Ext>`
+  declaration, which emits the intended output extension. Terminal literal
+  suffixes matching the source or output extension are recognized case
+  insensitively; extension-like text from tokens remains stem content. Candidate
+  assembly preserves supplied extension spelling and is not final validation.
+  Extension metadata accepts an optional leading dot; an empty string represents
+  a known extensionless name, while `None` represents unavailable metadata.
+  Extension metadata accepts an optional leading dot; an empty string represents
+  a known extensionless name, while `None` represents unavailable metadata.
 - Numeric widths use a two-digit minimum. Repeated tokens share width per
   numeric family; `<IncNrDir>` width is calculated separately for each parent
   group, while Windows-normalized parent identity distinguishes groups.

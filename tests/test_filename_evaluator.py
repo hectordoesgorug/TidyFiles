@@ -92,7 +92,6 @@ def test_emitted_text_is_not_reinterpreted_as_tokens() -> None:
         ("one two", "<Word:0>", "Word index"),
         ("one two", "<Word:3>", "Word index"),
         ("   ", "<Word>", "Word index"),
-        ("ABCDE", "<Ext>", "not supported"),
     ],
 )
 def test_evaluation_errors_include_file_token_and_offset(
