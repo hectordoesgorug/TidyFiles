@@ -13,7 +13,6 @@ from tidyfiles.instance import (
     SingleInstanceGuard,
 )
 
-
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows named mutex tests")
 
 _OWNER_SCRIPT = """

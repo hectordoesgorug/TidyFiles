@@ -7,7 +7,6 @@ import os
 import threading
 from ctypes import wintypes
 
-
 DEFAULT_MUTEX_NAME = r"Local\TidyFiles.SingleInstance"
 ERROR_ALREADY_EXISTS = 183
 
