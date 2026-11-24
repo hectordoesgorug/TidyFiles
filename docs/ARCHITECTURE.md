@@ -1,0 +1,65 @@
+# Architecture
+
+TidyFiles currently consists of a small Python package with a Windows desktop
+shell and foundational startup, configuration, storage, logging, and
+single-instance modules. File-processing engines are planned and are not part of
+the current application.
+
+## Startup and shutdown
+
+```mermaid
+flowchart TD
+    A[python -m tidyfiles] --> B[__main__.py]
+    B --> C[startup.main]
+    C --> D[Acquire SingleInstanceGuard]
+    D -->|Already running| E[Show message and exit]
+    D -->|Acquired| F[Resolve writable storage]
+    F --> G[Configure rotating logger]
+    G --> H[Load config.json]
+    H --> I[Create CustomTkinter window]
+    I --> J[Run main loop]
+    J --> K[Close mutex guard]
+    H -->|Startup error| L[Log and display error]
+    I -->|Startup error| L
+    L --> K
+```
+
+The second-instance path ends before storage selection, logging, configuration
+loading, or GUI import. The guard remains held through the GUI event loop and is
+released on orderly shutdown. Bringing an existing window to the foreground is
+not implemented.
+
+## Package components
+
+| Module | Current responsibility |
+| --- | --- |
+| `src/tidyfiles/__init__.py` | Package version. |
+| `src/tidyfiles/__main__.py` | `python -m tidyfiles` entry point. |
+| `src/tidyfiles/startup.py` | Mutex-first startup, storage/config/log initialization, error reporting, GUI launch, and orderly guard cleanup. |
+| `src/tidyfiles/instance.py` | Windows named-mutex acquisition, active-owner rejection, abandoned-mutex recovery, and handle cleanup. |
+| `src/tidyfiles/storage.py` | Writable application-directory selection and `%LOCALAPPDATA%\TidyFiles` fallback for ordinary application data. |
+| `src/tidyfiles/config.py` | Schema-v1 configuration defaults, validation, loading, and atomic saving. Loading invalid configuration reports an error without rewriting it. |
+| `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
+| `src/tidyfiles/app.py` | System-appearance CustomTkinter shell, three operation tabs, one initially empty shared Treeview, and status text. |
+
+The shell does not import files, maintain a file collection, parse or evaluate
+rename formats, hash duplicates, repack media, or modify the filesystem.
+
+## Tests and CI
+
+Tests are in `tests/` and use pytest. Configuration, storage, logging, package
+startup, and Windows mutex behavior have focused coverage. Windows-specific
+mutex tests use independent subprocesses and temporary directories; startup
+tests use isolated temporary paths and fakes so they do not require a visible
+desktop.
+
+`.github/workflows/ci.yml` runs on `windows-latest`, sets up Python 3.13,
+installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
+
+## Planned components
+
+The filename parser and evaluator, shared collection and scanning services,
+destination planner and filesystem transaction layer, duplicate verification,
+and repacker are future components. Their behavior is specified in local
+planning references, not implemented in this package. Do not infer implementation
+status from an approved requirement.
