@@ -229,3 +229,16 @@ Destination planning, filesystem transactions, duplicate verification, and
 repacking are future components. Their behavior is
 specified in local planning references, not implemented in this package. Do not
 infer implementation status from an approved requirement.
+
+## Deferred package restructuring
+
+M6.1 (Package Restructuring and Architectural Cleanup) is planned after M6 and
+before M7. It will improve source organization and maintainability while
+preserving established application behavior. A preliminary illustrative
+package layout and the checkpoint requirements are recorded in
+[`docs/PROGRESS.md`](PROGRESS.md). The example does not prescribe the final
+hierarchy: module placement will be decided after M6 by inspecting the
+implemented features and their dependencies. Until then, continue ordinary
+feature development and introduce feature-specific subpackages when complexity
+justifies them; do not undertake comprehensive restructuring early or combine
+unrelated functionality merely to reduce the number of modules.

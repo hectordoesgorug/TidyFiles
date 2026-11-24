@@ -33,10 +33,54 @@ planning and filesystem operations remain unimplemented.
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
+| M6.1 | Planned | Package restructuring and architectural cleanup after M6 and before M7; improve source organization and maintainability without changing established application behavior. |
 | M7 | Planned | End-to-end integration, packaging, release readiness, and coverage closure. |
 
 The later milestone descriptions follow the local implementation roadmap; they
 are plans, not implementation evidence.
+
+## M6.1 — Package Restructuring and Architectural Cleanup
+
+This planned maintenance checkpoint follows M6 (Complete GUI Integration) and
+must be completed before M7 (Packaging and Release). Its objective is to
+improve source-code organization and maintainability without changing
+established application behavior.
+
+The following package layout is illustrative and preliminary, not a binding
+implementation specification:
+
+```text
+src/tidyfiles/
+├── __init__.py
+├── __main__.py
+├── app.py
+├── core/
+├── rename/
+├── deduplicator/
+├── repacker/
+├── filesystem/
+├── infrastructure/
+└── ui/
+```
+
+The final hierarchy and module placement will be determined by inspecting the
+implemented feature modules and their dependency relationships after M6, when
+those boundaries are substantially established.
+
+The checkpoint will preserve established functionality; organize modules by
+functional responsibility; separate feature-specific logic from shared
+services; and maintain clear dependency boundaries without circular imports.
+It will update affected imports, tests, entry points, and resource paths; review
+package discovery and future packaging compatibility; preserve configuration
+and portable-storage behavior; and avoid unnecessary abstractions, dependencies,
+or algorithm rewrites. Verification will run the complete regression suite and
+Windows CI. Restructuring must be completed as a separate, independently
+verified commit before packaging begins.
+
+Until M6.1, ordinary feature development continues without comprehensive
+package restructuring. Feature-specific subpackages may be created earlier
+when implementation complexity justifies them; unrelated functionality should
+not be combined into existing modules solely to minimize the number of files.
 
 ## Verification record
 
