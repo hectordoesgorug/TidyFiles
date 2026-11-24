@@ -5,20 +5,20 @@
 The M0 foundation and minimal GUI shell are implemented. The application opens
 with an empty collection and exposes no file-processing or destructive actions.
 M1 parser, evaluator, extension resolution, and pure filename validation are
-implemented at `50a97a929130c5a6502ac9fc751d9f15700b79bb`; none are integrated
-into the GUI or connected to filesystem operations. M1-D.12 corrected the
-DD-061 parser diagnostic to retain the complete input expression. The audit
-recommends M1 closure; the milestone remains listed as in progress pending its
-formal closure. See `docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-
-decision audit and historical finding.
+complete, including M1-D.12's DD-061 parser diagnostic correction. They remain
+unconnected to the GUI and filesystem operations. See
+`docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-decision audit and
+historical verification record. M2-A adds the GUI-independent shared working
+collection and import-session lifecycle. Scanning, GUI import integration,
+filename-evaluator adaptation, and filesystem operations are not implemented.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
 | M0-A | Complete | Baseline repository and legacy-reference inspection. |
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
-| M1 | In progress | Pure parser/evaluator and filename validation implemented; M1-D.12 resolves the DD-061 diagnostic gap, and the audit recommends closure. Filesystem planning and application integration remain planned. |
-| M2 | Planned | Shared collection, import, scanning, ordering, and cancellation. |
+| M1 | Complete | Pure parser/evaluator, extension resolution, and filename validation, including the M1-D.12 DD-061 diagnostic correction. Application and filesystem integration remain outside M1. |
+| M2 | In progress | M2-A shared collection domain model and import-session lifecycle implemented. File/folder scanning, GUI import, and evaluator adaptation remain planned. |
 | M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
@@ -79,6 +79,17 @@ confirmed expression context on every string-input parser error path. No
 DD-061 finding is resolved; no other M1
 pure-engine closure blocker was identified. M2/M3/M5/M6 integration remains
 planned, and no Windows destination-volume behavior is claimed.
+
+For M2-A, local verification ran on Windows with Python 3.13.17, on the
+working tree based on `6c8c81d6286aa1e887330ebed754de15b02b03fd`. The focused
+collection suite passed all 11 tests; Ruff passed; the full pytest suite passed
+all 278 tests with no skips; `compileall` passed; and `git diff --check` passed
+with line-ending conversion warnings for the two edited Markdown files. No
+GitHub Actions result is claimed. The tests cover lexical Windows path keys,
+path-based deduplication, context preservation, import-session finalization and
+rollback, ordered immutable snapshots, optional metadata, and source-file
+preservation. Scanning, asynchronous worker behavior, GUI integration, and
+filesystem identity acquisition remain unverified and unimplemented.
 
 ## Open questions and deferred decisions
 

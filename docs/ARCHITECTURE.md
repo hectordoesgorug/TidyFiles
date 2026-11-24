@@ -3,8 +3,10 @@
 TidyFiles currently consists of a small Python package with a Windows desktop
 shell and foundational startup, configuration, storage, logging, and
 single-instance modules. The pure filename engine is implemented as a library
-component but is not connected to the GUI. Collection, preview, destination
-planning, and filesystem processing remain planned.
+component but is not connected to the GUI. The shared in-memory collection
+domain model supports ordered snapshots and import-session finalization or
+rollback; filesystem scanning, preview, destination planning, and processing
+remain planned.
 
 ## Startup and shutdown
 
@@ -42,13 +44,24 @@ not implemented.
 | `src/tidyfiles/config.py` | Schema-v1 configuration defaults, validation, loading, and atomic saving. Loading invalid configuration reports an error without rewriting it. |
 | `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
 | `src/tidyfiles/app.py` | System-appearance CustomTkinter shell, three operation tabs, one initially empty shared Treeview, and status text. |
+| `src/tidyfiles/collection.py` | GUI-independent working collection, lexical Windows path keys, per-entry import context, optional metadata and filesystem identity snapshots, immutable ordered snapshots, and import-session lifecycle. |
 | `src/tidyfiles/filename_format.py` | Pure parser producing immutable, source-ordered literal spans and token occurrences; structured parse errors retain the exact input expression, offset, and optional offending token. |
 | `src/tidyfiles/filename_evaluator.py` | Pure per-file and ordered-batch evaluation of parsed tokens and extensions; returns raw values, resolved candidates, validated names, and file-specific diagnostics. |
 | `src/tidyfiles/filename_validation.py` | Pure legacy-character substitution and validation of one Windows filename component, including reserved device names, Unicode safety, and UTF-16 component length. |
 
-The shell does not import files, maintain a file collection, evaluate parsed
-rename formats in the GUI, hash duplicates, repack media, or modify the
-filesystem. The pure `filename_evaluator.py` module consumes an existing parsed
+The shell does not import files, update the collection, evaluate parsed rename
+formats in the GUI, hash duplicates, repack media, or modify the filesystem.
+`collection.py` stores the selected path spelling and a separate
+case-insensitive, normalized Windows path key without resolving paths or
+accessing the filesystem. Filesystem object identity is optional metadata and
+does not merge distinct paths. Add Folder entries retain that folder as their
+first import root, while Add Files entries use each file's immediate parent;
+separate Add Folder root records carry cleanup authorization. Import sessions
+append provisional entries, then finalize them or remove only their own new
+entries and roots on cancellation. Effective order changes do not change entry
+IDs, and downstream consumers receive immutable ordered snapshots. The model
+does not scan paths or modify source files. The pure `filename_evaluator.py`
+module consumes an existing parsed
 expression and immutable per-file metadata. It evaluates literal text, original
 stems, text extraction and manipulation, stored directory names, supplied
 physical counts, collection sequences, and source/output extension context.
@@ -96,8 +109,8 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Actual directory enumeration and count caching, the shared collection and
-scanning services, destination planner and filesystem transaction layer,
+Actual directory enumeration and count caching, scanning services, destination
+planner and filesystem transaction layer,
 duplicate verification, and repacker are future components. Their behavior is
 specified in local planning references, not implemented in this package. Do not
 infer implementation status from an approved requirement.
