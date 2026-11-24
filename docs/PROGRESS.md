@@ -4,17 +4,17 @@
 
 The M0 foundation and minimal GUI shell are implemented. The application opens
 with an empty collection and exposes no file-processing or destructive actions.
-M1 parser and partial pure evaluator work is available in the working tree;
-neither is integrated into the GUI or connected to filesystem operations. The
-M1-C1 implementation baseline was `main` at
-`13cf6a6646177bbc68746fbeda090b7dc9c3e6a0`.
+M1 parser, evaluator, extension resolution, and pure filename validation are
+available in the working tree; none are integrated into the GUI or connected to
+filesystem operations. The M1-C2 implementation is based on `main` at
+`e9a6491d1bb033f295c88eb8934d76929ca37e`.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
 | M0-A | Complete | Baseline repository and legacy-reference inspection. |
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
-| M1 | In progress | Strict parser and pure per-file/batch evaluation for all tokens, with extension-resolved candidates, implemented; Windows filename validation and filesystem planning remain planned. |
+| M1 | In progress | Strict parsing, per-file/batch evaluation, extension resolution, and pure Windows filename sanitization/validation implemented; filesystem planning remains planned. |
 | M2 | Planned | Shared collection, import, scanning, ordering, and cancellation. |
 | M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
 | M4 | Planned | Duplicate analysis and verification. |
@@ -53,28 +53,31 @@ The focused parser/evaluator/extension run passed all 169 tests. These are local
 results; no GitHub Actions run or IDE type-checker result is claimed. Extension
 tests use synthetic names and metadata and do not access user files.
 
+For M1-C2, local verification was run on the uncommitted working tree based on
+`e9a6491d1bb033f295c88eb8934d76929ca37e`: Ruff passed, pytest passed all 259
+tests, compileall passed, and `git diff --check` passed. No `pyright` or `mypy`
+executable was available. The new validator tests use synthetic names and
+metadata; no target-volume or filesystem behavior is verified.
+
 ## Open questions and deferred decisions
 
 - DD-061 comma clarification is approved: commas inside the final string
   argument of `RepS`, `RepM`, and `Ins` are literal content. The parser preserves
   them, and the partial evaluator uses them verbatim.
 - M1-B1 defines `MoveX:Y` against the remaining stem, supports zero-length
-  `RepM` insertion, and allows empty replacement strings. Literal
-  dot/extension interaction, Unicode normalization, and Windows device-name
-  variants remain for later filename validation work.
+  `RepM` insertion, and allows empty replacement strings. M1-C2 preserves
+  Unicode sequences without normalization and validates Windows device names.
 - M1-B2 batch evaluation derives effective indexes from the supplied ordered
   snapshot, uses per-file import roots and physical-count metadata, and blocks
   batch validity when any file fails. It does not enumerate directories or
   authorize filesystem processing. M1-C1 adds source/output extension context
-  and extension-resolved candidates; it does not validate Windows filenames or
-  plan destination collisions.
+  and extension-resolved candidates; M1-C2 validates filename components but
+  does not plan destination collisions.
 - `<Ext>` emits the source extension except when it is the terminal `.<Ext>`
   declaration, which emits the intended output extension. Terminal literal
   suffixes matching the source or output extension are recognized case
   insensitively; extension-like text from tokens remains stem content. Candidate
   assembly preserves supplied extension spelling and is not final validation.
-  Extension metadata accepts an optional leading dot; an empty string represents
-  a known extensionless name, while `None` represents unavailable metadata.
   Extension metadata accepts an optional leading dot; an empty string represents
   a known extensionless name, while `None` represents unavailable metadata.
 - Numeric widths use a two-digit minimum. Repeated tokens share width per

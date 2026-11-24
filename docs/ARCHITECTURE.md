@@ -42,7 +42,8 @@ not implemented.
 | `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
 | `src/tidyfiles/app.py` | System-appearance CustomTkinter shell, three operation tabs, one initially empty shared Treeview, and status text. |
 | `src/tidyfiles/filename_format.py` | Pure parser producing immutable, source-ordered literal spans and token occurrences with source offsets and preserved argument strings. |
-| `src/tidyfiles/filename_evaluator.py` | Pure per-file and ordered-batch evaluation of all parsed tokens, including extension handling; returns raw values, extension-resolved candidates, and file-specific diagnostics. |
+| `src/tidyfiles/filename_evaluator.py` | Pure per-file and ordered-batch evaluation of parsed tokens and extensions; returns raw values, resolved candidates, validated names, and file-specific diagnostics. |
+| `src/tidyfiles/filename_validation.py` | Pure legacy-character substitution and validation of one Windows filename component, including reserved device names, Unicode safety, and UTF-16 component length. |
 
 The shell does not import files, maintain a file collection, evaluate parsed
 rename formats in the GUI, hash duplicates, repack media, or modify the
@@ -59,8 +60,21 @@ calculated separately for each parent group. `<Ext>` emits the source extension
 except for terminal `.<Ext>`, which emits the intended output extension.
 Extension assembly recognizes only terminal literal suffixes matching the
 source or intended output extension. Each batch result retains raw evaluated
-text separately from its extension-resolved candidate. Candidates have not
-passed Windows filename validation and are not an executable filesystem plan.
+text, its extension-resolved candidate, and (when valid) the sanitized filename
+separately. The nine legacy invalid characters are substituted after evaluation;
+emitted text is not parsed again. Other Unicode code points and their
+normalization form are preserved. Validation rejects empty or whitespace-only
+names, empty generated stems, `.`/`..`, trailing ASCII spaces or periods,
+controls, invalid Unicode, overlong components, and reserved DOS device
+basenames (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM1`–`COM9`,
+`LPT1`–`LPT9`, and COM/LPT superscript `¹`, `²`, and `³` forms), including
+device basenames followed by extensions or multiple dotted suffixes. Component
+length counts the final extension and separator in UTF-16 code units, with a
+default limit of 255. Batch validity fails if any evaluation, extension, or
+filename validation error occurs, and an empty format cannot authorize a rename
+batch. Validated candidates are still not an executable filesystem plan. The
+validator does not inspect target volumes, enforce full-path limits, check
+collisions, or access the filesystem.
 Source and target extensions may be supplied with or without a leading dot;
 their supplied spelling is preserved in candidates. An empty extension means
 the source or intended output has no suffix, while `None` means metadata is
@@ -81,9 +95,8 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Windows filename sanitization and validation, actual directory enumeration and
-count caching, the shared collection and scanning services, destination
-planner and filesystem transaction layer, duplicate verification, and repacker
-are future components. Their behavior is specified in local planning
-references, not implemented in this package. Do not infer implementation
-status from an approved requirement.
+Actual directory enumeration and count caching, the shared collection and
+scanning services, destination planner and filesystem transaction layer,
+duplicate verification, and repacker are future components. Their behavior is
+specified in local planning references, not implemented in this package. Do not
+infer implementation status from an approved requirement.

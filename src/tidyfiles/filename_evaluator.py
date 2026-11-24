@@ -12,6 +12,10 @@ from tidyfiles.filename_format import (
     TokenKind,
     TokenOccurrence,
 )
+from tidyfiles.filename_validation import (
+    FilenameValidationError,
+    sanitize_and_validate_filename,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,12 +68,14 @@ class FilenameEvaluationError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class FileEvaluationResult:
-    """One batch item's raw value and extension-resolved candidate, if available."""
+    """One batch item's raw, resolved, and validated filename values."""
 
     context: FileEvaluationContext
     value: str | None = None
     candidate_filename: str | None = None
     error: FilenameEvaluationError | None = None
+    validated_filename: str | None = None
+    validation_error: FilenameValidationError | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,8 +85,13 @@ class BatchEvaluationResult:
     files: tuple[FileEvaluationResult, ...]
 
     @property
-    def errors(self) -> tuple[FilenameEvaluationError, ...]:
-        return tuple(file.error for file in self.files if file.error is not None)
+    def errors(self) -> tuple[FilenameEvaluationError | FilenameValidationError, ...]:
+        return tuple(
+            error
+            for file in self.files
+            for error in (file.error, file.validation_error)
+            if error is not None
+        )
 
     @property
     def is_valid(self) -> bool:
@@ -206,6 +217,14 @@ def resolve_extension(
     context: FileEvaluationContext,
 ) -> str:
     """Assemble an extension-resolved candidate without filename validation."""
+    return _resolve_extension_parts(parsed, raw_text, context)[1]
+
+
+def _resolve_extension_parts(
+    parsed: ParsedFormat,
+    raw_text: str,
+    context: FileEvaluationContext,
+) -> tuple[str, str]:
     output_extension = _output_extension(context)
     parts = parsed.parts
     remove_length = 0
@@ -241,7 +260,7 @@ def resolve_extension(
                 break
 
     stem = raw_text[:-remove_length] if remove_length else raw_text
-    return stem + (f".{output_extension}" if output_extension else "")
+    return stem, stem + (f".{output_extension}" if output_extension else "")
 
 
 def _numeric_widths_for_file(
@@ -510,6 +529,8 @@ def evaluate_format(
 def evaluate_batch(
     parsed: ParsedFormat,
     contexts: Sequence[FileEvaluationContext],
+    *,
+    max_component_length: int = 255,
 ) -> BatchEvaluationResult:
     """Evaluate an ordered collection snapshot without authorizing partial work."""
     snapshot = tuple(contexts)
@@ -542,17 +563,64 @@ def evaluate_batch(
     widths = _batch_numeric_widths(parsed, tuple(indexed_contexts))
     results: list[FileEvaluationResult] = []
     for context in indexed_contexts:
+        if not parsed.source:
+            error = FilenameEvaluationError(
+                "Filename format is required for rename",
+                context=context,
+                position=None,
+                token=None,
+            )
+            results.append(FileEvaluationResult(context, error=error))
+            continue
         try:
             value = evaluate_format(parsed, context, numeric_widths=widths)
         except FilenameEvaluationError as error:
             results.append(FileEvaluationResult(context, error=error))
         else:
             try:
-                candidate = resolve_extension(parsed, value, context)
+                generated_stem, candidate = _resolve_extension_parts(parsed, value, context)
             except FilenameEvaluationError as error:
                 results.append(FileEvaluationResult(context, value=value, error=error))
             else:
-                results.append(
-                    FileEvaluationResult(context, value=value, candidate_filename=candidate)
+                extension_metadata: list[str] = []
+                output_extension = (
+                    context.intended_output_extension
+                    if context.is_conversion
+                    else context.source_extension
                 )
+                if output_extension is not None:
+                    extension_metadata.append(output_extension)
+                if any(
+                    isinstance(part, TokenOccurrence)
+                    and part.kind is TokenKind.EXT
+                    and not _terminal_ext_token(parsed, index)
+                    for index, part in enumerate(parsed.parts)
+                ) and context.source_extension is not None:
+                    extension_metadata.append(context.source_extension)
+                try:
+                    validated = sanitize_and_validate_filename(
+                        candidate,
+                        generated_stem=generated_stem,
+                        context=context,
+                        extension_metadata=tuple(extension_metadata),
+                        max_component_length=max_component_length,
+                    )
+                except FilenameValidationError as error:
+                    results.append(
+                        FileEvaluationResult(
+                            context,
+                            value=value,
+                            candidate_filename=candidate,
+                            validation_error=error,
+                        )
+                    )
+                else:
+                    results.append(
+                        FileEvaluationResult(
+                            context,
+                            value=value,
+                            candidate_filename=candidate,
+                            validated_filename=validated,
+                        )
+                    )
     return BatchEvaluationResult(tuple(results))
