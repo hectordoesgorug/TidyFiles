@@ -42,11 +42,17 @@ not implemented.
 | `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
 | `src/tidyfiles/app.py` | System-appearance CustomTkinter shell, three operation tabs, one initially empty shared Treeview, and status text. |
 | `src/tidyfiles/filename_format.py` | Pure parser producing immutable, source-ordered literal spans and token occurrences with source offsets and preserved argument strings. |
+| `src/tidyfiles/filename_evaluator.py` | Pure, per-file evaluation of original stems, text extraction, and text-manipulation tokens; returns raw evaluated text. |
 
 The shell does not import files, maintain a file collection, evaluate parsed
-rename formats, hash duplicates, repack media, or modify the filesystem. The
-parser recognizes the approved token grammar, including comma-containing final
-strings in `RepS`, `RepM`, and `Ins`; it does not transform filenames.
+rename formats in the GUI, hash duplicates, repack media, or modify the
+filesystem. The pure `filename_evaluator.py` module evaluates literal text,
+original stems, text extraction, and text-manipulation tokens from an existing
+parsed expression. Its immutable per-file context contains the original stem
+and optional file identifier. Manipulations update a separate working stem in
+source order and emit each resulting stem at that token's position. The parser
+recognizes the approved token grammar, including comma-containing final
+strings in `RepS`, `RepM`, and `Ins`.
 
 ## Tests and CI
 
@@ -61,8 +67,9 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-The filename evaluator and file context, shared collection and scanning
-services, destination planner and filesystem transaction layer, duplicate
-verification, and repacker are future components. Their behavior is specified in
-local planning references, not implemented in this package. Do not infer
-implementation status from an approved requirement.
+Numeric and directory-context token evaluation, collection-wide validation,
+extension management, filename sanitization, the shared collection and
+scanning services, destination planner and filesystem transaction layer,
+duplicate verification, and repacker are future components. Their behavior is
+specified in local planning references, not implemented in this package. Do not
+infer implementation status from an approved requirement.
