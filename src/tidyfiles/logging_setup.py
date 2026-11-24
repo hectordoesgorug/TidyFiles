@@ -7,7 +7,6 @@ import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-
 MAX_LOG_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
 _CONFIGURE_LOCK = threading.Lock()

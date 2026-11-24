@@ -9,7 +9,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-
 SCHEMA_VERSION = 1
 _DEFAULT_CONFIG: dict[str, Any] = {
     "schema_version": SCHEMA_VERSION,

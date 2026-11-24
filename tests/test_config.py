@@ -16,7 +16,9 @@ def test_missing_file_returns_defaults_with_cleanup_disabled(tmp_path: Path) -> 
     assert config["global_settings"]["auto_clear_trash_on_exit"] is False
 
 
-def test_import_does_not_write_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_import_does_not_write_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import tidyfiles.config as config_module
 
     monkeypatch.chdir(tmp_path)
