@@ -1,6 +1,7 @@
-import importlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,14 +17,17 @@ def test_missing_file_returns_defaults_with_cleanup_disabled(tmp_path: Path) -> 
     assert config["global_settings"]["auto_clear_trash_on_exit"] is False
 
 
-def test_import_does_not_write_configuration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import tidyfiles.config as config_module
+def test_import_does_not_write_configuration(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", "import tidyfiles.config"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
 
-    monkeypatch.chdir(tmp_path)
-    importlib.reload(config_module)
-
+    assert result.returncode == 0, result.stderr
     assert list(tmp_path.iterdir()) == []
 
 
