@@ -275,3 +275,11 @@ implemented features and their dependencies. Until then, continue ordinary
 feature development and introduce feature-specific subpackages when complexity
 justifies them; do not undertake comprehensive restructuring early or combine
 unrelated functionality merely to reduce the number of modules.
+
+## Deferred public documentation and repository audit
+
+M6.2 (Public Documentation Sanitization and Repository Audit) is planned after
+M6.1 and before M7, and is required before the first stable v1.0.0 release. It
+will review public-facing documentation and repository organization while
+preserving substantive technical and safety content. The checkpoint scope and
+interim documentation policy are recorded in [`docs/PROGRESS.md`](PROGRESS.md).

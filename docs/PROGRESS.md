@@ -38,6 +38,7 @@ and filesystem operations remain unimplemented.
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
 | M6.1 | Planned | Package restructuring and architectural cleanup after M6 and before M7; improve source organization and maintainability without changing established application behavior. |
+| M6.2 | Planned | Public documentation sanitization and repository audit after M6.1 and before M7; required before the first stable v1.0.0 release. |
 | M7 | Planned | End-to-end integration, packaging, release readiness, and coverage closure. |
 
 The later milestone descriptions follow the local implementation roadmap; they
@@ -176,6 +177,40 @@ Until M6.1, ordinary feature development continues without comprehensive
 package restructuring. Feature-specific subpackages may be created earlier
 when implementation complexity justifies them; unrelated functionality should
 not be combined into existing modules solely to minimize the number of files.
+
+## M6.2 — Public Documentation Sanitization and Repository Audit
+
+This planned checkpoint follows M6.1, precedes M7, and must be completed before
+the first stable v1.0.0 release. Its objective is to make the public repository
+professional, self-contained, and free of unnecessary internal development
+terminology.
+
+The checkpoint will remove internal design-decision identifiers, milestone
+subdivisions, audit identifiers, handover numbers, and agent coordination
+terminology from public-facing documentation. It will replace internal
+references with descriptive, technically accurate language while preserving
+substantive requirements, architecture descriptions, safety policies, and
+relevant verification evidence. The review will cover the README, architecture
+and file-safety documentation, progress records, and other tracked documents.
+Public contributors must be able to build, understand, and contribute to
+TidyFiles without access to ignored planning or legacy references. The review
+will also check repository organization, obsolete documentation, and broken
+references. Appropriate development instructions will remain in `AGENTS.md`,
+without mandatory dependencies on inaccessible private documents. Git history
+will not be rewritten to remove historical terminology.
+
+During M6.2 release preparation, verify this note's accuracy before publication
+and consider including it:
+
+> Historical design records, development planning materials, and legacy implementation references are maintained separately from the public repository.
+>
+> The tracked documentation describes the current application architecture, supported functionality, safety policies, and development requirements. Access to private reference materials is not required to build, use, or contribute to TidyFiles.
+
+Until M6.2, internal identifiers may remain in tracked technical documentation
+where they support requirements traceability and development continuity. Avoid
+unnecessary agent coordination terminology in public-facing prose. Preserve
+ignored `/planning/` and `/legacy/` directories as read-only references, and do
+not prematurely sanitize documentation during active feature development.
 
 ## Verification record
 
