@@ -6,7 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from tidyfiles.config import ConfigError, default_config, load_config, save_config
+from tidyfiles.config import (
+    ConfigError,
+    default_config,
+    get_sorting_preferences,
+    load_config,
+    save_config,
+    set_sorting_preferences,
+)
+from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
 
 
 def test_missing_file_returns_defaults_with_cleanup_disabled(tmp_path: Path) -> None:
@@ -15,6 +23,73 @@ def test_missing_file_returns_defaults_with_cleanup_disabled(tmp_path: Path) -> 
     assert config == default_config()
     assert config["global_settings"]["auto_clean"] is False
     assert config["global_settings"]["auto_clear_trash_on_exit"] is False
+    assert config["global_settings"]["sort_criterion"] == "file_type_name"
+    assert config["global_settings"]["sort_direction"] == "ascending"
+    assert get_sorting_preferences(config) == SortPreferences()
+
+
+@pytest.mark.parametrize(
+    ("criterion", "direction"),
+    [(criterion, direction) for criterion in SortCriterion for direction in SortDirection],
+)
+def test_sort_preferences_round_trip(
+    tmp_path: Path, criterion: SortCriterion, direction: SortDirection
+) -> None:
+    path = tmp_path / "config.json"
+    config = default_config()
+    config["global_settings"]["theme"] = "Dark"
+    set_sorting_preferences(config, SortPreferences(criterion, direction))
+
+    save_config(path, config)
+    loaded = load_config(path)
+
+    assert loaded["global_settings"]["sort_criterion"] == criterion.value
+    assert loaded["global_settings"]["sort_direction"] == direction.value
+    assert loaded["global_settings"]["theme"] == "Dark"
+    assert get_sorting_preferences(loaded) == SortPreferences(criterion, direction)
+    assert "ordering_mode" not in loaded["global_settings"]
+
+
+def test_old_config_without_sort_preferences_gets_defaults_without_rewrite(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "old-config.json"
+    content = '{"schema_version": 1, "global_settings": {"theme": "Dark"}, "profiles": {}}\n'
+    path.write_text(content, encoding="utf-8")
+
+    loaded = load_config(path)
+
+    assert loaded["global_settings"]["sort_criterion"] == "file_type_name"
+    assert loaded["global_settings"]["sort_direction"] == "ascending"
+    assert loaded["global_settings"]["theme"] == "Dark"
+    assert get_sorting_preferences(loaded) == SortPreferences()
+    assert path.read_text(encoding="utf-8") == content
+
+
+def test_invalid_sort_preferences_fall_back_without_discarding_other_settings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "invalid-sort.json"
+    content = json.dumps(
+        {
+            "schema_version": 1,
+            "global_settings": {
+                "sort_criterion": "unrecognized",
+                "sort_direction": "sideways",
+                "theme": "Dark",
+            },
+            "profiles": {},
+        }
+    )
+    path.write_text(content, encoding="utf-8")
+
+    loaded = load_config(path)
+
+    assert loaded["global_settings"]["sort_criterion"] == "file_type_name"
+    assert loaded["global_settings"]["sort_direction"] == "ascending"
+    assert loaded["global_settings"]["theme"] == "Dark"
+    assert get_sorting_preferences(loaded) == SortPreferences()
+    assert path.read_text(encoding="utf-8") == content
 
 
 def test_import_does_not_write_configuration(tmp_path: Path) -> None:

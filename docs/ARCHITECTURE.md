@@ -42,11 +42,12 @@ not implemented.
 | `src/tidyfiles/startup.py` | Mutex-first startup, storage/config/log initialization, error reporting, GUI launch, and orderly guard cleanup. |
 | `src/tidyfiles/instance.py` | Windows named-mutex acquisition, active-owner rejection, abandoned-mutex recovery, and handle cleanup. |
 | `src/tidyfiles/storage.py` | Writable application-directory selection and `%LOCALAPPDATA%\TidyFiles` fallback for ordinary application data. |
-| `src/tidyfiles/config.py` | Schema-v1 configuration defaults, validation, loading, and atomic saving. Loading invalid configuration reports an error without rewriting it. |
+| `src/tidyfiles/config.py` | Schema-v1 defaults, validation, loading, and atomic saving, including backward-compatible sort preferences. Invalid sort values use defaults without rewriting the file during load; other invalid configuration remains an error. |
 | `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
 | `src/tidyfiles/app.py` | System-appearance CustomTkinter shell, three operation tabs, one initially empty shared Treeview, and status text. |
-| `src/tidyfiles/collection.py` | GUI-independent working collection, lexical Windows path keys, per-entry import context, optional metadata and filesystem identity snapshots, immutable ordered snapshots, and import-session lifecycle. |
+| `src/tidyfiles/collection.py` | GUI-independent working collection with one authoritative ordered ID sequence, indexed membership, import lifecycle, management operations, ordering mode, and immutable snapshots. |
 | `src/tidyfiles/discovery.py` | Read-only file and recursive folder discovery, exclusions, metadata snapshots, one bounded background producer, batched collection updates, cooperative cancellation, and complete/incomplete/failed outcomes. |
+| `src/tidyfiles/sorting.py` | Pure sort criteria, directions, natural comparison keys, legacy file categories, and deterministic ordering without filesystem access. |
 | `src/tidyfiles/filename_format.py` | Pure parser producing immutable, source-ordered literal spans and token occurrences; structured parse errors retain the exact input expression, offset, and optional offending token. |
 | `src/tidyfiles/filename_evaluator.py` | Pure per-file and ordered-batch evaluation of parsed tokens and extensions; returns raw values, resolved candidates, validated names, and file-specific diagnostics. |
 | `src/tidyfiles/filename_validation.py` | Pure legacy-character substitution and validation of one Windows filename component, including reserved device names, Unicode safety, and UTF-16 component length. |
@@ -78,8 +79,46 @@ Coverage errors produce an incomplete import while retaining discovered
 entries; exclusions do not. Cancellation drains queued work, rejects later
 results, and rolls back the current import after the producer stops. The
 collection retains earlier incomplete-import records. Discovery order is
-provisional; automatic and manual ordering rules belong to M2-C. The scan is a
-metadata snapshot and does not replace M3 execution-time revalidation. The pure
+provisional until all results are consumed and the import is finalized. The
+collection then either sorts all retained entries in automatic mode or keeps
+existing order and appends the new entries sorted in manual mode. The default
+sort is File Type + Name, ascending, using the legacy image, video, document,
+audio, archive, and other categories. Name, extension, size, creation date,
+modified date, and path are also supported. Descending reverses the complete
+known compound key, including category order; ascending preserves the legacy
+category order. Missing metadata sorts after known values in both directions;
+known zero values remain ordinary sortable values. The legacy HEIC suffix is
+an image sort category only; this does not add conversion support.
+
+Natural comparison case-folds text and compares decimal runs by numeric value
+without converting long runs to integers. Numerically equivalent padded names
+use a deterministic case-sensitive filename and then natural full-path,
+normalized-path, and original-path tie-breakers. For example, `Image 001.png`,
+`Image 01.png`, and `Image 1.png` sort in that order. Sorting keys use only
+stored collection values and never read the filesystem. Persistent criterion
+and direction live in
+`global_settings.sort_criterion` and `global_settings.sort_direction`; missing
+or invalid values use File Type + Name, ascending. Manual mode is collection
+state and is not saved as a preference.
+
+The collection exposes Move Up, Move Down, Move to Top, Move to Bottom, and
+complete ordered-ID replacement. Multi-selection is treated as a set while
+selected order comes from the collection; relative order is preserved for both
+selected and unaffected entries. Unknown selection IDs are ignored, while an
+invalid complete permutation is rejected. Remove from List changes only
+in-memory membership and retains import-root records and incomplete warnings.
+Clear All removes collection entries, import records, roots, and diagnostics,
+resets automatic mode, and retains sort preferences. Both actions leave source
+files untouched. Management capabilities disable sort, reorder, removal, and
+clear while an import is active. No final processing-readiness gate is exposed.
+
+Each immutable snapshot carries a monotonic revision. `is_current(snapshot)`
+checks collection identity and revision so membership or effective-order
+changes, including canceled imports, invalidate downstream results without
+reusing a prior revision. No-op reorder and removal operations do not advance
+the revision. The GUI does not yet construct or display this collection.
+The scan is a metadata snapshot and does not replace M3 execution-time
+revalidation. The pure
 `filename_evaluator.py` module consumes an existing parsed
 expression and immutable per-file metadata. It evaluates literal text, original
 stems, text extraction and manipulation, stored directory names, supplied

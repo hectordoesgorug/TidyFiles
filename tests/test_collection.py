@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError
+from uuid import uuid4
 
 import pytest
 
@@ -6,12 +7,15 @@ from tidyfiles.collection import (
     CollectionError,
     FileMetadataSnapshot,
     FileSystemIdentitySnapshot,
+    ImportDiagnostic,
     ImportMode,
     ImportSessionClosedError,
     ImportSessionState,
+    OrderingMode,
     WorkingCollection,
     normalize_windows_path,
 )
+from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
 
 
 def test_windows_path_key_is_lexical_and_case_insensitive() -> None:
@@ -124,7 +128,10 @@ def test_cancel_rolls_back_only_current_session_and_restores_prior_order() -> No
 
     cancelled = collection.begin_import(ImportMode.ADD_FOLDER, folder_root=r"D:\Temporary")
     pending = collection.register_path(cancelled, r"D:\Temporary\c.txt").entry
-    collection.set_order((pending.entry_id, other.entry_id, previous.entry_id))
+    assert collection.capabilities.is_importing
+    assert not collection.capabilities.can_reorder
+    with pytest.raises(CollectionError, match="while an import is active"):
+        collection.set_order((pending.entry_id, other.entry_id, previous.entry_id))
     collection.cancel_import(cancelled)
 
     after = collection.snapshot()
@@ -135,6 +142,189 @@ def test_cancel_rolls_back_only_current_session_and_restores_prior_order() -> No
     assert tuple(root.path for root in after.folder_roots) == (r"C:\Previous",)
     assert after.import_sessions[-1].state is ImportSessionState.CANCELLED
     assert pending.entry_id not in {entry.entry_id for entry in after.entries}
+    assert after.ordering_mode is prior.ordering_mode is OrderingMode.MANUAL
+    assert not collection.is_current(prior)
+
+
+def test_manual_order_operations_preserve_selected_and_unselected_relative_order() -> None:
+    collection = WorkingCollection()
+    session = collection.begin_import(ImportMode.ADD_FILES)
+    entries = [collection.register_path(session, f"C:\\{name}.txt").entry for name in "ABCDE"]
+    collection.finalize_import(session)
+    ids = [entry.entry_id for entry in entries]
+
+    assert collection.move_to_top((ids[1], ids[3]))
+    assert [entry.entry_id for entry in collection.snapshot().entries] == [
+        ids[1], ids[3], ids[0], ids[2], ids[4]
+    ]
+    collection.set_order(ids)
+    assert collection.move_up((ids[1], ids[3]))
+    assert [entry.entry_id for entry in collection.snapshot().entries] == [
+        ids[1], ids[0], ids[3], ids[2], ids[4]
+    ]
+    collection.set_order(ids)
+    assert collection.move_down((ids[1], ids[3]))
+    assert [entry.entry_id for entry in collection.snapshot().entries] == [
+        ids[0], ids[2], ids[1], ids[4], ids[3]
+    ]
+    collection.set_order(ids)
+    assert collection.move_to_bottom((ids[1], ids[3]))
+    assert [entry.entry_id for entry in collection.snapshot().entries] == [
+        ids[0], ids[2], ids[4], ids[1], ids[3]
+    ]
+    assert collection.ordering_mode is OrderingMode.MANUAL
+
+
+def test_manual_reorder_noops_and_stale_ids_do_not_change_revision() -> None:
+    collection = WorkingCollection()
+    session = collection.begin_import(ImportMode.ADD_FILES)
+    first = collection.register_path(session, r"C:\one.txt").entry
+    collection.finalize_import(session)
+    before = collection.snapshot()
+
+    assert not collection.set_order((first.entry_id,))
+    assert not collection.move_up(())
+    assert not collection.move_up((first.entry_id,))
+    assert not collection.move_to_bottom((first.entry_id,))
+    assert not collection.move_to_top((uuid4(),))
+    assert collection.snapshot().revision == before.revision
+    assert collection.ordering_mode is OrderingMode.AUTOMATIC
+    with pytest.raises(ValueError):
+        collection.set_order((uuid4(),))
+
+
+def test_manual_boundary_all_selection_and_unknown_ids_are_safe() -> None:
+    collection = WorkingCollection()
+    session = collection.begin_import(ImportMode.ADD_FILES)
+    entries = [collection.register_path(session, rf"C:\{name}.txt").entry for name in "ABC"]
+    collection.finalize_import(session)
+    ids = [entry.entry_id for entry in entries]
+    baseline = collection.snapshot()
+
+    assert not collection.move_up((ids[0], uuid4()))
+    assert not collection.move_down((ids[-1],))
+    assert not collection.move_to_top(ids)
+    assert collection.snapshot().revision == baseline.revision
+    assert collection.move_up((ids[1], uuid4()))
+    assert [entry.entry_id for entry in collection.snapshot().entries] == [ids[1], ids[0], ids[2]]
+
+
+def test_remove_clear_and_reimport_are_non_destructive(tmp_path) -> None:
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"keep")
+    collection = WorkingCollection(
+        SortPreferences(SortCriterion.SIZE, SortDirection.DESCENDING)
+    )
+    session = collection.begin_import(ImportMode.ADD_FOLDER, folder_root=tmp_path)
+    collection.register_path(session, source)
+    other_source = tmp_path / "other.txt"
+    other_source.write_bytes(b"other")
+    other_entry = collection.register_path(session, other_source).entry
+    collection.finalize_import(session)
+    collection.move_to_bottom((other_entry.entry_id,))
+    before_bytes = source.read_bytes()
+    before = collection.snapshot()
+
+    removed = collection.remove_entries((other_entry.entry_id,))
+    assert tuple(item.entry_id for item in removed) == (other_entry.entry_id,)
+    assert collection.snapshot().folder_roots == before.folder_roots
+    assert collection.snapshot().ordering_mode is OrderingMode.MANUAL
+    assert not collection.is_current(before)
+    assert source.read_bytes() == before_bytes
+
+    reimport = collection.begin_import(ImportMode.ADD_FILES)
+    new_entry = collection.register_path(reimport, other_source).entry
+    assert new_entry.entry_id != other_entry.entry_id
+    collection.finalize_import(reimport)
+    collection.move_to_bottom((new_entry.entry_id,))
+    preference = collection.sort_preferences
+    assert collection.clear_all()
+    cleared = collection.snapshot()
+    assert cleared.entries == cleared.folder_roots == cleared.import_sessions == ()
+    assert cleared.ordering_mode is OrderingMode.AUTOMATIC
+    assert cleared.sort_preferences == preference
+    assert not cleared.has_incomplete_imports
+    assert source.read_bytes() == before_bytes
+    assert other_source.read_bytes() == b"other"
+
+
+def test_bulk_remove_preserves_relative_order_and_unknown_ids_are_noop() -> None:
+    collection = WorkingCollection()
+    session = collection.begin_import(ImportMode.ADD_FILES)
+    entries = [collection.register_path(session, rf"C:\{name}.txt").entry for name in "ABCDE"]
+    collection.finalize_import(session)
+    ids = [entry.entry_id for entry in entries]
+    prior = collection.snapshot()
+
+    assert collection.remove_entries((ids[1], uuid4(), ids[3])) == (
+        prior.entries[1],
+        prior.entries[3],
+    )
+    after = collection.snapshot()
+    assert [entry.entry_id for entry in after.entries] == [ids[0], ids[2], ids[4]]
+    assert not collection.is_current(prior)
+    unchanged = collection.snapshot()
+    assert collection.remove_entries((uuid4(),)) == ()
+    assert collection.is_current(unchanged)
+
+
+def test_management_actions_are_blocked_while_import_is_active() -> None:
+    collection = WorkingCollection()
+    session = collection.begin_import(ImportMode.ADD_FILES)
+    entry = collection.register_path(session, r"C:\one.txt").entry
+
+    assert collection.capabilities.is_importing
+    assert not collection.capabilities.can_reorder
+    assert not collection.capabilities.can_remove
+    assert not collection.capabilities.can_clear_all
+    assert not collection.capabilities.can_sort
+    with pytest.raises(CollectionError):
+        collection.move_up((entry.entry_id,))
+    with pytest.raises(CollectionError):
+        collection.remove_entries((entry.entry_id,))
+    with pytest.raises(CollectionError):
+        collection.clear_all()
+    with pytest.raises(CollectionError):
+        collection.apply_sorting()
+    collection.cancel_import(session)
+
+
+def test_incomplete_warning_survives_removal_until_clear_all() -> None:
+    collection = WorkingCollection()
+    session = collection.begin_import(ImportMode.ADD_FILES)
+    entry = collection.register_path(session, r"C:\one.txt").entry
+    collection.finalize_import(
+        session, incomplete=True, diagnostics=(ImportDiagnostic(r"C:\denied", "access denied"),)
+    )
+    collection.remove_entries((entry.entry_id,))
+    assert collection.snapshot().has_incomplete_imports
+    assert collection.snapshot().incomplete_imports[0].diagnostics[0].path == r"C:\denied"
+
+
+def test_cancel_preserves_prior_incomplete_warning_context_and_manual_order() -> None:
+    collection = WorkingCollection()
+    initial = collection.begin_import(ImportMode.ADD_FOLDER, folder_root=r"C:\Known")
+    first = collection.register_path(initial, r"C:\Known\a.txt").entry
+    second = collection.register_path(initial, r"C:\Known\b.txt").entry
+    collection.finalize_import(
+        initial,
+        incomplete=True,
+        diagnostics=(ImportDiagnostic(r"C:\Known\locked", "access denied"),),
+    )
+    collection.set_order((second.entry_id, first.entry_id))
+    prior = collection.snapshot()
+
+    pending = collection.begin_import(ImportMode.ADD_FOLDER, folder_root=r"D:\Temp")
+    collection.register_path(pending, r"D:\Temp\new.txt")
+    collection.cancel_import(pending)
+
+    after = collection.snapshot()
+    assert after.entries == prior.entries
+    assert after.folder_roots == prior.folder_roots
+    assert after.incomplete_imports == prior.incomplete_imports
+    assert after.ordering_mode is prior.ordering_mode
+    assert after.sort_preferences == prior.sort_preferences
+    assert not collection.is_current(prior)
 
 
 def test_finalization_and_late_session_results_are_rejected() -> None:

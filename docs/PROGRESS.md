@@ -12,8 +12,11 @@ historical verification record. M2-A adds the GUI-independent shared working
 collection and import-session lifecycle. M2-B adds a read-only filesystem
 discovery service with bounded background work, metadata snapshots, exclusions,
 cooperative cancellation, and incomplete-import records. The service is not
-connected to the GUI. Sorting, GUI import integration, filename-evaluator
-adaptation, and filesystem operations remain unimplemented.
+connected to the GUI. M2-C adds deterministic collection sorting, manual
+ordering, non-destructive row management, persistent sort preferences, and
+snapshot revision checks. GUI import/settings integration, a filename-evaluator
+adapter, final processing-readiness checks, and filesystem operations remain
+unimplemented.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -21,7 +24,7 @@ adaptation, and filesystem operations remain unimplemented.
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
 | M1 | Complete | Pure parser/evaluator, extension resolution, and filename validation, including the M1-D.12 DD-061 diagnostic correction. Application and filesystem integration remain outside M1. |
-| M2 | In progress | M2-A shared collection and M2-B read-only file/folder discovery implemented. Sorting, GUI import, evaluator adaptation, and filesystem processing remain planned. |
+| M2 | In progress | M2-A shared collection, M2-B read-only discovery, and M2-C collection management and ordering implemented. GUI integration, evaluator adaptation, and filesystem processing remain planned. |
 | M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
@@ -105,9 +108,43 @@ The queue capacity was 128, peak occupancy was 4 and 8, and each scan used one
 worker. With a queue capacity of 4, cancellation while the producer was blocked
 on a full queue reached the cancelled state in 0.0009 seconds. These are local
 observations, not performance thresholds. File/folder discovery remains a
-service API; the GUI, final sorting, processing acknowledgment, physical
-directory counts, destination checks, and filesystem mutations are not
-implemented. No GitHub Actions result is claimed for this uncommitted change.
+service API; the GUI, processing acknowledgment, physical directory counts,
+destination checks, and filesystem mutations are not implemented. GitHub
+Actions run #17 passed Ruff and pytest for commit
+`8c761a0a786e59a0e500e7cbbbcbf87efade8e6a`; the local M2-B measurements above
+remain the recorded performance evidence.
+
+For M2-C, focused collection-management, sorting, configuration, and
+discovery-integration suites passed 85 tests. The full local suite passed all
+343 tests with no skips; Ruff, compileall, and `git diff --check` also passed on
+the working tree based on M2-B commit
+`8c761a0a786e59a0e500e7cbbbcbf87efade8e6a`. No GitHub Actions run is claimed
+for this M2-C working tree. Tests cover the implemented domain clauses of
+DD-010, DD-021 through DD-026, DD-031, DD-048, DD-075, DD-077, and DD-078.
+GUI/settings integration, analysis acknowledgments and readiness, physical
+directory counts, and filesystem operations remain unimplemented.
+
+Synthetic in-memory benchmarks ran on Windows 11 (build 26300), Python 3.13.17,
+with an Intel Core i5-10300H. Each cumulative import added 10% new entries
+(minimum 100); manual reorder selected 10% and bulk removal selected 50% of the
+post-import collection. Elapsed seconds:
+
+| Operation | 1,000 | 10,000 | 100,000 |
+| --- | ---: | ---: | ---: |
+| Natural filename sort | 0.0116 | 0.1402 | 2.0479 |
+| File Type + Name sort | 0.0123 | 0.1463 | 1.9884 |
+| Size sort | 0.0078 | 0.0931 | 1.4126 |
+| Cumulative import finalization | 0.0153 | 0.1708 | 2.4892 |
+| Move 10% selection to top | 0.0003 | 0.0035 | 0.0696 |
+| Remove 50% | 0.0007 | 0.0083 | 0.1536 |
+| Clear All | 0.0000 | 0.0010 | 0.0090 |
+
+Registration uses average O(1) membership and path-index lookups. Sorting is
+O(n log n) with O(n) temporary keys and runs once when an import finalizes;
+reordering and removal make one pass over the ordered IDs plus the selected
+IDs; Clear All clears collection-owned indexes and sequences in O(n). These
+measurements are local observations, not CI thresholds or production-volume
+guarantees.
 
 ## Open questions and deferred decisions
 

@@ -3,7 +3,9 @@
 The current GUI is a shell and does not import or process user files. A separate
 read-only discovery service is implemented but is not connected to the GUI. No
 file operation renames, deletes, moves, repacks, or otherwise modifies user
-files.
+files. The collection domain can reorder or remove rows and clear its in-memory
+state; these operations never change source files. The GUI does not expose them
+yet.
 
 ## Implemented foundations
 
@@ -29,6 +31,13 @@ files.
   Discovery reads metadata but not file contents, and retains incomplete-scan
   diagnostics with any successfully discovered entries. It does not authorize
   later processing.
+- **Collection management:** Move and sort operations change only the working
+  list. Remove from List drops selected entries from memory and leaves their
+  source files and explicit Add Folder root records intact. Incomplete-scan
+  warnings remain until Clear All. Clear All removes collection entries,
+  import-root records, and collection-specific diagnostics from memory while
+  retaining saved sorting preferences. These operations are disabled while an
+  import is active.
 
 These are startup and persistence foundations, not a file-recovery system.
 

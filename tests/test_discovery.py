@@ -168,6 +168,58 @@ def test_overlapping_folder_import_preserves_first_context_and_identity(tmp_path
     assert len(collection.snapshot().folder_roots) == 2
 
 
+def test_cumulative_import_resorts_all_entries_in_automatic_mode(tmp_path: Path) -> None:
+    first = tmp_path / "Zebra 2.txt"
+    later = tmp_path / "Alpha 10.txt"
+    first.write_text("first")
+    later.write_text("later")
+    collection = WorkingCollection()
+    discovery = FilesystemDiscovery(collection)
+
+    _complete(discovery.begin_files((first,)))
+    assert [entry.original_filename for entry in collection.snapshot().entries] == [
+        "Zebra 2.txt"
+    ]
+    _complete(discovery.begin_files((later,)))
+
+    assert [entry.original_filename for entry in collection.snapshot().entries] == [
+        "Alpha 10.txt",
+        "Zebra 2.txt",
+    ]
+
+
+@pytest.mark.parametrize("manual", [False, True])
+def test_cumulative_incomplete_import_obeys_ordering_mode(tmp_path: Path, manual: bool) -> None:
+    first = tmp_path / "Zebra 2.txt"
+    second = tmp_path / "Alpha 10.txt"
+    new_z = tmp_path / "Zulu 1.txt"
+    new_b = tmp_path / "Beta 2.txt"
+    missing = tmp_path / "inaccessible.txt"
+    for path in (first, second, new_z, new_b):
+        path.write_text(path.name)
+    collection = WorkingCollection()
+    discovery = FilesystemDiscovery(collection)
+
+    _complete(discovery.begin_files((first, second)))
+    existing = collection.snapshot().entries
+    if manual:
+        collection.move_to_bottom((existing[0].entry_id,))
+    before_names = [entry.original_filename for entry in collection.snapshot().entries]
+
+    items, report = _complete(discovery.begin_files((new_z, new_b, missing)))
+
+    assert report.state is DiscoveryState.INCOMPLETE
+    expected_names = (
+        [*before_names, "Beta 2.txt", "Zulu 1.txt"]
+        if manual
+        else ["Alpha 10.txt", "Beta 2.txt", "Zebra 2.txt", "Zulu 1.txt"]
+    )
+    assert [entry.original_filename for entry in collection.snapshot().entries] == expected_names
+    assert collection.snapshot().ordering_mode.value == ("manual" if manual else "automatic")
+    assert collection.snapshot().has_incomplete_imports
+    assert any(item.path == str(missing) for item in items)
+
+
 def test_managed_selected_root_is_excluded_without_retaining_authorization(tmp_path: Path) -> None:
     managed = tmp_path / "TidyFiles" / "Trash"
     managed.mkdir(parents=True)
@@ -425,18 +477,24 @@ def test_cancellation_while_queue_full_rolls_back_only_active_import(tmp_path: P
     assert report.peak_queue_occupancy <= 1
 
 
-def test_cancellation_after_partial_registration_rolls_back_current_import(
-    tmp_path: Path,
+@pytest.mark.parametrize("manual", [False, True])
+def test_cancellation_after_partial_registration_restores_ordering_state(
+    tmp_path: Path, manual: bool
 ) -> None:
-    prior_path = tmp_path / "prior.txt"
-    prior_path.write_text("prior")
+    prior_paths = [tmp_path / "prior-a.txt", tmp_path / "prior-b.txt"]
+    for path in prior_paths:
+        path.write_text(path.name)
     root = tmp_path / "many-after-partial"
     root.mkdir()
     for index in range(20):
         (root / f"{index:03}.txt").write_bytes(b"")
     collection = WorkingCollection()
     service = FilesystemDiscovery(collection, queue_capacity=1, batch_size=1)
-    _complete(service.begin_files((prior_path,)))
+    _complete(service.begin_files(prior_paths))
+    if manual:
+        collection.set_order(
+            tuple(reversed([entry.entry_id for entry in collection.snapshot().entries]))
+        )
     prior = collection.snapshot()
 
     session = service.begin_folder(root)
@@ -448,8 +506,12 @@ def test_cancellation_after_partial_registration_rolls_back_current_import(
     report = session.wait_until_terminal(timeout=3)
 
     assert report.state is DiscoveryState.CANCELLED
-    assert collection.snapshot().entries == prior.entries
-    assert collection.snapshot().folder_roots == prior.folder_roots
+    after = collection.snapshot()
+    assert after.entries == prior.entries
+    assert after.folder_roots == prior.folder_roots
+    assert after.ordering_mode is prior.ordering_mode
+    assert after.sort_preferences == prior.sort_preferences
+    assert not collection.is_current(prior)
 
 
 def test_symlink_files_and_linked_ancestors_are_excluded(tmp_path: Path) -> None:

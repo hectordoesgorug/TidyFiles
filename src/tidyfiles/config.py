@@ -7,7 +7,9 @@ import os
 import tempfile
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, MutableMapping
+
+from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
 
 SCHEMA_VERSION = 1
 _DEFAULT_CONFIG: dict[str, Any] = {
@@ -15,6 +17,8 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "global_settings": {
         "auto_clean": False,
         "auto_clear_trash_on_exit": False,
+        "sort_criterion": SortCriterion.FILE_TYPE_AND_NAME.value,
+        "sort_direction": SortDirection.ASCENDING.value,
     },
     "profiles": {},
 }
@@ -50,6 +54,51 @@ def _validate_config(config: Any) -> dict[str, Any]:
     return config
 
 
+def _normalize_sorting_settings(settings: MutableMapping[str, Any]) -> None:
+    try:
+        criterion = SortCriterion(settings.get("sort_criterion"))
+    except (TypeError, ValueError):
+        criterion = SortCriterion.FILE_TYPE_AND_NAME
+    try:
+        direction = SortDirection(settings.get("sort_direction"))
+    except (TypeError, ValueError):
+        direction = SortDirection.ASCENDING
+    settings["sort_criterion"] = criterion.value
+    settings["sort_direction"] = direction.value
+
+
+def get_sorting_preferences(config: dict[str, Any]) -> SortPreferences:
+    """Return validated preferences, using defaults for missing or invalid values."""
+    settings = config.get("global_settings")
+    if not isinstance(settings, dict):
+        raise ConfigError("Configuration global_settings must be an object.")
+    try:
+        criterion = SortCriterion(settings.get("sort_criterion"))
+    except (TypeError, ValueError):
+        criterion = SortCriterion.FILE_TYPE_AND_NAME
+    try:
+        direction = SortDirection(settings.get("sort_direction"))
+    except (TypeError, ValueError):
+        direction = SortDirection.ASCENDING
+    return SortPreferences(
+        criterion,
+        direction,
+    )
+
+
+def set_sorting_preferences(
+    config: dict[str, Any], preferences: SortPreferences
+) -> None:
+    """Set validated persistent sorting choices in a config before saving it."""
+    if not isinstance(preferences, SortPreferences):
+        raise TypeError("preferences must be SortPreferences")
+    settings = config.get("global_settings")
+    if not isinstance(settings, dict):
+        raise ConfigError("Configuration global_settings must be an object.")
+    settings["sort_criterion"] = preferences.criterion.value
+    settings["sort_direction"] = preferences.direction.value
+
+
 def load_config(path: Path | str) -> dict[str, Any]:
     """Load a valid config, or fresh defaults when the file does not exist."""
     config_path = Path(path)
@@ -61,19 +110,22 @@ def load_config(path: Path | str) -> dict[str, Any]:
         raise ConfigError(f"Cannot read configuration at {config_path}: {exc}") from exc
 
     try:
-        return _validate_config(json.loads(content))
+        loaded = _validate_config(json.loads(content))
     except json.JSONDecodeError as exc:
         raise ConfigError(f"Malformed configuration at {config_path}: {exc}") from exc
+    _normalize_sorting_settings(loaded["global_settings"])
+    return loaded
 
 
 def save_config(path: Path | str, config: dict[str, Any]) -> None:
     """Validate and atomically replace a config file, surfacing every failure."""
     config_path = Path(path)
-    _validate_config(config)
+    normalized = _validate_config(deepcopy(config))
+    _normalize_sorting_settings(normalized["global_settings"])
     if config_path.exists():
         load_config(config_path)
     try:
-        serialized = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
+        serialized = json.dumps(normalized, indent=2, ensure_ascii=False) + "\n"
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"Configuration cannot be serialized: {exc}") from exc
 
