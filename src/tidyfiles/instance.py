@@ -114,18 +114,21 @@ class SingleInstanceGuard:
         """Release ownership and close the handle; safe to call repeatedly."""
         if self._handle is None:
             return
+        if self._api is None:
+            raise InstanceGuardError("Mutex API is unavailable", None)
+        api = self._api
         if self._owns_mutex and self._owner_thread_id != threading.get_ident():
             raise InstanceGuardError("ReleaseMutex must run on the acquiring thread", None)
 
         with _owned_mutex_names_lock:
             release_error: int | None = None
             if self._owns_mutex:
-                if self._api.ReleaseMutex(self._handle):
+                if api.ReleaseMutex(self._handle):
                     self._owns_mutex = False
                 else:
                     release_error = _last_error()
 
-            if not self._api.CloseHandle(self._handle):
+            if not api.CloseHandle(self._handle):
                 raise InstanceGuardError("CloseHandle", _last_error())
 
             self._api = None

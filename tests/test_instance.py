@@ -123,6 +123,14 @@ def test_cleanup_is_idempotent() -> None:
     assert not guard.acquired
 
 
+def test_close_rejects_handle_without_api() -> None:
+    guard = SingleInstanceGuard(_mutex_name())
+    guard._handle = 1
+
+    with pytest.raises(InstanceGuardError, match="Mutex API is unavailable"):
+        guard.close()
+
+
 def test_ownership_is_held_until_guard_closes() -> None:
     mutex_name = _mutex_name()
     owner = SingleInstanceGuard(mutex_name)
