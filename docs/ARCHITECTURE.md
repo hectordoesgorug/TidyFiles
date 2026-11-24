@@ -41,9 +41,12 @@ not implemented.
 | `src/tidyfiles/config.py` | Schema-v1 configuration defaults, validation, loading, and atomic saving. Loading invalid configuration reports an error without rewriting it. |
 | `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
 | `src/tidyfiles/app.py` | System-appearance CustomTkinter shell, three operation tabs, one initially empty shared Treeview, and status text. |
+| `src/tidyfiles/filename_format.py` | Pure parser producing immutable, source-ordered literal spans and token occurrences with source offsets and preserved argument strings. |
 
-The shell does not import files, maintain a file collection, parse or evaluate
-rename formats, hash duplicates, repack media, or modify the filesystem.
+The shell does not import files, maintain a file collection, evaluate parsed
+rename formats, hash duplicates, repack media, or modify the filesystem. The
+parser recognizes the approved token grammar, including comma-containing final
+strings in `RepS`, `RepM`, and `Ins`; it does not transform filenames.
 
 ## Tests and CI
 
@@ -58,8 +61,8 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-The filename parser and evaluator, shared collection and scanning services,
-destination planner and filesystem transaction layer, duplicate verification,
-and repacker are future components. Their behavior is specified in local
-planning references, not implemented in this package. Do not infer implementation
-status from an approved requirement.
+The filename evaluator and file context, shared collection and scanning
+services, destination planner and filesystem transaction layer, duplicate
+verification, and repacker are future components. Their behavior is specified in
+local planning references, not implemented in this package. Do not infer
+implementation status from an approved requirement.
