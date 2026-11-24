@@ -9,6 +9,13 @@ from ctypes import wintypes
 
 DEFAULT_MUTEX_NAME = r"Local\TidyFiles.SingleInstance"
 ERROR_ALREADY_EXISTS = 183
+WAIT_OBJECT_0 = 0
+WAIT_ABANDONED = 0x80
+WAIT_TIMEOUT = 0x102
+WAIT_FAILED = 0xFFFFFFFF
+
+_owned_mutex_names: set[str] = set()
+_owned_mutex_names_lock = threading.Lock()
 
 
 class InstanceAlreadyRunningError(RuntimeError):
@@ -34,6 +41,8 @@ def _load_kernel32():
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
     kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
     kernel32.ReleaseMutex.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -68,22 +77,38 @@ class SingleInstanceGuard:
                 return True
             raise InstanceGuardError("Close the previous mutex handle before reacquiring", None)
 
-        api = _load_kernel32()
-        handle = api.CreateMutexW(None, True, self.mutex_name)
-        error_code = _last_error()
-        if not handle:
-            raise InstanceGuardError("CreateMutexW", error_code)
+        with _owned_mutex_names_lock:
+            if self.mutex_name in _owned_mutex_names:
+                return False
 
-        if error_code == ERROR_ALREADY_EXISTS:
-            if not api.CloseHandle(handle):
-                raise InstanceGuardError("CloseHandle", _last_error())
-            return False
+            api = _load_kernel32()
+            handle = api.CreateMutexW(None, True, self.mutex_name)
+            error_code = _last_error()
+            if not handle:
+                raise InstanceGuardError("CreateMutexW", error_code)
 
-        self._api = api
-        self._handle = handle
-        self._owns_mutex = True
-        self._owner_thread_id = threading.get_ident()
-        return True
+            if error_code == ERROR_ALREADY_EXISTS:
+                wait_result = api.WaitForSingleObject(handle, 0)
+                if wait_result == WAIT_TIMEOUT:
+                    if not api.CloseHandle(handle):
+                        raise InstanceGuardError("CloseHandle", _last_error())
+                    return False
+                if wait_result == WAIT_FAILED:
+                    error_code = _last_error()
+                    if not api.CloseHandle(handle):
+                        raise InstanceGuardError("CloseHandle", _last_error())
+                    raise InstanceGuardError("WaitForSingleObject", error_code)
+                if wait_result not in (WAIT_OBJECT_0, WAIT_ABANDONED):
+                    if not api.CloseHandle(handle):
+                        raise InstanceGuardError("CloseHandle", _last_error())
+                    raise InstanceGuardError("WaitForSingleObject", None)
+
+            self._api = api
+            self._handle = handle
+            self._owns_mutex = True
+            self._owner_thread_id = threading.get_ident()
+            _owned_mutex_names.add(self.mutex_name)
+            return True
 
     def close(self) -> None:
         """Release ownership and close the handle; safe to call repeatedly."""
@@ -92,19 +117,21 @@ class SingleInstanceGuard:
         if self._owns_mutex and self._owner_thread_id != threading.get_ident():
             raise InstanceGuardError("ReleaseMutex must run on the acquiring thread", None)
 
-        release_error: int | None = None
-        if self._owns_mutex:
-            if self._api.ReleaseMutex(self._handle):
-                self._owns_mutex = False
-            else:
-                release_error = _last_error()
+        with _owned_mutex_names_lock:
+            release_error: int | None = None
+            if self._owns_mutex:
+                if self._api.ReleaseMutex(self._handle):
+                    self._owns_mutex = False
+                else:
+                    release_error = _last_error()
 
-        if not self._api.CloseHandle(self._handle):
-            raise InstanceGuardError("CloseHandle", _last_error())
+            if not self._api.CloseHandle(self._handle):
+                raise InstanceGuardError("CloseHandle", _last_error())
 
-        self._api = None
-        self._handle = None
-        self._owner_thread_id = None
+            self._api = None
+            self._handle = None
+            self._owner_thread_id = None
+            _owned_mutex_names.discard(self.mutex_name)
         if release_error is not None:
             raise InstanceGuardError("ReleaseMutex", release_error)
 

@@ -236,3 +236,24 @@ def test_unexpected_windows_api_failure_is_not_success(
         SingleInstanceGuard(_mutex_name()).acquire()
 
     assert error.value.error_code == 5
+
+
+def test_unexpected_wait_failure_is_not_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeKernel32:
+        def CreateMutexW(self, _attributes, _initial_owner, _name):
+            return 1
+
+        def WaitForSingleObject(self, _handle, _timeout):
+            return 0xFFFFFFFF
+
+        def CloseHandle(self, _handle):
+            return 1
+
+    errors = iter((183, 5))
+    monkeypatch.setattr("tidyfiles.instance._load_kernel32", lambda: FakeKernel32())
+    monkeypatch.setattr("tidyfiles.instance._last_error", lambda: next(errors))
+
+    with pytest.raises(InstanceGuardError, match="WaitForSingleObject") as error:
+        SingleInstanceGuard(_mutex_name()).acquire()
+
+    assert error.value.error_code == 5
