@@ -42,17 +42,22 @@ not implemented.
 | `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
 | `src/tidyfiles/app.py` | System-appearance CustomTkinter shell, three operation tabs, one initially empty shared Treeview, and status text. |
 | `src/tidyfiles/filename_format.py` | Pure parser producing immutable, source-ordered literal spans and token occurrences with source offsets and preserved argument strings. |
-| `src/tidyfiles/filename_evaluator.py` | Pure, per-file evaluation of original stems, text extraction, and text-manipulation tokens; returns raw evaluated text. |
+| `src/tidyfiles/filename_evaluator.py` | Pure per-file and ordered-batch evaluation of text, directory/count context, numeric sequences, and alphabetic sequences; returns raw evaluated text and file-specific diagnostics. |
 
 The shell does not import files, maintain a file collection, evaluate parsed
 rename formats in the GUI, hash duplicates, repack media, or modify the
-filesystem. The pure `filename_evaluator.py` module evaluates literal text,
-original stems, text extraction, and text-manipulation tokens from an existing
-parsed expression. Its immutable per-file context contains the original stem
-and optional file identifier. Manipulations update a separate working stem in
-source order and emit each resulting stem at that token's position. The parser
-recognizes the approved token grammar, including comma-containing final
-strings in `RepS`, `RepM`, and `Ins`.
+filesystem. The pure `filename_evaluator.py` module consumes an existing parsed
+expression and immutable per-file metadata. It evaluates literal text, original
+stems, text extraction and manipulation, stored directory names, supplied
+physical counts, and collection sequences. Manipulations update a separate
+working stem in source order and emit each resulting stem at that token's
+position. Batch evaluation derives zero-based indexes from its ordered snapshot,
+normalizes Windows parent identities without filesystem access, and reports
+per-file failures. Numeric widths are at least two digits; repeated numeric
+occurrences share width, with `<IncNrDir>` widths calculated separately for
+each parent group. These evaluator results are not finalized filenames or an
+executable filesystem plan. The parser preserves commas in final `RepS`,
+`RepM`, and `Ins` arguments, and evaluation uses them verbatim.
 
 ## Tests and CI
 
@@ -67,9 +72,9 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Numeric and directory-context token evaluation, collection-wide validation,
-extension management, filename sanitization, the shared collection and
-scanning services, destination planner and filesystem transaction layer,
-duplicate verification, and repacker are future components. Their behavior is
-specified in local planning references, not implemented in this package. Do not
-infer implementation status from an approved requirement.
+Extension management, filename sanitization, actual directory enumeration and
+count caching, the shared collection and scanning services, destination
+planner and filesystem transaction layer, duplicate verification, and repacker
+are future components. Their behavior is specified in local planning
+references, not implemented in this package. Do not infer implementation
+status from an approved requirement.
