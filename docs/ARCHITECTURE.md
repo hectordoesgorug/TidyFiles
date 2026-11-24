@@ -5,8 +5,9 @@ shell and foundational startup, configuration, storage, logging, and
 single-instance modules. The pure filename engine is implemented as a library
 component but is not connected to the GUI. The shared in-memory collection
 domain model supports ordered snapshots and import-session finalization or
-rollback; filesystem scanning, preview, destination planning, and processing
-remain planned.
+rollback. A read-only, GUI-independent discovery service scans selected files
+and folders; the GUI does not call it yet. Preview, destination planning, and
+filesystem processing remain planned.
 
 ## Startup and shutdown
 
@@ -45,6 +46,7 @@ not implemented.
 | `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
 | `src/tidyfiles/app.py` | System-appearance CustomTkinter shell, three operation tabs, one initially empty shared Treeview, and status text. |
 | `src/tidyfiles/collection.py` | GUI-independent working collection, lexical Windows path keys, per-entry import context, optional metadata and filesystem identity snapshots, immutable ordered snapshots, and import-session lifecycle. |
+| `src/tidyfiles/discovery.py` | Read-only file and recursive folder discovery, exclusions, metadata snapshots, one bounded background producer, batched collection updates, cooperative cancellation, and complete/incomplete/failed outcomes. |
 | `src/tidyfiles/filename_format.py` | Pure parser producing immutable, source-ordered literal spans and token occurrences; structured parse errors retain the exact input expression, offset, and optional offending token. |
 | `src/tidyfiles/filename_evaluator.py` | Pure per-file and ordered-batch evaluation of parsed tokens and extensions; returns raw values, resolved candidates, validated names, and file-specific diagnostics. |
 | `src/tidyfiles/filename_validation.py` | Pure legacy-character substitution and validation of one Windows filename component, including reserved device names, Unicode safety, and UTF-16 component length. |
@@ -60,8 +62,25 @@ separate Add Folder root records carry cleanup authorization. Import sessions
 append provisional entries, then finalize them or remove only their own new
 entries and roots on cancellation. Effective order changes do not change entry
 IDs, and downstream consumers receive immutable ordered snapshots. The model
-does not scan paths or modify source files. The pure `filename_evaluator.py`
-module consumes an existing parsed
+does not modify source files. `discovery.py` uses one background producer with
+a 128-record queue and a default batch size of 64; only the consumer registers
+results in the collection. It reports progress counters without a percentage,
+and does not materialize a folder's candidate paths before traversal. Discovery
+excludes the three named clutter files case-insensitively, `$RECYCLE.BIN`,
+`System Volume Information`, nonregular entries, and observed reparse points.
+Other app-managed locations are supplied by their actual paths through the
+`managed_paths` argument; no such Trash, staging, or recovery paths are
+currently defined by storage configuration. Ordinary hidden and dot-prefixed
+files remain eligible. Metadata includes size, timestamps, attributes, and
+filesystem identity when available; Windows directory-entry identity is
+re-read without following links when the initial entry data lacks a file ID.
+Coverage errors produce an incomplete import while retaining discovered
+entries; exclusions do not. Cancellation drains queued work, rejects later
+results, and rolls back the current import after the producer stops. The
+collection retains earlier incomplete-import records. Discovery order is
+provisional; automatic and manual ordering rules belong to M2-C. The scan is a
+metadata snapshot and does not replace M3 execution-time revalidation. The pure
+`filename_evaluator.py` module consumes an existing parsed
 expression and immutable per-file metadata. It evaluates literal text, original
 stems, text extraction and manipulation, stored directory names, supplied
 physical counts, collection sequences, and source/output extension context.
@@ -109,8 +128,8 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Actual directory enumeration and count caching, scanning services, destination
-planner and filesystem transaction layer,
+Physical directory-count caching, destination planner and filesystem
+transaction layer,
 duplicate verification, and repacker are future components. Their behavior is
 specified in local planning references, not implemented in this package. Do not
 infer implementation status from an approved requirement.

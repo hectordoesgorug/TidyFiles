@@ -9,8 +9,11 @@ complete, including M1-D.12's DD-061 parser diagnostic correction. They remain
 unconnected to the GUI and filesystem operations. See
 `docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-decision audit and
 historical verification record. M2-A adds the GUI-independent shared working
-collection and import-session lifecycle. Scanning, GUI import integration,
-filename-evaluator adaptation, and filesystem operations are not implemented.
+collection and import-session lifecycle. M2-B adds a read-only filesystem
+discovery service with bounded background work, metadata snapshots, exclusions,
+cooperative cancellation, and incomplete-import records. The service is not
+connected to the GUI. Sorting, GUI import integration, filename-evaluator
+adaptation, and filesystem operations remain unimplemented.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -18,7 +21,7 @@ filename-evaluator adaptation, and filesystem operations are not implemented.
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
 | M1 | Complete | Pure parser/evaluator, extension resolution, and filename validation, including the M1-D.12 DD-061 diagnostic correction. Application and filesystem integration remain outside M1. |
-| M2 | In progress | M2-A shared collection domain model and import-session lifecycle implemented. File/folder scanning, GUI import, and evaluator adaptation remain planned. |
+| M2 | In progress | M2-A shared collection and M2-B read-only file/folder discovery implemented. Sorting, GUI import, evaluator adaptation, and filesystem processing remain planned. |
 | M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
@@ -90,6 +93,21 @@ path-based deduplication, context preservation, import-session finalization and
 rollback, ordered immutable snapshots, optional metadata, and source-file
 preservation. Scanning, asynchronous worker behavior, GUI integration, and
 filesystem identity acquisition remain unverified and unimplemented.
+
+For M2-B, the local discovery and collection suites cover the implemented
+clauses of DD-007, DD-019 through DD-023, DD-031, and DD-074 through DD-078.
+On Windows with Python 3.13.17, Ruff passed, all 306 pytest tests passed with
+no skips, compileall passed, and `git diff --check` passed. The focused
+collection and discovery suites passed all 39 tests. Temporary synthetic-file
+measurements accepted all 1,000 files in 0.2015 seconds and all 10,000 files in
+1.4351 seconds; time to first result was 0.0015 and 0.0017 seconds, respectively.
+The queue capacity was 128, peak occupancy was 4 and 8, and each scan used one
+worker. With a queue capacity of 4, cancellation while the producer was blocked
+on a full queue reached the cancelled state in 0.0009 seconds. These are local
+observations, not performance thresholds. File/folder discovery remains a
+service API; the GUI, final sorting, processing acknowledgment, physical
+directory counts, destination checks, and filesystem mutations are not
+implemented. No GitHub Actions result is claimed for this uncommitted change.
 
 ## Open questions and deferred decisions
 

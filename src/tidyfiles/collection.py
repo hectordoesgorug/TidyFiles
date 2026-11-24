@@ -19,7 +19,9 @@ class ImportMode(StrEnum):
 class ImportSessionState(StrEnum):
     OPEN = "open"
     FINALIZED = "finalized"
+    INCOMPLETE = "incomplete"
     CANCELLED = "cancelled"
+    FAILED = "failed"
 
 
 class CollectionError(ValueError):
@@ -28,6 +30,12 @@ class CollectionError(ValueError):
 
 class ImportSessionClosedError(CollectionError):
     """An operation targeted an import session that is no longer open."""
+
+
+@dataclass(frozen=True, slots=True)
+class ImportDiagnostic:
+    path: str
+    reason: str
 
 
 def normalize_windows_path(path: str | os.PathLike[str]) -> str:
@@ -51,6 +59,7 @@ class FileMetadataSnapshot:
     created_time_ns: int | None = None
     physical_file_count: int | None = None
     physical_directory_count: int | None = None
+    attributes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +87,10 @@ class CollectionEntry:
     import_session_id: UUID
     is_finalized: bool
 
+    @property
+    def original_stem(self) -> str:
+        return ntpath.splitext(self.original_filename)[0]
+
 
 @dataclass(frozen=True, slots=True)
 class ImportRootRecord:
@@ -96,6 +109,7 @@ class ImportSessionSnapshot:
     entry_ids: tuple[UUID, ...]
     folder_root_ids: tuple[UUID, ...]
     previous_order: tuple[UUID, ...]
+    diagnostics: tuple[ImportDiagnostic, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +130,18 @@ class CollectionSnapshot:
     def finalized_entries(self) -> tuple[CollectionEntry, ...]:
         return tuple(entry for entry in self.entries if entry.is_finalized)
 
+    @property
+    def incomplete_imports(self) -> tuple[ImportSessionSnapshot, ...]:
+        return tuple(
+            session
+            for session in self.import_sessions
+            if session.state is ImportSessionState.INCOMPLETE
+        )
+
+    @property
+    def has_incomplete_imports(self) -> bool:
+        return bool(self.incomplete_imports)
+
 
 class WorkingCollection:
     """Mutable collection owner exposing immutable ordered snapshots."""
@@ -126,6 +152,7 @@ class WorkingCollection:
         self._entry_order: list[UUID] = []
         self._path_entries: dict[str, UUID] = {}
         self._sessions: dict[UUID, ImportSessionSnapshot] = {}
+        self._session_entries: dict[UUID, list[UUID]] = {}
         self._folder_roots: dict[UUID, ImportRootRecord] = {}
         self._open_session_id: UUID | None = None
         self._revision = 0
@@ -169,6 +196,7 @@ class WorkingCollection:
             root_ids,
             tuple(self._entry_order),
         )
+        self._session_entries[session_id] = []
         self._open_session_id = session_id
         self._revision += 1
         return session_id
@@ -195,6 +223,8 @@ class WorkingCollection:
         parent_name = _path_name(parent) if parent is not None else None
         parent_identity = normalize_windows_path(parent) if parent is not None else None
         if session.mode is ImportMode.ADD_FOLDER:
+            if not session.folder_root_ids:
+                raise CollectionError("Add Folder root authorization was discarded")
             root = self._folder_roots[session.folder_root_ids[0]]
             import_root_path, import_root_name = root.path, root.name
         else:
@@ -220,36 +250,65 @@ class WorkingCollection:
         self._entries[entry_id] = entry
         self._entry_order.append(entry_id)
         self._path_entries[path_key] = entry_id
-        self._sessions[session_id] = replace(
-            session, entry_ids=(*session.entry_ids, entry_id)
-        )
+        self._session_entries[session_id].append(entry_id)
         self._revision += 1
         return RegistrationResult(entry, added=True)
 
-    def finalize_import(self, session_id: UUID) -> None:
+    def finalize_import(
+        self,
+        session_id: UUID,
+        *,
+        incomplete: bool = False,
+        diagnostics: Sequence[ImportDiagnostic] = (),
+    ) -> None:
         session = self._require_open_session(session_id)
-        for entry_id in session.entry_ids:
+        for entry_id in self._session_entries[session_id]:
             self._entries[entry_id] = replace(self._entries[entry_id], is_finalized=True)
         self._sessions[session_id] = replace(
-            session, state=ImportSessionState.FINALIZED
+            session,
+            state=(ImportSessionState.INCOMPLETE if incomplete else ImportSessionState.FINALIZED),
+            diagnostics=tuple(diagnostics),
         )
         self._open_session_id = None
         self._revision += 1
 
     def cancel_import(self, session_id: UUID) -> None:
         session = self._require_open_session(session_id)
-        for entry_id in session.entry_ids:
+        self._rollback_session(session)
+        self._sessions[session_id] = replace(
+            session, state=ImportSessionState.CANCELLED
+        )
+        self._open_session_id = None
+        self._revision += 1
+
+    def fail_import(
+        self, session_id: UUID, diagnostics: Sequence[ImportDiagnostic]
+    ) -> None:
+        session = self._require_open_session(session_id)
+        self._rollback_session(session)
+        self._sessions[session_id] = replace(
+            session,
+            state=ImportSessionState.FAILED,
+            diagnostics=tuple(diagnostics),
+        )
+        self._open_session_id = None
+        self._revision += 1
+
+    def discard_folder_root_authorization(self, session_id: UUID) -> None:
+        session = self._require_open_session(session_id)
+        for root_id in session.folder_root_ids:
+            self._folder_roots.pop(root_id)
+        self._sessions[session_id] = replace(session, folder_root_ids=())
+        self._revision += 1
+
+    def _rollback_session(self, session: ImportSessionSnapshot) -> None:
+        for entry_id in self._session_entries[session.session_id]:
             entry = self._entries.pop(entry_id)
             self._path_entries.pop(entry.normalized_path_key)
             self._entry_order.remove(entry_id)
         for root_id in session.folder_root_ids:
             self._folder_roots.pop(root_id)
         self._entry_order = list(session.previous_order)
-        self._sessions[session_id] = replace(
-            session, state=ImportSessionState.CANCELLED
-        )
-        self._open_session_id = None
-        self._revision += 1
 
     def set_order(self, entry_ids: Sequence[UUID]) -> None:
         order = tuple(entry_ids)
@@ -265,7 +324,13 @@ class WorkingCollection:
             collection_id=self.collection_id,
             revision=self._revision,
             entries=tuple(self._entries[entry_id] for entry_id in self._entry_order),
-            import_sessions=tuple(self._sessions.values()),
+            import_sessions=tuple(
+                replace(
+                    session,
+                    entry_ids=tuple(self._session_entries[session.session_id]),
+                )
+                for session in self._sessions.values()
+            ),
             folder_roots=tuple(self._folder_roots.values()),
         )
 
