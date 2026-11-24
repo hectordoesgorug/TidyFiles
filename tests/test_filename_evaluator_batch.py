@@ -72,6 +72,16 @@ def test_unavailable_metadata_only_fails_when_a_token_needs_it() -> None:
     assert result.errors[0].token == "<NumFiles>"
 
 
+def test_batch_does_not_require_unused_physical_counts() -> None:
+    result = evaluate_batch(
+        parse_format("<Name>"),
+        (_file("a", files=None, directories=None),),
+    )
+
+    assert result.is_valid
+    assert result.files[0].validated_filename == "a"
+
+
 def test_directory_identity_is_windows_normalized_but_not_merged_by_name() -> None:
     files = (
         _file("a", r"C:\root\Photos"),
@@ -162,6 +172,23 @@ def test_directory_sequence_width_is_shared_within_but_not_between_parents() -> 
     assert result.files[9].value == "010"
     assert result.files[99].value == "100"
     assert result.files[100].value == "01"
+
+
+def test_directory_sequences_keep_independent_widths_when_parent_groups_interleave() -> None:
+    files = tuple(
+        file
+        for index in range(10)
+        for file in (_file(f"a{index}", r"C:\A"), _file(f"b{index}", r"D:\B"))
+    ) + tuple(_file(f"a{index}", r"C:\A") for index in range(10, 100))
+
+    result = evaluate_batch(parse_format("<IncNrDir>"), files)
+
+    assert result.is_valid
+    assert result.files[0].value == "001"
+    assert result.files[18].value == "010"
+    assert result.files[1].value == "01"
+    assert result.files[19].value == "10"
+    assert result.files[-1].value == "100"
 
 
 @pytest.mark.parametrize(

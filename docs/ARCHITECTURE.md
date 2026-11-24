@@ -2,8 +2,9 @@
 
 TidyFiles currently consists of a small Python package with a Windows desktop
 shell and foundational startup, configuration, storage, logging, and
-single-instance modules. File-processing engines are planned and are not part of
-the current application.
+single-instance modules. The pure filename engine is implemented as a library
+component but is not connected to the GUI. Collection, preview, destination
+planning, and filesystem processing remain planned.
 
 ## Startup and shutdown
 
@@ -41,7 +42,7 @@ not implemented.
 | `src/tidyfiles/config.py` | Schema-v1 configuration defaults, validation, loading, and atomic saving. Loading invalid configuration reports an error without rewriting it. |
 | `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
 | `src/tidyfiles/app.py` | System-appearance CustomTkinter shell, three operation tabs, one initially empty shared Treeview, and status text. |
-| `src/tidyfiles/filename_format.py` | Pure parser producing immutable, source-ordered literal spans and token occurrences with source offsets and preserved argument strings. |
+| `src/tidyfiles/filename_format.py` | Pure parser producing immutable, source-ordered literal spans and token occurrences; structured parse errors retain the exact input expression, offset, and optional offending token. |
 | `src/tidyfiles/filename_evaluator.py` | Pure per-file and ordered-batch evaluation of parsed tokens and extensions; returns raw values, resolved candidates, validated names, and file-specific diagnostics. |
 | `src/tidyfiles/filename_validation.py` | Pure legacy-character substitution and validation of one Windows filename component, including reserved device names, Unicode safety, and UTF-16 component length. |
 

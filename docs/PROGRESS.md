@@ -5,16 +5,19 @@
 The M0 foundation and minimal GUI shell are implemented. The application opens
 with an empty collection and exposes no file-processing or destructive actions.
 M1 parser, evaluator, extension resolution, and pure filename validation are
-available in the working tree; none are integrated into the GUI or connected to
-filesystem operations. The M1-C2 implementation is based on `main` at
-`e9a6491d1bb033f295c88eb8934d76929ca37e`.
+implemented at `50a97a929130c5a6502ac9fc751d9f15700b79bb`; none are integrated
+into the GUI or connected to filesystem operations. M1-D.12 corrected the
+DD-061 parser diagnostic to retain the complete input expression. The audit
+recommends M1 closure; the milestone remains listed as in progress pending its
+formal closure. See `docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-
+decision audit and historical finding.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
 | M0-A | Complete | Baseline repository and legacy-reference inspection. |
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
-| M1 | In progress | Strict parsing, per-file/batch evaluation, extension resolution, and pure Windows filename sanitization/validation implemented; filesystem planning remains planned. |
+| M1 | In progress | Pure parser/evaluator and filename validation implemented; M1-D.12 resolves the DD-061 diagnostic gap, and the audit recommends closure. Filesystem planning and application integration remain planned. |
 | M2 | Planned | Shared collection, import, scanning, ordering, and cancellation. |
 | M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
 | M4 | Planned | Duplicate analysis and verification. |
@@ -58,6 +61,24 @@ For M1-C2, local verification was run on the uncommitted working tree based on
 tests, compileall passed, and `git diff --check` passed. No `pyright` or `mypy`
 executable was available. The new validator tests use synthetic names and
 metadata; no target-volume or filesystem behavior is verified.
+
+For M1-D, the local audit and three regression tests ran on `main` based on
+`50a97a929130c5a6502ac9fc751d9f15700b79bb`. The checkout matched `origin/main`;
+Windows CI run #14 passed Ruff and pytest for that commit. Locally, Ruff,
+compileall, and `git diff --check` passed; pytest passed all 262 tests, including
+three new audit regressions. No static type checker or coverage package was
+available; test coverage was reviewed manually. The audit does not verify
+target-volume behavior or filesystem execution.
+
+For M1-D.12, the parser now retains the full original string in
+`FilenameFormatParseError.expression`; non-string input records `None`. Local
+verification passed Ruff, pytest (267 tests), compileall, and `git diff --check`;
+the focused parser/evaluator run passed all 119 tests. The constructor audit
+confirmed expression context on every string-input parser error path. No
+`pyright`, `mypy`, or `basedpyright` executable was available. The audit's
+DD-061 finding is resolved; no other M1
+pure-engine closure blocker was identified. M2/M3/M5/M6 integration remains
+planned, and no Windows destination-volume behavior is claimed.
 
 ## Open questions and deferred decisions
 

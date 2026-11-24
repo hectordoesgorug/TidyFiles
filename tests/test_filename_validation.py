@@ -172,6 +172,24 @@ def test_batch_validation_failure_retains_candidate_and_structured_error() -> No
     assert result.errors[0].position is None
 
 
+def test_batch_collects_evaluation_and_validation_errors_without_losing_valid_rows() -> None:
+    contexts = (
+        FileEvaluationContext("single", "single", source_extension=""),
+        FileEvaluationContext("has CON", "has CON", source_extension=""),
+        FileEvaluationContext("has valid", "has valid", source_extension=""),
+    )
+    result = evaluate_batch(parse_format("<Word:2>"), contexts)
+
+    assert not result.is_valid
+    assert result.files[0].error is not None
+    assert result.files[0].validation_error is None
+    assert result.files[1].error is None
+    assert result.files[1].candidate_filename == "CON"
+    assert result.files[1].validation_error is not None
+    assert result.files[2].validated_filename == "valid"
+    assert [error.file_identifier for error in result.errors] == ["single", "has CON"]
+
+
 def test_batch_accepts_a_destination_specific_component_limit() -> None:
     context = FileEvaluationContext("photo", "photo.jpg", source_extension="jpg")
     result = evaluate_batch(parse_format("<Name>"), (context,), max_component_length=8)

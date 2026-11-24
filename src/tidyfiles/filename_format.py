@@ -63,12 +63,23 @@ class ParsedFormat:
 
 
 class FilenameFormatParseError(ValueError):
-    """A syntax error with a zero-based source offset and optional token text."""
+    """A syntax error with its original string expression, offset, and token.
 
-    def __init__(self, reason: str, *, position: int, token: str | None = None) -> None:
+    ``expression`` is ``None`` only when parsing a non-string input.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        position: int,
+        token: str | None = None,
+        expression: str | None = None,
+    ) -> None:
         self.reason = reason
         self.position = position
         self.token = token
+        self.expression = expression
         detail = f"{reason} at offset {position}"
         if token is not None:
             detail += f" in {token!r}"
@@ -105,11 +116,13 @@ def _is_unsigned_decimal(value: str) -> bool:
     return bool(value) and all("0" <= character <= "9" for character in value)
 
 
-def _raise_token_error(raw: str, start: int, reason: str) -> NoReturn:
-    raise FilenameFormatParseError(reason, position=start, token=raw)
+def _raise_token_error(raw: str, start: int, reason: str, expression: str) -> NoReturn:
+    raise FilenameFormatParseError(
+        reason, position=start, token=raw, expression=expression
+    )
 
 
-def _parse_token(raw: str, start: int, end: int) -> TokenOccurrence:
+def _parse_token(raw: str, start: int, end: int, expression: str) -> TokenOccurrence:
     body = raw[1:-1]
 
     kind = _PARAMETERLESS_TOKENS.get(body)
@@ -125,24 +138,33 @@ def _parse_token(raw: str, start: int, end: int) -> TokenOccurrence:
         if body.startswith(prefix):
             value = body[len(prefix) :]
             if not _is_unsigned_decimal(value):
-                _raise_token_error(raw, start, f"{name} requires an unsigned decimal argument")
+                _raise_token_error(
+                    raw, start, f"{name} requires an unsigned decimal argument", expression
+                )
             return TokenOccurrence(kind, (value,), raw, start, end)
 
     for name, kind in _REQUIRED_NUMBER_TOKENS.items():
         prefix = f"{name}:"
         if body == name:
-            _raise_token_error(raw, start, f"{name} requires one unsigned decimal argument")
+            _raise_token_error(
+                raw, start, f"{name} requires one unsigned decimal argument", expression
+            )
         if body.startswith(prefix):
             value = body[len(prefix) :]
             if not _is_unsigned_decimal(value):
-                _raise_token_error(raw, start, f"{name} requires one unsigned decimal argument")
+                _raise_token_error(
+                    raw, start, f"{name} requires one unsigned decimal argument", expression
+                )
             return TokenOccurrence(kind, (value,), raw, start, end)
 
     if body.startswith("Move"):
         match = _MOVE_PATTERN.fullmatch(body)
         if match is None:
             _raise_token_error(
-                raw, start, "Move requires two unsigned decimal arguments in X:Y form"
+                raw,
+                start,
+                "Move requires two unsigned decimal arguments in X:Y form",
+                expression,
             )
         return TokenOccurrence(TokenKind.MOVE, match.groups(), raw, start, end)
 
@@ -150,9 +172,16 @@ def _parse_token(raw: str, start: int, end: int) -> TokenOccurrence:
         payload = body[len("RepS:") :] if body.startswith("RepS:") else ""
         number, separator, replacement = payload.partition(",")
         if not separator:
-            _raise_token_error(raw, start, "RepS requires an index and a comma before its string")
+            _raise_token_error(
+                raw,
+                start,
+                "RepS requires an index and a comma before its string",
+                expression,
+            )
         if not _is_unsigned_decimal(number):
-            _raise_token_error(raw, start, "RepS index must be an unsigned decimal argument")
+            _raise_token_error(
+                raw, start, "RepS index must be an unsigned decimal argument", expression
+            )
         return TokenOccurrence(TokenKind.REP_S, (number, replacement), raw, start, end)
 
     if body == "RepM" or body.startswith("RepM:"):
@@ -164,35 +193,45 @@ def _parse_token(raw: str, start: int, end: int) -> TokenOccurrence:
                 raw,
                 start,
                 "RepM requires two unsigned decimal arguments and a comma before its string",
+                expression,
             )
         if not _is_unsigned_decimal(count) or not _is_unsigned_decimal(position):
-            _raise_token_error(raw, start, "RepM arguments must be unsigned decimal values")
+            _raise_token_error(
+                raw, start, "RepM arguments must be unsigned decimal values", expression
+            )
         return TokenOccurrence(TokenKind.REP_M, (count, position, replacement), raw, start, end)
 
     if body == "Ins" or re.match(r"Ins[^:]*:", body):
         match = _INS_PATTERN.fullmatch(body)
         if match is None:
             _raise_token_error(
-                raw, start, "Ins requires an unsigned decimal position followed by ':'"
+                raw,
+                start,
+                "Ins requires an unsigned decimal position followed by ':'",
+                expression,
             )
         position, text = match.groups()
         return TokenOccurrence(TokenKind.INS, (position, text), raw, start, end)
 
     for name in _PARAMETERLESS_TOKENS:
         if body.startswith(f"{name}:"):
-            _raise_token_error(raw, start, f"{name} does not accept arguments")
+            _raise_token_error(raw, start, f"{name} does not accept arguments", expression)
 
     for name in _OPTIONAL_NUMBER_TOKENS:
         if body.startswith(f"{name}:"):
-            _raise_token_error(raw, start, f"{name} argument must be an unsigned decimal value")
+            _raise_token_error(
+                raw, start, f"{name} argument must be an unsigned decimal value", expression
+            )
 
     if body.startswith("RemoveL:") or body.startswith("RemoveR:"):
         name = body.split(":", 1)[0]
-        _raise_token_error(raw, start, f"{name} requires one unsigned decimal argument")
+        _raise_token_error(
+            raw, start, f"{name} requires one unsigned decimal argument", expression
+        )
 
     if not body:
-        _raise_token_error(raw, start, "Token name is missing")
-    _raise_token_error(raw, start, "Unknown token name")
+        _raise_token_error(raw, start, "Token name is missing", expression)
+    _raise_token_error(raw, start, "Unknown token name", expression)
 
 
 def parse_format(expression: str) -> ParsedFormat:
@@ -204,7 +243,7 @@ def parse_format(expression: str) -> ParsedFormat:
     escape syntax. An empty expression is represented by an empty ``parts`` tuple.
     """
     if not isinstance(expression, str):
-        raise FilenameFormatParseError("Expression must be a string", position=0)
+        raise FilenameFormatParseError("Expression must be a string", position=0, expression=None)
 
     parts: list[FormatPart] = []
     cursor = 0
@@ -215,7 +254,9 @@ def parse_format(expression: str) -> ParsedFormat:
         closing = expression.find(">", cursor)
 
         if closing != -1 and (opening == -1 or closing < opening):
-            raise FilenameFormatParseError("Unmatched closing delimiter '>'", position=closing)
+            raise FilenameFormatParseError(
+                "Unmatched closing delimiter '>'", position=closing, expression=expression
+            )
 
         if opening == -1:
             parts.append(LiteralSpan(expression[cursor:], cursor, length))
@@ -232,16 +273,18 @@ def parse_format(expression: str) -> ParsedFormat:
                 "Nested opening delimiter before token closes",
                 position=nested_opening,
                 token=partial,
+                expression=expression,
             )
         if closing == -1:
             raise FilenameFormatParseError(
                 "Missing closing delimiter '>'",
                 position=opening,
                 token=expression[opening:],
+                expression=expression,
             )
 
         raw = expression[opening : closing + 1]
-        parts.append(_parse_token(raw, opening, closing + 1))
+        parts.append(_parse_token(raw, opening, closing + 1, expression))
         cursor = closing + 1
 
     return ParsedFormat(expression, tuple(parts))

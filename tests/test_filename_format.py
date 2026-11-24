@@ -149,7 +149,7 @@ def test_rejects_unknown_token_names(expression: str) -> None:
 @pytest.mark.parametrize(
     ("expression", "position", "reason"),
     [
-        ("prefix Name>", 11, "Unmatched closing delimiter"),
+        ("prefix>suffix", 6, "Unmatched closing delimiter"),
         ("prefix <Name", 7, "Missing closing delimiter"),
         ("pre<<Name>>", 4, "Nested opening delimiter"),
         ("<RepS:1>", 0, "RepS requires an index"),
@@ -162,6 +162,7 @@ def test_parse_errors_include_token_or_position_and_reason(
         parse_format(expression)
 
     assert error.value.position == position
+    assert error.value.expression == expression
     assert reason in error.value.reason
     assert str(error.value)
 
@@ -172,6 +173,48 @@ def test_parse_error_identifies_offending_token() -> None:
 
     assert error.value.position == 3
     assert error.value.token == "<Unknown>"
+    assert error.value.expression == "pre<Unknown>"
+
+
+@pytest.mark.parametrize(
+    ("expression", "position", "token"),
+    [
+        ("prefix <IncNr:abc>", 7, "<IncNr:abc>"),
+        ("<RepS:1>", 0, "<RepS:1>"),
+        ("before <Unknown>", 7, "<Unknown>"),
+    ],
+)
+def test_internal_token_errors_retain_the_complete_expression(
+    expression: str, position: int, token: str
+) -> None:
+    with pytest.raises(FilenameFormatParseError) as error:
+        parse_format(expression)
+
+    assert error.value.expression == expression
+    assert error.value.position == position
+    assert error.value.token == token
+
+
+def test_expression_context_preserves_whitespace_and_unicode_exactly() -> None:
+    expression = " \t漢字🙂 <Unknown> \n"
+
+    with pytest.raises(FilenameFormatParseError) as error:
+        parse_format(expression)
+
+    assert error.value.expression == expression
+    assert error.value.position == expression.index("<Unknown>")
+    assert error.value.token == "<Unknown>"
+
+
+def test_unmatched_delimiter_after_a_valid_token_retains_expression() -> None:
+    expression = "<Name> tail>"
+
+    with pytest.raises(FilenameFormatParseError) as error:
+        parse_format(expression)
+
+    assert error.value.expression == expression
+    assert error.value.position == len(expression) - 1
+    assert error.value.token is None
 
 
 def test_rejects_non_string_expression_with_structured_error() -> None:
@@ -181,3 +224,4 @@ def test_rejects_non_string_expression_with_structured_error() -> None:
     assert error.value.position == 0
     assert error.value.token is None
     assert error.value.reason == "Expression must be a string"
+    assert error.value.expression is None
