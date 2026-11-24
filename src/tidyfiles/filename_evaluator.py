@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ntpath
 from dataclasses import dataclass, replace
-from typing import Mapping, NoReturn, Sequence
+from typing import Callable, Mapping, NoReturn, Sequence
 
 from tidyfiles.filename_format import (
     LiteralSpan,
@@ -64,6 +64,10 @@ class FilenameEvaluationError(ValueError):
         if token is not None:
             detail += f" in {token!r}"
         super().__init__(detail)
+
+
+class EvaluationCancelledError(RuntimeError):
+    """Raised when a cooperative cancellation check stops a batch."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,10 +338,14 @@ def _sequence_index(
 def _batch_numeric_widths(
     parsed: ParsedFormat,
     contexts: tuple[FileEvaluationContext, ...],
+    *,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[tuple[TokenKind, str | None], int]:
     widths: dict[tuple[TokenKind, str | None], int] = {}
     groups: dict[str, int] = {}
     for context in contexts:
+        if cancel_check is not None and cancel_check():
+            raise EvaluationCancelledError("Filename evaluation was cancelled")
         if context.parent_identity:
             key = _directory_key(context.parent_identity)
             groups[key] = groups.get(key, 0) + 1
@@ -359,6 +367,8 @@ def _batch_numeric_widths(
 
         if part.kind is TokenKind.INC_NR_DIR:
             for group, size in groups.items():
+                if cancel_check is not None and cancel_check():
+                    raise EvaluationCancelledError("Filename evaluation was cancelled")
                 largest = start + size - 1
                 key = (part.kind, group)
                 widths[key] = max(widths.get(key, 2), len(str(abs(start))), len(str(abs(largest))))
@@ -531,11 +541,15 @@ def evaluate_batch(
     contexts: Sequence[FileEvaluationContext],
     *,
     max_component_length: int = 255,
+    cancel_check: Callable[[], bool] | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> BatchEvaluationResult:
     """Evaluate an ordered collection snapshot without authorizing partial work."""
     snapshot = tuple(contexts)
     group_sizes: dict[str, int] = {}
     for context in snapshot:
+        if cancel_check is not None and cancel_check():
+            raise EvaluationCancelledError("Filename evaluation was cancelled")
         if context.parent_identity:
             key = _directory_key(context.parent_identity)
             group_sizes[key] = group_sizes.get(key, 0) + 1
@@ -543,6 +557,8 @@ def evaluate_batch(
     group_positions: dict[str, int] = {}
     indexed_contexts: list[FileEvaluationContext] = []
     for index, context in enumerate(snapshot):
+        if cancel_check is not None and cancel_check():
+            raise EvaluationCancelledError("Filename evaluation was cancelled")
         group = _directory_key(context.parent_identity) if context.parent_identity else None
         parent_index = None
         parent_size = None
@@ -560,9 +576,11 @@ def evaluate_batch(
             )
         )
 
-    widths = _batch_numeric_widths(parsed, tuple(indexed_contexts))
+    widths = _batch_numeric_widths(parsed, tuple(indexed_contexts), cancel_check=cancel_check)
     results: list[FileEvaluationResult] = []
-    for context in indexed_contexts:
+    for index, context in enumerate(indexed_contexts, start=1):
+        if cancel_check is not None and cancel_check():
+            raise EvaluationCancelledError("Filename evaluation was cancelled")
         if not parsed.source:
             error = FilenameEvaluationError(
                 "Filename format is required for rename",
@@ -571,6 +589,8 @@ def evaluate_batch(
                 token=None,
             )
             results.append(FileEvaluationResult(context, error=error))
+            if progress_callback is not None:
+                progress_callback(index, len(indexed_contexts))
             continue
         try:
             value = evaluate_format(parsed, context, numeric_widths=widths)
@@ -623,4 +643,6 @@ def evaluate_batch(
                             validated_filename=validated,
                         )
                     )
+        if progress_callback is not None:
+            progress_callback(index, len(indexed_contexts))
     return BatchEvaluationResult(tuple(results))

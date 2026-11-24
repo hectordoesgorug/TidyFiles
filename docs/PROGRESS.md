@@ -15,8 +15,10 @@ cooperative cancellation, and incomplete-import records. The service is not
 connected to the GUI. M2-C adds deterministic collection sorting, manual
 ordering, non-destructive row management, persistent sort preferences, and
 snapshot revision checks. GUI import/settings integration, a filename-evaluator
-adapter, final processing-readiness checks, and filesystem operations remain
-unimplemented.
+adapter with bounded directory counts, ordered evaluation, request-currency
+checks, progress and cancellation. These domain services are not connected to
+the GUI. M2-E GUI integration, final processing-readiness checks, destination
+planning and filesystem operations remain unimplemented.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -24,7 +26,9 @@ unimplemented.
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
 | M1 | Complete | Pure parser/evaluator, extension resolution, and filename validation, including the M1-D.12 DD-061 diagnostic correction. Application and filesystem integration remain outside M1. |
-| M2 | In progress | M2-A shared collection, M2-B read-only discovery, and M2-C collection management and ordering implemented. GUI integration, evaluator adaptation, and filesystem processing remain planned. |
+| M2 | In progress | M2-A through M2-D domain services implemented. M2-E GUI integration and filesystem processing remain planned. |
+| M2-D | Complete | Collection-backed filename evaluation, physical directory counts, bounded metadata cache, structured diagnostics, request currency, background progress and cancellation. |
+| M2-E | Planned | GUI integration, preview rendering and narrower evaluation-validity presentation. |
 | M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
@@ -118,11 +122,13 @@ For M2-C, focused collection-management, sorting, configuration, and
 discovery-integration suites passed 85 tests. The full local suite passed all
 343 tests with no skips; Ruff, compileall, and `git diff --check` also passed on
 the working tree based on M2-B commit
-`8c761a0a786e59a0e500e7cbbbcbf87efade8e6a`. No GitHub Actions run is claimed
-for this M2-C working tree. Tests cover the implemented domain clauses of
+`8c761a0a786e59a0e500e7cbbbcbf87efade8e6a`. This working-tree result did not
+include CI evidence. After M2-C was committed as
+`9f7e182db059285b3662a5d5092acf8fdc0ac838`, GitHub Actions run #18 passed Ruff
+and pytest for that commit. Tests cover the implemented domain clauses of
 DD-010, DD-021 through DD-026, DD-031, DD-048, DD-075, DD-077, and DD-078.
-GUI/settings integration, analysis acknowledgments and readiness, physical
-directory counts, and filesystem operations remain unimplemented.
+GUI/settings integration, analysis acknowledgments and readiness, and
+filesystem operations remained unimplemented at M2-C.
 
 Synthetic in-memory benchmarks ran on Windows 11 (build 26300), Python 3.13.17,
 with an Intel Core i5-10300H. Each cumulative import added 10% new entries
@@ -145,6 +151,79 @@ reordering and removal make one pass over the ordered IDs plus the selected
 IDs; Clear All clears collection-owned indexes and sequences in O(n). These
 measurements are local observations, not CI thresholds or production-volume
 guarantees.
+
+For M2-D, the focused adapter/metadata suite passed 51 tests, the focused
+filename-engine suite passed 230 tests, and the focused collection/discovery
+suite passed 51 tests, all with no skips. The full local suite passed all 394
+tests with no skips; Ruff, `compileall -q src tests`, and `git diff --check`
+passed. These are local Windows results on Python
+3.13.17; no CI run is claimed for the uncommitted M2-D changes. Native Windows
+symlink and hard-link fixtures passed. Junction/reparse-attribute, permission,
+partial-enumeration and directory-replacement cases were simulated; they do not
+prove behavior on every Windows filesystem or reparse provider. The tests cover
+all 20 existing token kinds through the adapter, collection/root context,
+ordered numbering, metadata caching/refresh, partial failures, conversion
+extensions, batch-wide invalidity, lifecycle, cancellation and stale results.
+
+Synthetic benchmarks used Windows 11 build 26300, Python 3.13.17, and an Intel
+Core i5-10300H. Collection entries and source paths were synthetic; only the
+temporary parent directories used for count-token benchmarks existed on disk.
+In-memory workloads did not enumerate directories. Each evaluation used one
+ordered batch; the service uses one worker and at most one replaceable pending
+request. Transient context/result memory is O(n), as required by ordered batch
+evaluation. The timed runs use a fresh cache per evaluation; a repeated
+one-parent evaluation hit the cached observation once with zero enumerations,
+while forced refresh performed one new enumeration. Times are seconds, local
+observations rather than CI thresholds.
+
+| Entries / parents | Workload | Contexts | Metadata | Engine | Total | Enumerations / cache hits |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1,000 / 10 | Basic | 0.003322 | 0 | 0.023778 | 0.028308 | 0 / 0 |
+| 1,000 / 10 | Global numbering | 0.004073 | 0 | 0.025161 | 0.030591 | 0 / 0 |
+| 1,000 / 10 | Per-directory numbering | 0.004156 | 0 | 0.024738 | 0.032089 | 0 / 0 |
+| 1,000 / 10 | Directory counts | 0.003752 | 0.010811 | 0.025945 | 0.044756 | 10 / 0 |
+| 1,000 / 10 | Mixed tokens | 0.003584 | 0 | 0.026149 | 0.031619 | 0 / 0 |
+| 1,000 / 1,000 | Basic | 0.003294 | 0 | 0.018981 | 0.023404 | 0 / 0 |
+| 1,000 / 1,000 | Global numbering | 0.004879 | 0 | 0.025790 | 0.032075 | 0 / 0 |
+| 1,000 / 1,000 | Per-directory numbering | 0.003174 | 0 | 0.026258 | 0.030905 | 0 / 0 |
+| 1,000 / 1,000 | Directory counts | 0.003584 | 0.925993 | 0.030478 | 0.964617 | 1,000 / 0 |
+| 1,000 / 1,000 | Mixed tokens | 0.004273 | 0 | 0.028771 | 0.034622 | 0 / 0 |
+| 10,000 / 10 | Basic | 0.038730 | 0 | 0.205776 | 0.255583 | 0 / 0 |
+| 10,000 / 10 | Global numbering | 0.040223 | 0 | 0.258213 | 0.312668 | 0 / 0 |
+| 10,000 / 10 | Per-directory numbering | 0.046675 | 0 | 0.264824 | 0.330726 | 0 / 0 |
+| 10,000 / 10 | Directory counts | 0.044614 | 0.014322 | 0.271742 | 0.371258 | 10 / 0 |
+| 10,000 / 10 | Mixed tokens | 0.041963 | 0 | 0.296710 | 0.353283 | 0 / 0 |
+| 10,000 / 1,000 | Basic | 0.037509 | 0 | 0.216203 | 0.264590 | 0 / 0 |
+| 10,000 / 1,000 | Global numbering | 0.039025 | 0 | 0.266909 | 0.319764 | 0 / 0 |
+| 10,000 / 1,000 | Per-directory numbering | 0.037561 | 0 | 0.281276 | 0.337132 | 0 / 0 |
+| 10,000 / 1,000 | Directory counts | 0.037053 | 0.940944 | 0.254274 | 1.278721 | 1,000 / 0 |
+| 10,000 / 1,000 | Mixed tokens | 0.039104 | 0 | 0.305581 | 0.358425 | 0 / 0 |
+| 100,000 / 10 | Basic | 0.495044 | 0 | 2.135440 | 2.930440 | 0 / 0 |
+| 100,000 / 10 | Global numbering | 0.398040 | 0 | 2.849671 | 3.438795 | 0 / 0 |
+| 100,000 / 10 | Per-directory numbering | 0.591407 | 0 | 2.729025 | 3.735288 | 0 / 0 |
+| 100,000 / 10 | Directory counts | 0.434948 | 0.052528 | 2.872239 | 3.810273 | 10 / 0 |
+| 100,000 / 10 | Mixed tokens | 0.568267 | 0 | 2.827922 | 3.814864 | 0 / 0 |
+| 100,000 / 1,000 | Basic | 0.483106 | 0 | 2.313722 | 2.932766 | 0 / 0 |
+| 100,000 / 1,000 | Global numbering | 0.401517 | 0 | 2.856240 | 3.414309 | 0 / 0 |
+| 100,000 / 1,000 | Per-directory numbering | 0.547290 | 0 | 3.019563 | 3.732702 | 0 / 0 |
+| 100,000 / 1,000 | Directory counts | 0.445330 | 0.988561 | 2.805015 | 4.689572 | 1,000 / 0 |
+| 100,000 / 1,000 | Mixed tokens | 0.553096 | 0 | 3.205438 | 3.929362 | 0 / 0 |
+
+For a 10,000-entry in-memory batch, cancellation during filename evaluation was
+requested after 100 completed rows and observed 2.571 ms later; the result was
+discarded as canceled. A separate test canceled while directory enumeration
+was blocked and completed after the operating-system call returned. Cancellation
+is cooperative and has no bound while a filesystem call is blocked.
+
+M2-D integrates and preserves the applicable clauses of DD-007, DD-010,
+DD-020 through DD-026, DD-031, DD-048, DD-049, DD-051, DD-057, DD-060, DD-061,
+DD-065, DD-067, DD-069 through DD-075, DD-077 and DD-078. DD-076 destination
+selection remains for the future planner. M2-E GUI integration, incomplete
+import acknowledgment UI, duplicate analysis, destination collision checks,
+execution preflight and all filesystem mutations remain pending. M3 must force
+fresh required counts and independently revalidate sources, filesystem
+metadata, destination availability, target-volume constraints and collisions;
+metadata observations do not authorize execution.
 
 ## Open questions and deferred decisions
 

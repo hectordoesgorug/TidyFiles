@@ -1,11 +1,11 @@
 # File Safety and Current Status
 
 The current GUI is a shell and does not import or process user files. A separate
-read-only discovery service is implemented but is not connected to the GUI. No
-file operation renames, deletes, moves, repacks, or otherwise modifies user
-files. The collection domain can reorder or remove rows and clear its in-memory
-state; these operations never change source files. The GUI does not expose them
-yet.
+read-only discovery service and a collection-backed filename-evaluation
+service are implemented but are not connected to the GUI. No file operation
+renames, deletes, moves, repacks, or otherwise modifies user files. The
+collection domain can reorder or remove rows and clear its in-memory state;
+these operations never change source files. The GUI does not expose them yet.
 
 ## Implemented foundations
 
@@ -38,6 +38,20 @@ yet.
   import-root records, and collection-specific diagnostics from memory while
   retaining saved sorting preferences. These operations are disabled while an
   import is active.
+- **Filename evaluation:** The adapter reads only the immutable collection
+  snapshot and uses the existing pure ordered evaluator. It enumerates an
+  immediate parent directory only when `<NumFiles>` or `<NumDirs>` is present.
+  Counts include ordinary files excluded from import, count hard-link names as
+  separate entries, and skip symlinks, junctions, other reparse points and
+  special entries. Counts are nonrecursive; `<NumItems>` comes from collection
+  size. An inaccessible, missing, replacement-detected or partially enumerated
+  parent produces unavailable counts and diagnostics; it never becomes zero.
+  No file contents are opened, and evaluation changes neither collection membership
+  nor source files. Results are current only for the matching collection
+  revision, request ID, expression and settings. A valid evaluation is not a
+  processing-ready state and does not satisfy incomplete-import
+  acknowledgment, duplicate analysis, destination collision checks, execution
+  preflight or explicit user authorization.
 
 These are startup and persistence foundations, not a file-recovery system.
 
@@ -60,7 +74,9 @@ revalidate before mutation, avoid unauthorized overwrites and deletion, and use
 temporary isolated fixtures for destructive-operation tests. Logs must not be
 used as the sole recovery record. No file operation should run automatically.
 
-Path-based discovery checks do not provide a handle-based defense against an
-external process replacing a directory with a reparse point between inspection
-and enumeration. Treat metadata as a snapshot and revalidate all affected paths
-before any future filesystem mutation.
+Path-based discovery and count-acquisition checks do not provide a handle-based
+defense against an external process replacing a directory with a reparse point
+between inspection and enumeration. Directory-count cache entries are
+performance aids, not proof of current contents. Treat discovery and evaluation
+metadata as snapshots and revalidate all affected paths before any future
+filesystem mutation.

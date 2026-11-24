@@ -5,9 +5,11 @@ shell and foundational startup, configuration, storage, logging, and
 single-instance modules. The pure filename engine is implemented as a library
 component but is not connected to the GUI. The shared in-memory collection
 domain model supports ordered snapshots and import-session finalization or
-rollback. A read-only, GUI-independent discovery service scans selected files
-and folders; the GUI does not call it yet. Preview, destination planning, and
-filesystem processing remain planned.
+rollback. Read-only, GUI-independent discovery and filename-evaluation
+services are implemented; the GUI does not call them yet. A finalized
+collection snapshot can be adapted to the pure filename engine, including
+on-demand physical directory counts. Preview rendering, destination planning,
+and filesystem processing remain planned.
 
 ## Startup and shutdown
 
@@ -50,6 +52,7 @@ not implemented.
 | `src/tidyfiles/sorting.py` | Pure sort criteria, directions, natural comparison keys, legacy file categories, and deterministic ordering without filesystem access. |
 | `src/tidyfiles/filename_format.py` | Pure parser producing immutable, source-ordered literal spans and token occurrences; structured parse errors retain the exact input expression, offset, and optional offending token. |
 | `src/tidyfiles/filename_evaluator.py` | Pure per-file and ordered-batch evaluation of parsed tokens and extensions; returns raw values, resolved candidates, validated names, and file-specific diagnostics. |
+| `src/tidyfiles/filename_integration.py` | Collection-snapshot adapter, read-only directory-count cache, structured evaluation results, request-currency checks, cooperative cancellation, progress, and one bounded background worker. |
 | `src/tidyfiles/filename_validation.py` | Pure legacy-character substitution and validation of one Windows filename component, including reserved device names, Unicode safety, and UTF-16 component length. |
 
 The shell does not import files, update the collection, evaluate parsed rename
@@ -154,6 +157,61 @@ unavailable.
 The parser preserves commas in final `RepS`, `RepM`, and `Ins` arguments, and
 evaluation uses them verbatim.
 
+## Collection filename evaluation
+
+`filename_integration.py` accepts one immutable `CollectionSnapshot`, parses
+the expression before metadata acquisition, creates one engine context per
+entry, and calls `evaluate_batch` once in effective collection order. Each
+result row retains the original `CollectionEntry`, so stable entry ID, source
+path and import context remain associated even after sorting or reordering.
+`<DirName>` uses the first-established import-root name; `<SubDirName>` uses the
+actual immediate parent name. Per-directory numbering uses the stored
+normalized parent-path identity. The engine remains filesystem-independent.
+
+`<NumFiles>` and `<NumDirs>` trigger one nonrecursive enumeration per distinct
+parent directory in that evaluation. The provider counts regular physical
+files and directories, including ordinary excluded clutter files. It skips
+symlinks, junctions and other reparse entries, as well as special entries;
+hard-link names are counted as separate directory entries. A failed or partial
+listing leaves both counts unavailable and produces per-entry diagnostics.
+`<NumItems>` remains the batch size. Expressions without physical count tokens
+do not enumerate directories.
+
+The background service has one worker and retains at most one replaceable
+pending request. It reports parsing, metadata, context-building and batch
+progress from the worker thread; a GUI consumer must marshal updates onto the
+UI thread. Cancellation is cooperative and cannot interrupt a blocked
+operating-system filesystem call. Evaluation never mutates the collection.
+Batch errors remain visible per entry, while any parser, token, metadata or
+filename-validation error makes the entire rename batch invalid.
+
+The service cache is a bounded 256-entry LRU for the service lifetime, keyed by
+lexically normalized absolute directory path and available filesystem object
+identity. Successful and failed enumerations can be reused while the identity
+is unchanged. Filesystems without a usable identity are not cached across
+requests. Consumers can invalidate cached metadata or submit a forced refresh;
+these operations invalidate prior evaluation currency. A cache hit and an
+identity check do not prove that directory contents stayed unchanged. The
+result request ID, collection ID/revision, expression and settings must all
+match current inputs. The GUI consumer must pass its current expression and
+settings to `current_result()`; it returns no result for a changed collection,
+an active import, a superseded request, or changed expression or settings. A
+candidate comparison reports raw candidate changes separately from
+validated filename changes, so an invalid name is never promoted to a valid
+preview candidate.
+
+An evaluation marked valid establishes only that the filename expression was
+evaluated and each filename component passed validation. M2-E must separately
+preserve incomplete-import acknowledgment requirements and later duplicate,
+destination-collision, preflight and user-authorization checks. The evaluation
+service exposes no global processing-ready flag.
+
+Directory observations are path-based snapshots. An external process can
+replace a path between no-follow component checks and enumeration, and
+metadata can change after observation. M3 must independently check sources,
+filesystem metadata, destination availability, volume constraints and
+collisions immediately before any proposed filesystem operation.
+
 ## Tests and CI
 
 Tests are in `tests/` and use pytest. Configuration, storage, logging, package
@@ -167,8 +225,7 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Physical directory-count caching, destination planner and filesystem
-transaction layer,
-duplicate verification, and repacker are future components. Their behavior is
+Destination planning, filesystem transactions, duplicate verification, and
+repacking are future components. Their behavior is
 specified in local planning references, not implemented in this package. Do not
 infer implementation status from an approved requirement.
