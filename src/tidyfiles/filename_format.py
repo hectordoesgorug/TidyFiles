@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TypeAlias
+from typing import NoReturn, TypeAlias
 
 
 class TokenKind(StrEnum):
@@ -105,7 +105,7 @@ def _is_unsigned_decimal(value: str) -> bool:
     return bool(value) and all("0" <= character <= "9" for character in value)
 
 
-def _raise_token_error(raw: str, start: int, reason: str) -> None:
+def _raise_token_error(raw: str, start: int, reason: str) -> NoReturn:
     raise FilenameFormatParseError(reason, position=start, token=raw)
 
 
