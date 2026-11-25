@@ -5,11 +5,11 @@ shell and foundational startup, configuration, storage, logging, and
 single-instance modules. The pure filename engine is implemented as a library
 component but is not connected to the GUI. The shared in-memory collection
 domain model supports ordered snapshots and import-session finalization or
-rollback. Read-only, GUI-independent discovery and filename-evaluation
-services are implemented; the GUI does not call them yet. A finalized
-collection snapshot can be adapted to the pure filename engine, including
-on-demand physical directory counts. Preview rendering, destination planning,
-and filesystem processing remain planned.
+rollback. The GUI connects read-only file and recursive-folder discovery through
+an application controller; the filename-evaluation service remains unconnected
+to the GUI. A finalized collection snapshot can be adapted to the pure filename
+engine, including on-demand physical directory counts. Preview rendering,
+destination planning, and filesystem processing remain planned.
 
 ## Startup and shutdown
 
@@ -47,6 +47,7 @@ not implemented.
 | `src/tidyfiles/config.py` | Schema-v1 defaults, validation, loading, and atomic saving, including backward-compatible sort preferences. Invalid sort values use defaults without rewriting the file during load; other invalid configuration remains an error. |
 | `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
 | `src/tidyfiles/app.py` | CustomTkinter main window, three mode panels, one shared collection-backed Treeview, common controls, column customization, appearance, and window geometry preferences. |
+| `src/tidyfiles/import_controller.py` | One active discovery session, Tk-thread result consumption, bounded incremental rendering, asynchronous final-order preparation, cancellation rollback, and shutdown coordination. |
 | `src/tidyfiles/ui_preferences.py` | Per-mode Treeview column defaults and safe preference recovery, plus window-geometry parsing and virtual-screen clamping. |
 | `src/tidyfiles/collection.py` | GUI-independent working collection with one authoritative ordered ID sequence, indexed membership, import lifecycle, management operations, ordering mode, and immutable snapshots. |
 | `src/tidyfiles/discovery.py` | Read-only file and recursive folder discovery, exclusions, metadata snapshots, one bounded background producer, batched collection updates, cooperative cancellation, and complete/incomplete/failed outcomes. |
@@ -56,8 +57,10 @@ not implemented.
 | `src/tidyfiles/filename_integration.py` | Collection-snapshot adapter, read-only directory-count cache, structured evaluation results, request-currency checks, cooperative cancellation, progress, and one bounded background worker. |
 | `src/tidyfiles/filename_validation.py` | Pure legacy-character substitution and validation of one Windows filename component, including reserved device names, Unicode safety, and UTF-16 component length. |
 
-The shell does not import files, update the collection, evaluate parsed rename
-formats in the GUI, hash duplicates, repack media, or modify the filesystem.
+The GUI imports selected files and recursively selected folders by reading
+metadata, without opening file contents. Import updates the shared collection
+and table progressively; it does not evaluate rename formats, hash duplicates,
+repack media, or modify the filesystem.
 `collection.py` stores the selected path spelling and a separate
 case-insensitive, normalized Windows path key without resolving paths or
 accessing the filesystem. Filesystem object identity is optional metadata and
@@ -120,7 +123,8 @@ Each immutable snapshot carries a monotonic revision. `is_current(snapshot)`
 checks collection identity and revision so membership or effective-order
 changes, including canceled imports, invalidate downstream results without
 reusing a prior revision. No-op reorder and removal operations do not advance
-the revision. M2-E1 presents this collection through one shared Treeview.
+the revision. M2-E2 presents this collection progressively through one shared
+Treeview.
 The scan is a metadata snapshot and does not replace M3 execution-time
 revalidation. The pure
 `filename_evaluator.py` module consumes an existing parsed
@@ -165,9 +169,9 @@ sort criterion and direction. It always opens on Bulk Rename with an empty
 collection. All three tabs use the same collection and one Treeview; switching
 modes changes only the mode panel and the Treeview's predefined display columns.
 Rows use the stable collection entry ID as the Treeview item ID. The shared
-collection is available to later GUI integration through
-`root.application.collection` (also exposed as `root.working_collection`), and
-`root.application.refresh_collection()` renders its immutable snapshot.
+collection is available through `root.application.collection` (also exposed as
+`root.working_collection`), and `root.application.refresh_collection()` renders
+its immutable snapshot for infrequent complete refreshes.
 
 `ui_preferences.py` keeps independent visibility and width preferences for
 each mode, restores required columns, ignores unknown saved identifiers, and
@@ -177,18 +181,39 @@ Window geometry is clamped to Tk's current virtual-screen bounds and rechecked
 after window configuration changes. Manual monitor/DPI acceptance remains
 tracked for M2-E5.
 
-M2-E1 provides the shared collection toolbar and movement controls, but import,
-removal, clearing, sorting, reordering, evaluation, and all execution buttons
-remain disabled until their respective integration slices. The Columns dialog
-is functional. The rename field is session-only; token insertion, profiles,
-format help, and live evaluation are deferred. The Auto-clean switch is disabled
-until its disclosure and eligible-folder workflow are implemented. Counter is
-an off-by-default, session-only switch with no execution behavior. Resolution
-and length cells show “— (not probed)” for filename extensions that identify
-applicable media types and stay blank otherwise; no media probing is performed.
-The File type column is inferred from the filename extension using Python's MIME
-database; contents are not checked. Duplicate groups, proposed names, and
-operation results are not fabricated.
+M2-E2 enables Add Files and Add Folder while idle. During discovery, both import
+buttons, remove, clear, sorting, movement, and processing controls are disabled;
+tab switching, column customization, and Cancel remain available. Results are
+consumed on the Tk thread in batches of at most 32 records per callback, with
+an 8 ms queue-consumption budget. Rows first appear in provisional discovery
+order. After traversal and queue consumption finish, final order is prepared
+from an immutable snapshot on a worker and committed only if the collection
+revision still matches. Treeview final-order updates use chunks of 96 rows.
+Cancellation restores only the active import's entries and folder-root record,
+preserving earlier entries, order, selection, and incomplete-import warnings.
+Incomplete and failed import diagnostics remain available in a consolidated
+details view after later successful imports. Closing during discovery requests
+cooperative cancellation and leaves the event loop active until rollback
+finishes; an operating-system filesystem call that has not returned can delay
+closure.
+
+Add Files uses the native multi-file picker with an All Files option; Add Folder
+uses the native folder picker and always scans recursively. The existing
+discovery service retains exclusions, metadata capture, bounded queue capacity
+128, default result batch size 64, and a single discovery worker. No selected
+file contents are read. Import does not imply filename validation or processing
+readiness.
+
+Remove, clear, explicit sort controls, manual movement, live evaluation and
+preview, token insertion, profiles, format help, and all processing actions
+remain deferred. The Columns dialog is functional. The rename field is
+session-only. Auto-clean stays disabled, and Counter is an off-by-default,
+session-only switch with no execution behavior. Resolution and length cells
+show “— (not probed)” for filename extensions that identify applicable media
+types and stay blank otherwise; no media probing is performed. The File type
+column is inferred from the filename extension using Python's MIME database;
+contents are not checked. Duplicate groups, proposed names, and operation
+results are not fabricated.
 
 ## Collection filename evaluation
 

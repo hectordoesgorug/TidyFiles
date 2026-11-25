@@ -1,14 +1,11 @@
 # File Safety and Current Status
 
-The current GUI presents one empty shared collection across three modes, but
-does not import or process user files. A separate read-only discovery service
-and a collection-backed filename-evaluation service are implemented but are not
-connected to the GUI. Import, collection-management, sorting, reordering,
-evaluation, and processing controls remain disabled. No file operation
-renames, deletes, moves, repacks, or otherwise modifies user files. The
-collection domain can reorder or remove rows and clear its in-memory state;
-these operations never change source files, and their GUI controls remain
-disabled pending integration.
+The GUI presents one shared collection across three modes. Add Files and Add
+Folder import selected paths using read-only discovery metadata; file contents
+are not opened. Cancellation rolls back only entries from the active import
+and does not change source files. Collection removal, clearing, sorting,
+reordering, evaluation, and processing remain unavailable in the GUI. No file
+operation renames, deletes, moves, repacks, or otherwise modifies user files.
 
 The Auto-clean switch is disabled until its permanent-deletion disclosure and
 eligible-folder workflow are implemented. Its approved future deletion scope
@@ -38,9 +35,11 @@ operation.
   deleted. Ordinary hidden and dot-prefixed files remain eligible. Actual
   application-managed Trash, staging, and recovery paths must be supplied to
   the discovery service explicitly; storage currently defines no such paths.
-  Discovery reads metadata but not file contents, and retains incomplete-scan
-  diagnostics with any successfully discovered entries. It does not authorize
-  later processing.
+  The GUI displays accepted rows progressively and reports discovery progress,
+  intentional exclusions, and errors separately. Discovery reads metadata but
+  not file contents, and retains incomplete-scan diagnostics with successfully
+  discovered entries. These warnings remain visible after later successful
+  imports. Import does not authorize later processing.
 - **Collection management:** Move and sort operations change only the working
   list. Remove from List drops selected entries from memory and leaves their
   source files and explicit Add Folder root records intact. Incomplete-scan

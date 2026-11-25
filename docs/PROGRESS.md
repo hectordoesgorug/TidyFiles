@@ -16,11 +16,12 @@ connected to the GUI. M2-C adds deterministic collection sorting, manual
 ordering, non-destructive row management, persistent sort preferences, and
 snapshot revision checks. M2-D adds a filename-evaluator adapter with bounded
 directory counts, ordered evaluation, request-currency checks, progress and
-cancellation. These domain services are not connected to the GUI. M2-E1 adds
-the main-window, shared empty collection presentation, and per-mode column
-customization foundation. Discovery/evaluation integration, collection
-management bindings, final processing-readiness checks, destination planning,
-and filesystem operations remain unimplemented.
+cancellation. M2-E1 adds the shared main window and per-mode column
+customization. M2-E2 connects explicit Add Files and recursive Add Folder
+requests to read-only progressive discovery, cancellation and persistent
+incomplete-import diagnostics. Filename evaluation, collection management,
+final processing-readiness checks, destination planning, and filesystem
+operations remain unimplemented.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -28,11 +29,12 @@ and filesystem operations remain unimplemented.
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
 | M1 | Complete | Pure parser/evaluator, extension resolution, and filename validation, including the M1-D.12 DD-061 diagnostic correction. Application and filesystem integration remain outside M1. |
-| M2 | In progress | M2-A through M2-D domain services implemented; M2-E GUI integration is in progress. Filesystem processing remains planned. |
+| M2 | In progress | M2-A through M2-D domain services and M2-E2 import integration are complete; later GUI integration and filesystem processing remain planned. |
 | M2-D | Complete | Collection-backed filename evaluation, physical directory counts, bounded metadata cache, structured diagnostics, request currency, background progress and cancellation. |
-| M2-E | In progress | GUI integration, preview rendering and narrower evaluation-validity presentation. |
+| M2-E | In progress | GUI integration continues in staged slices; import discovery is complete, while collection management, previews, and later workflows remain planned. |
 | M2-E1 | Complete | Main-window layout, shared empty collection presentation, context-specific columns, and persisted appearance and geometry preferences. |
-| M2-E2/E3 | Planned | Discovery/import integration and shared collection management bindings. |
+| M2-E2 | Complete | Native import controls, progressive discovery, cancellation, ordering, and incomplete-import reporting. |
+| M2-E3 | Planned | Shared collection management bindings and ordering controls. |
 | M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
@@ -63,7 +65,7 @@ DD-079 through DD-085 are recorded as follows:
 | --- | --- |
 | DD-079 — Horizontal window layout with full-width Treeview | Implemented with responsive grid geometry; no permanent sidebar. |
 | DD-080 — Context-specific, customizable columns | Implemented with the approved per-mode defaults, fixed order, required-column enforcement, optional visibility, saved widths, native header resizing, Restore Defaults, and header context-menu access. |
-| DD-081 — Shared collection toolbar and list interactions | Shared controls and movement buttons are present. Import, remove, clear, sort, and movement controls remain disabled pending M2-E2/E3 bindings. |
+| DD-081 — Shared collection toolbar and list interactions | M2-E2 enables Add Files and Add Folder. Remove, Clear All, explicit sort, and manual movement remain disabled pending later integration. |
 | DD-082 — Compact Bulk Rename format controls | Editable format field and the three approved built-in presets are present. Insert Token, Profiles, Format Reference, and live evaluation remain disabled/deferred. Unsaved field edits are not persisted. |
 | DD-083 — Optional post-processing Counter | The switch is present, defaults OFF, and has no execution effect. The algorithm remains deferred. |
 | DD-084 — Native toggle switches for boolean operation options | Single Folder, Auto-clean, and Counter use CustomTkinter switches. Single Folder and Counter only change session-local UI state. Auto-clean is disabled. |
@@ -129,11 +131,79 @@ text supplements color; contrast and selection remain clear in Light and Dark
 modes; stale previews are not shown as current; any evaluation error invalidates
 the rename batch; and destination-collision checks remain assigned to M3.
 
-All unconnected controls remain disabled. No automatic import, evaluation,
-cleanup, or file operation occurs. The main window exposes the shared collection
-as `root.application.collection` and provides
-`root.application.refresh_collection()` for later GUI-thread integration. Actual
-discovery and evaluation services are not started by this slice.
+At M2-E1 completion, all unconnected controls were disabled and no automatic
+import, evaluation, cleanup, or file operation occurred. M2-E2 now starts
+discovery only after an explicit Add Files or Add Folder request; it does not
+automatically evaluate or change files. The main window exposes the shared
+collection as `root.application.collection` and retains
+`root.application.refresh_collection()` for infrequent complete refreshes.
+
+## M2-E2 — Import controls and progressive discovery
+
+Native Add Files and recursive Add Folder dialogs delegate directly to the
+existing discovery service. Accepted entries appear progressively in the
+shared Treeview with stable collection-entry UUIDs and stored metadata only.
+The filename-evaluation service remains unconnected; no contents are opened,
+media is probed, or filenames are proposed. Existing path recognition prevents
+duplicate entries, and first-established import contexts and explicit folder
+roots remain collection-owned.
+
+`ImportController` owns one active discovery session. Its Tk-thread poller
+consumes at most 32 results per tick, in batches of at most 16, with an 8 ms
+queue-consumption budget. The producer retains the existing one-worker,
+128-record queue and result batch size of 64. Summary size accounting is
+incremental. Final order is prepared from an immutable collection snapshot on a
+worker and checked against the session and collection revision before commit.
+The Treeview applies order with one native child-order update and refreshes row
+values in chunks of 96. Automatic mode sorts all retained entries; manual mode
+preserves prior order and appends the newly sorted entries. Manual movement
+controls remain disabled.
+
+The shared footer shows indeterminate progress and separate live discovery
+counters. Cancel remains visible across tabs when applicable. Cancellation
+waits for the producer to stop, removes only the current import's entries and
+roots, restores prior order and selection, and retains earlier incomplete
+warnings. Import issues opens one consolidated diagnostics view; later
+successful imports do not clear older warnings. Closing during discovery
+requests cancellation and waits asynchronously for retirement. A blocked
+operating-system filesystem call can delay cancellation or close.
+
+Automated GUI/controller, collection, and discovery tests cover dialog
+delegation, progressive delivery, control and tab lifecycle, ordering,
+cancellation/rollback, persistent warnings, worker failures, and source-file
+preservation. Visual manual GUI review could not be performed because the
+computer-use native pipe was unavailable after retry; scripted headful Tk
+measurements below are not a substitute for visual review.
+
+Headful Tk import measurements used isolated synthetic files, Windows 11 build
+26300, Python 3.13.17, and an Intel Core i5-10300H. Values are local
+observations, not CI thresholds. Discovery duration includes producer
+wall time includes filesystem enumeration/metadata work and time blocked by the
+bounded result queue. Queue-drain time runs from producer completion until the
+consumer has consumed the final result. Order-preparation time measures the
+asynchronous immutable-snapshot sort. Treeview apply/commit time runs from the
+first final-order callback until the session becomes idle. Total time is from
+import start until all rows are updated and the collection is finalized.
+
+| New files | Rows after import | First visible row | Producer wall time | Queue drain | Order preparation | Treeview apply/commit | Total to finalized | Peak queue / capacity | Largest Tk heartbeat delay |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 1,000 | 0.055 s | 0.987 s | 0.137 s | 0.047 s | 0.363 s | 1.533 s | 128 / 128 | 28 ms |
+| 10,000 additional | 11,000 | 0.018 s | 9.688 s | 0.115 s | 0.275 s | 3.947 s | 14.024 s | 128 / 128 | 264 ms |
+
+Both runs used one discovery worker, queue capacity 128, and result batches of
+64. The 10,000-file run ended with 11,000 cumulative rows. The Tk heartbeat
+remained active, with a largest measured delay of 264 ms. A separate controlled
+cancellation after 100 rows appeared returned the application to idle in
+0.123 s (producer cancellation latency 0.030 s) and rolled back all temporary
+rows. The earlier pre-optimization run exceeded four minutes without
+completing and was stopped; repeated per-row Treeview moves were replaced by
+the native child-order update before collecting the results above.
+
+M2-E2 completes the import integration. M2-E3 should bind Remove, Clear All,
+sort selection, and manual movement to the existing collection APIs; preserve
+incomplete-import warnings unless Clear All is explicitly chosen; maintain
+stable row IDs and selection; and remain disabled during active import. It must
+not enable processing or infer preview validity.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 
@@ -393,10 +463,12 @@ M2-D integrates and preserves the applicable clauses of DD-007, DD-010,
 DD-020 through DD-026, DD-031, DD-048, DD-049, DD-051, DD-057, DD-060, DD-061,
 DD-065, DD-067, DD-069 through DD-075, DD-077 and DD-078. DD-076 destination
 selection remains for the future planner. M2-E1 provides the main-window shell
-and shared collection presentation. Remaining M2-E integration includes
-discovery/import acknowledgment, collection management, duplicate analysis,
-preview evaluation and destination collision checks. Execution preflight and
-all filesystem mutations remain pending. M3 must force
+and shared collection presentation; M2-E2 connects discovery and import, with
+incomplete-import warnings retained. Explicit acknowledgment before future
+processing remains pending. Remaining GUI integration includes collection
+management and preview evaluation. Duplicate analysis and destination
+collision checks remain assigned to their later milestones. Execution
+preflight and all filesystem mutations remain pending. M3 must force
 fresh required counts and independently revalidate sources, filesystem
 metadata, destination availability, target-volume constraints and collisions;
 metadata observations do not authorize execution.

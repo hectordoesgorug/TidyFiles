@@ -131,6 +131,14 @@ class RegistrationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedImportOrder:
+    collection_id: UUID
+    session_id: UUID
+    revision: int
+    entry_ids: tuple[UUID, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CollectionCapabilities:
     is_importing: bool
     can_reorder: bool
@@ -302,8 +310,18 @@ class WorkingCollection:
         *,
         incomplete: bool = False,
         diagnostics: Sequence[ImportDiagnostic] = (),
+        prepared_order: PreparedImportOrder | None = None,
     ) -> None:
         session = self._require_open_session(session_id)
+        if prepared_order is not None:
+            if (
+                prepared_order.collection_id != self._collection_id
+                or prepared_order.session_id != session_id
+                or prepared_order.revision != self._revision
+                or len(prepared_order.entry_ids) != len(self._entry_order)
+                or set(prepared_order.entry_ids) != set(self._entry_order)
+            ):
+                raise CollectionError("Prepared import order is stale or incomplete")
         for entry_id in self._session_entries[session_id]:
             self._entries[entry_id] = replace(self._entries[entry_id], is_finalized=True)
         self._sessions[session_id] = replace(
@@ -312,7 +330,9 @@ class WorkingCollection:
             diagnostics=tuple(diagnostics),
         )
         new_entry_ids = self._session_entries[session_id]
-        if self._ordering_mode is OrderingMode.AUTOMATIC:
+        if prepared_order is not None:
+            self._entry_order = list(prepared_order.entry_ids)
+        elif self._ordering_mode is OrderingMode.AUTOMATIC:
             entries = tuple(self._entries[entry_id] for entry_id in self._entry_order)
             sorted_entries = sort_entries(entries, self._sort_preferences)
             self._entry_order = [entry.entry_id for entry in sorted_entries]
@@ -325,6 +345,33 @@ class WorkingCollection:
             ]
         self._open_session_id = None
         self._revision += 1
+
+    def prepare_import_order(self, session_id: UUID) -> PreparedImportOrder:
+        """Sort an immutable import snapshot for later revision-checked finalization."""
+        snapshot = self.snapshot()
+        session = next(
+            (item for item in snapshot.import_sessions if item.session_id == session_id),
+            None,
+        )
+        if session is None or session.state is not ImportSessionState.OPEN:
+            raise ImportSessionClosedError("Import session is not open")
+        entries = {entry.entry_id: entry for entry in snapshot.entries}
+        if snapshot.ordering_mode is OrderingMode.AUTOMATIC:
+            ordered = sort_entries(snapshot.entries, snapshot.sort_preferences)
+            entry_ids = tuple(entry.entry_id for entry in ordered)
+        else:
+            new_entries = tuple(entries[entry_id] for entry_id in session.entry_ids)
+            ordered_new = sort_entries(new_entries, snapshot.sort_preferences)
+            entry_ids = (
+                *session.previous_order,
+                *(entry.entry_id for entry in ordered_new),
+            )
+        return PreparedImportOrder(
+            snapshot.collection_id,
+            session_id,
+            snapshot.revision,
+            entry_ids,
+        )
 
     def cancel_import(self, session_id: UUID) -> None:
         session = self._require_open_session(session_id)

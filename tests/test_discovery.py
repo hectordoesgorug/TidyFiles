@@ -786,3 +786,38 @@ def test_no_premature_completion_until_results_are_consumed(tmp_path: Path) -> N
     assert len(collection.snapshot().finalized_entries) == 0
     session.wait_until_terminal()
     assert session.state is DiscoveryState.COMPLETE
+
+
+def test_deferred_finalization_waits_for_revision_checked_order(tmp_path: Path) -> None:
+    z_path = tmp_path / "z.txt"
+    a_path = tmp_path / "a.txt"
+    z_path.write_text("z")
+    a_path.write_text("a")
+    collection = WorkingCollection()
+    session = FilesystemDiscovery(collection, queue_capacity=1).begin_files(
+        (z_path, a_path)
+    )
+    session.start()
+    deadline = time.monotonic() + 3
+    discovered = []
+    while not session.ready_to_finalize and not session.is_terminal:
+        discovered.extend(
+            session.consume_batch(limit=1, defer_finalization=True)
+        )
+        assert time.monotonic() < deadline
+
+    assert [item.entry.original_filename for item in discovered if item.entry] == [
+        "z.txt",
+        "a.txt",
+    ]
+    assert session.ready_to_finalize
+    assert session.state is DiscoveryState.FINALIZING
+    assert len(collection.snapshot().finalized_entries) == 0
+    prepared = collection.prepare_import_order(session.session_id)
+    session.finish_deferred(prepared)
+
+    assert session.state is DiscoveryState.COMPLETE
+    assert [entry.original_filename for entry in collection.snapshot().entries] == [
+        "a.txt",
+        "z.txt",
+    ]

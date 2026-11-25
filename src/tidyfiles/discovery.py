@@ -20,6 +20,7 @@ from tidyfiles.collection import (
     ImportDiagnostic,
     ImportMode,
     ImportSessionClosedError,
+    PreparedImportOrder,
     WorkingCollection,
     normalize_windows_path,
 )
@@ -218,6 +219,14 @@ class DiscoverySession:
         }
 
     @property
+    def ready_to_finalize(self) -> bool:
+        return (
+            self._producer_done.is_set()
+            and self._queue.empty()
+            and not self.is_terminal
+        )
+
+    @property
     def producer_waiting(self) -> bool:
         return self._producer_waiting.is_set()
 
@@ -308,8 +317,34 @@ class DiscoverySession:
             except queue.Full:
                 pass
 
+    def fail(self, message: str) -> None:
+        """Stop discovery after a consumer-side failure and roll back the session."""
+        with self._lock:
+            if self.is_terminal:
+                return
+            self._fatal_error = ImportDiagnostic(
+                self.root or "<selected files>", message
+            )
+            self._cancel.set()
+            if self._state is DiscoveryState.PENDING:
+                self._diagnostics.append(self._fatal_error)
+                self.collection.fail_import(self.session_id, self._diagnostics)
+                self._producer_done.set()
+                self._state = DiscoveryState.FAILED
+                self._finished_at = time.monotonic()
+                return
+            self._state = DiscoveryState.CANCELLING
+            try:
+                self._queue.put_nowait(_WAKE)
+            except queue.Full:
+                pass
+
     def consume_batch(
-        self, *, limit: int | None = None, timeout: float = 0
+        self,
+        *,
+        limit: int | None = None,
+        timeout: float = 0,
+        defer_finalization: bool = False,
     ) -> tuple[DiscoveryItem, ...]:
         batch_limit = self.service.batch_size if limit is None else limit
         if batch_limit < 1 or timeout < 0:
@@ -373,8 +408,18 @@ class DiscoverySession:
                         item.entry_type,
                     )
                 )
-        self._advance_terminal_state()
+        self._advance_terminal_state(defer_finalization=defer_finalization)
         return tuple(output)
+
+    def finish_deferred(
+        self, prepared_order: PreparedImportOrder | None = None
+    ) -> None:
+        """Apply a prepared order or retire a deferred cancellation/failure."""
+        if self.is_terminal:
+            return
+        if not self.ready_to_finalize:
+            raise RuntimeError("Discovery results remain before finalization")
+        self._advance_terminal_state(prepared_order=prepared_order)
 
     def wait_until_terminal(self, timeout: float = 10) -> DiscoveryReport:
         deadline = time.monotonic() + timeout
@@ -386,7 +431,12 @@ class DiscoverySession:
             self._thread.join(timeout=0)
         return self.report
 
-    def _advance_terminal_state(self) -> None:
+    def _advance_terminal_state(
+        self,
+        *,
+        defer_finalization: bool = False,
+        prepared_order: PreparedImportOrder | None = None,
+    ) -> None:
         if not self._producer_done.is_set() or not self._queue.empty():
             if self._producer_done.is_set() and self._state is DiscoveryState.ACTIVE:
                 self._state = DiscoveryState.FINALIZING
@@ -394,19 +444,23 @@ class DiscoverySession:
         with self._lock:
             if self.is_terminal or not self._producer_done.is_set() or not self._queue.empty():
                 return
-            if self._cancel.is_set():
-                self._cancel_collection_session()
-                return
             if self._fatal_error is not None:
                 self._diagnostics.append(self._fatal_error)
                 self.collection.fail_import(self.session_id, self._diagnostics)
                 self._state = DiscoveryState.FAILED
+            elif self._cancel.is_set():
+                self._cancel_collection_session()
+                return
+            elif defer_finalization and prepared_order is None:
+                self._state = DiscoveryState.FINALIZING
+                return
             else:
                 incomplete = bool(self._diagnostics)
                 self.collection.finalize_import(
                     self.session_id,
                     incomplete=incomplete,
                     diagnostics=self._diagnostics,
+                    prepared_order=prepared_order,
                 )
                 self._state = (
                     DiscoveryState.INCOMPLETE if incomplete else DiscoveryState.COMPLETE

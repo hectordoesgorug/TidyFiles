@@ -381,3 +381,48 @@ def test_only_one_open_session_is_allowed() -> None:
     collection.begin_import(ImportMode.ADD_FILES)
     with pytest.raises(CollectionError, match="already open"):
         collection.begin_import(ImportMode.ADD_FILES)
+
+
+def test_prepared_import_order_sorts_then_finalizes_the_matching_revision() -> None:
+    collection = WorkingCollection()
+    session = collection.begin_import(ImportMode.ADD_FILES)
+    z_entry = collection.register_path(session, r"C:\Batch\z.txt").entry
+    a_entry = collection.register_path(session, r"C:\Batch\a.txt").entry
+
+    prepared = collection.prepare_import_order(session)
+    assert prepared.entry_ids == (a_entry.entry_id, z_entry.entry_id)
+    collection.finalize_import(session, prepared_order=prepared)
+    snapshot = collection.snapshot()
+    assert [entry.original_filename for entry in snapshot.entries] == ["a.txt", "z.txt"]
+    assert all(entry.is_finalized for entry in snapshot.entries)
+
+
+def test_prepared_import_order_rejects_a_stale_collection_revision() -> None:
+    collection = WorkingCollection()
+    session = collection.begin_import(ImportMode.ADD_FILES)
+    collection.register_path(session, r"C:\Batch\z.txt")
+    prepared = collection.prepare_import_order(session)
+    collection.register_path(session, r"C:\Batch\a.txt")
+
+    with pytest.raises(CollectionError, match="stale or incomplete"):
+        collection.finalize_import(session, prepared_order=prepared)
+    collection.finalize_import(session)
+
+
+def test_prepared_manual_import_order_keeps_prior_entries_first() -> None:
+    collection = WorkingCollection()
+    first_session = collection.begin_import(ImportMode.ADD_FILES)
+    first = collection.register_path(first_session, r"C:\Prior\b.txt").entry
+    second = collection.register_path(first_session, r"C:\Prior\a.txt").entry
+    collection.finalize_import(first_session)
+    prior_order = (first.entry_id, second.entry_id)
+    collection.set_order(prior_order)
+
+    next_session = collection.begin_import(ImportMode.ADD_FILES)
+    collection.register_path(next_session, r"C:\Next\z.txt")
+    collection.register_path(next_session, r"C:\Next\a.txt")
+    prepared = collection.prepare_import_order(next_session)
+    assert prepared.entry_ids[:2] == prior_order
+
+    collection.finalize_import(next_session, prepared_order=prepared)
+    assert tuple(entry.entry_id for entry in collection.snapshot().entries) == prepared.entry_ids
