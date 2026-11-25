@@ -4,6 +4,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from threading import Barrier
 from uuid import uuid4
@@ -11,6 +12,7 @@ from uuid import uuid4
 import pytest
 
 import tidyfiles.transaction_journal as journal_module
+import tidyfiles.transaction_record as record_module
 from tidyfiles.collection import (
     FileMetadataSnapshot,
     FileSystemIdentitySnapshot,
@@ -35,6 +37,8 @@ from tidyfiles.transaction_record import (
     TransactionRecord,
     TransactionState,
     VerifiedOutcome,
+    record_from_json,
+    record_to_json,
 )
 
 
@@ -113,6 +117,189 @@ def test_c01_c02_c03_c06_portable_round_trip_and_checkpoint(locations, tmp_path)
     assert session.path.stat().st_mtime_ns == mtime
     with pytest.raises(ValueError, match="recorded artifact"):
         session.checkpoint(replace(row, staging_path=None))
+
+
+@pytest.mark.parametrize("changed_count", [1, 2])
+def test_d2_01_02_03_06_11_checkpoint_reuses_only_unchanged_rows(
+    locations, tmp_path, monkeypatch, changed_count
+):
+    portable, local, store = locations
+    record = _record(tmp_path)
+    entries = record.entries + tuple(
+        replace(
+            record.entries[0],
+            entry_id=uuid4(),
+            source_path=str(tmp_path / f"before-{index}.txt"),
+            destination_path=str(tmp_path / f"after-{index}.txt"),
+        )
+        for index in (1, 2)
+    )
+    session = store.prepare(replace(record, entries=entries))
+    session.start()
+    encoded, decoded = [], []
+    encode = record_module._entry_to_json
+    decode = record_module._entry_from_json
+
+    def trace_encode(entry):
+        encoded.append(entry.entry_id)
+        return encode(entry)
+
+    def trace_decode(data):
+        decoded.append(data["entry_id"])
+        return decode(data)
+
+    monkeypatch.setattr(record_module, "_entry_to_json", trace_encode)
+    monkeypatch.setattr(record_module, "_entry_from_json", trace_decode)
+    changed = tuple(replace(entry, stage="before_rename") for entry in entries[:changed_count])
+    tail = replace(entries[-1], stage="before_install")
+
+    # Supply changes out of order and then update a row untouched by the first checkpoint.
+    session.checkpoint(*reversed(changed))
+    updated = session.checkpoint(tail)
+    ids = [entry.entry_id for entry in (*changed, tail)]
+    assert encoded == ids
+    assert decoded == [str(identifier) for identifier in ids]
+    assert updated.entries == (*changed, *entries[changed_count:-1], tail)
+    expected = record_to_json(updated)
+    assert expected["schema_version"] == 1
+    assert session.path.read_bytes() == journal_module._encode(expected)
+    assert record_from_json(expected) == updated
+    assert _found(JournalStore(app_dir=portable, local_app_data=local)).record == updated
+
+
+@pytest.mark.parametrize(
+    ("invalid", "reason"),
+    [
+        ("changed_path", "Expected an absolute path"),
+        ("changed_metadata", "Expected an integer"),
+        ("verification", "Finalization evidence does not match transaction state"),
+        ("duplicate_id", "Duplicate transaction entry ID"),
+        ("timestamp", "An update predates transaction creation"),
+    ],
+)
+def test_d2_04_05_06_invalid_checkpoint_matches_full_codec(tmp_path, invalid, reason):
+    prepared = _record(tmp_path)
+    first = prepared.entries[0]
+    second = replace(first, entry_id=uuid4())
+    previous = replace(prepared, state=TransactionState.IN_PROGRESS, entries=(first, second))
+    _, rows = journal_module._record_payload(previous)
+    changed = second
+    updated_at = previous.updated_at
+    if invalid == "changed_path":
+        changed = replace(second, staging_path="relative")
+    elif invalid == "changed_metadata":
+        original = second.source_observation
+        changed = replace(
+            second,
+            source_observation=replace(
+                original, object_metadata=replace(original.object_metadata, size_bytes=True)
+            ),
+        )
+    elif invalid == "verification":
+        changed = replace(second, verification=_evidence(second)[0])
+    elif invalid == "duplicate_id":
+        changed = replace(second, entry_id=first.entry_id)
+    else:
+        updated_at = previous.created_at - timedelta(seconds=1)
+    candidate = replace(previous, updated_at=updated_at, entries=(first, changed))
+
+    for cache in (None, (previous, rows)):
+        with pytest.raises(ValueError, match=reason):
+            journal_module._record_payload(candidate, previous=cache)
+
+
+def test_d2_04_05_session_rejects_invalid_scope_and_changed_row(locations, tmp_path):
+    _, _, store = locations
+    session = store.prepare(_record(tmp_path))
+    session.start()
+    prior = session.record
+    row = prior.entries[0]
+    payload = session.path.read_bytes()
+    with pytest.raises(ValueError, match="outside the transaction"):
+        session.checkpoint(replace(row, entry_id=uuid4()))
+    with pytest.raises(ValueError, match="changes the scope"):
+        session.checkpoint(replace(row, destination_path=str(tmp_path / "other.txt")))
+    assert session.can_modify
+
+    with pytest.raises(JournalError, match="Expected nonempty text"):
+        session.checkpoint(replace(row, stage=""))
+    assert session.record is prior
+    assert session.path.read_bytes() == payload
+    assert not session.can_modify
+
+
+@pytest.mark.parametrize(
+    "terminal", [TransactionState.FINALIZED, TransactionState.RECOVERY_REQUIRED]
+)
+def test_d2_07_12_state_transitions_use_full_codec(locations, tmp_path, monkeypatch, terminal):
+    _, _, store = locations
+    decoded_states = []
+
+    def trace(data):
+        decoded_states.append(data["state"])
+        return record_from_json(data)
+
+    monkeypatch.setattr(journal_module, "record_from_json", trace)
+    session = store.prepare(_record(tmp_path))
+    session.start()
+    current = session.checkpoint(replace(session.record.entries[0], stage="before_rename"))
+
+    if terminal is TransactionState.FINALIZED:
+        with pytest.raises(ValueError, match="complete ordered transaction scope"):
+            session.finalize(())
+        finalized = session.finalize(_evidence(current.entries[0]))
+        assert finalized.state is terminal
+        assert not session.path.exists()
+        assert _index(store) == {}
+        assert not store.discover().transactions
+    else:
+        retained = session.checkpoint(recovery_required="Unresolved stage")
+        assert retained.state is terminal
+        assert not session.can_modify
+
+    assert decoded_states == [TransactionState.PREPARED, TransactionState.IN_PROGRESS, terminal]
+
+
+@pytest.mark.parametrize("failure", ["journal", "locator", "publish"])
+def test_d2_08_09_10_failed_checkpoint_keeps_last_published_cache(
+    locations, tmp_path, monkeypatch, failure
+):
+    _, _, store = locations
+    session = store.prepare(_record(tmp_path))
+    session.start()
+    prior = session.checkpoint(replace(session.record.entries[0], stage="before_rename"))
+    cached = session._serialized_rows
+    payload = session.path.read_bytes()
+    expected = payload
+    if failure == "journal":
+        expected = payload + b"\n"
+        session.path.write_bytes(expected)
+        assert json.loads(expected) == json.loads(payload)
+        message = "changed outside this session"
+    elif failure == "locator":
+        other = tmp_path / "other" / "journals" / session.path.name
+        store._write_locator({prior.transaction_id: other}, overwrite=True)
+        message = "no longer registered"
+    else:
+
+        def fail(_source, _target, *, overwrite):
+            assert overwrite
+            assert session._serialized_rows is cached
+            raise OSError("injected publication failure")
+
+        monkeypatch.setattr(journal_module, "_publish", fail)
+        message = "injected publication failure"
+
+    changed = replace(prior.entries[0], stage="installed", outcome=EntryOutcome.SUCCEEDED)
+    with pytest.raises(JournalError, match=message):
+        session.checkpoint(changed)
+    assert session.record is prior
+    assert session._serialized_rows is cached
+    assert cached == tuple(record_to_json(prior)["entries"])
+    assert session.path.read_bytes() == expected
+    assert not session.can_modify
+    with pytest.raises(JournalError, match="healthy in-progress journal"):
+        session.checkpoint(changed)
 
 
 @pytest.mark.parametrize("boundary", ["initial", "locator"])

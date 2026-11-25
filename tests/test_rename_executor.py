@@ -442,11 +442,13 @@ def test_d20_failed_swap_keeps_verified_stage_available(runtime, monkeypatch):
     result = _preflight(paths, "<Move1:1>")
     move = BoundRename.move
     calls = 0
+    checkpoints = []
 
     def fail(bound):
         nonlocal calls
         calls += 1
         if calls == 2:
+            checkpoints.append(store.discover().transactions[0].locations[0].record)
             raise PermissionError("injected swap failure")
         move(bound)
 
@@ -456,6 +458,11 @@ def test_d20_failed_swap_keeps_verified_stage_available(runtime, monkeypatch):
     journal = store.discover().transactions[0].locations[0]
     assert journal.status is RecoveryStatus.UNRESOLVED
     assert journal.record.state is TransactionState.RECOVERY_REQUIRED
+    (before_failure,) = checkpoints
+    assert before_failure.state is TransactionState.IN_PROGRESS
+    assert [entry.stage for entry in before_failure.entries] == ["staged", "before_rename"]
+    assert journal.record.entries == before_failure.entries
+    assert journal.record.failure and "injected swap failure" in journal.record.failure
     stage = Path(journal.record.entries[0].staging_path)
     assert _inventory(root) == {"BA.txt": before["BA.txt"], stage.name: before["AB.txt"]}
     assert done.entries[0].actual_path == str(stage)

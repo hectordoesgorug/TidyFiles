@@ -463,6 +463,12 @@ before registering its path. Successful registration returns a writer pinned
 to that path. Required checkpoints publish one complete record, and callers
 can checkpoint several rows together. Identical checkpoints skip replacement.
 
+Routine in-progress checkpoints reuse the validated JSON representation of
+unchanged entries from the last successful publication. The session keeps the
+representations private. Changed entries use the same codec as full records,
+and every checkpoint verifies record-wide invariants. Preparation, state
+transitions, finalization, and loading from disk validate every entry.
+
 `ModifyingJobCoordinator` reserves one slot per application. Preparation
 can be cancelled. Entering modification requires a registered journal and
 persists the in-progress boundary. The modifying phase disables cancellation

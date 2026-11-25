@@ -25,6 +25,7 @@ from tidyfiles.transaction_record import (
     TransactionRecord,
     TransactionState,
     VerifiedOutcome,
+    _checkpoint_round_trip,
     record_from_json,
     record_to_json,
     validate_verification,
@@ -170,11 +171,20 @@ def _atomic_write(path: Path, payload: bytes, *, overwrite: bool) -> None:
                 pass
 
 
-def _record_payload(record: TransactionRecord) -> bytes:
-    data = record_to_json(record)
-    if record_from_json(data) != record:
+def _record_payload(
+    record: TransactionRecord,
+    *,
+    previous: tuple[TransactionRecord, tuple[dict, ...]] | None = None,
+) -> tuple[bytes, tuple[dict, ...]]:
+    if previous is None:
+        data = record_to_json(record)
+        decoded = record_from_json(data)
+    else:
+        previous_record, previous_rows = previous
+        data, decoded = _checkpoint_round_trip(record, previous_record.entries, previous_rows)
+    if decoded != record:
         raise ValueError("Transaction record is not in its canonical form")
-    return _encode(data)
+    return _encode(data), tuple(data["entries"])
 
 
 def _journal_id(path: Path) -> UUID:
@@ -265,7 +275,7 @@ class JournalStore:
             raise ValueError("A new journal must be prepared")
         with _LOCK:
             try:
-                payload = _record_payload(record)
+                payload, rows = _record_payload(record)
                 locator, exists = self._locator()
                 if record.transaction_id in locator:
                     raise JournalError("Transaction ID is already registered")
@@ -274,7 +284,7 @@ class JournalStore:
                 path = self._publish_initial(record.transaction_id, payload)
                 locator[record.transaction_id] = path
                 self._write_locator(locator, overwrite=exists)
-                return JournalSession(self, path, record, payload)
+                return JournalSession(self, path, record, payload, rows)
             except (OSError, ValueError, TypeError, AttributeError, RecursionError) as error:
                 raise JournalError(
                     f"Cannot prepare transaction {record.transaction_id}: {error}"
@@ -390,12 +400,18 @@ class JournalSession:
     """Pinned journal writer. A failed persistence boundary latches the session closed to edits."""
 
     def __init__(
-        self, store: JournalStore, path: Path, record: TransactionRecord, payload: bytes
+        self,
+        store: JournalStore,
+        path: Path,
+        record: TransactionRecord,
+        payload: bytes,
+        rows: tuple[dict, ...],
     ) -> None:
         self._store = store
         self._path = path
         self._record = record
         self._payload = payload
+        self._serialized_rows = rows
         self._failed = False
 
     @property
@@ -432,13 +448,17 @@ class JournalSession:
             if updated == self._record:
                 return
             updated = replace(updated, updated_at=max(datetime.now(UTC), updated.updated_at))
-            payload = _record_payload(updated)
+            previous = None
+            if self._record.state is updated.state is TransactionState.IN_PROGRESS:
+                previous = self._record, self._serialized_rows
+            payload, rows = _record_payload(updated, previous=previous)
             _atomic_write(self._path, payload, overwrite=True)
         except Exception as error:
             self._failed = True
             raise JournalError(f"Cannot persist checkpoint at {self._path}: {error}") from error
         self._payload = payload
         self._record = updated
+        self._serialized_rows = rows
 
     def start(self) -> None:
         """Persist the in-progress boundary before any source modification."""

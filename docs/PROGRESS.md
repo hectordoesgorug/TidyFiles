@@ -48,7 +48,7 @@ processing controls remain disabled.
 | M3-A | Complete | Standalone destination planning, collision and dependency classification, and read-only collision-only subset replanning. |
 | M3-B | Complete | Review-time identity capture and cancellable read-only execution preflight. |
 | M3-C | Complete | Durable journals, persistent recovery locator, recovery discovery, and modifying-job coordination. |
-| M3-D | Implemented | Standalone, journaled, handle-relative rename and same-volume Single Folder execution. |
+| M3-D | Complete | Standalone, journaled, handle-relative rename and same-volume Single Folder execution. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
@@ -701,6 +701,51 @@ tests, and the full 555-test suite passed with zero failures and skips.
 Ruff, compileall, and both Git whitespace checks passed. The first executor
 run exposed NTFS creation-time changes in a chain and a cycle. The native
 tests passed after creation-time preservation was added.
+
+The M3-D commit `c0129f2d1a2579c51d09c152ceb94c9fd53e69e8` was pushed to
+`main`. [Windows CI run #30](https://github.com/hectordoesgorug/TidyFiles/actions/runs/45608078017)
+passed lint and tests for that commit.
+
+## M3-D1 and M3-D2 — Journal performance
+
+The M3-D1 profile found that building, validating, and encoding journal
+records took 158.89 of 190.46 seconds at 1,000 files. A routine checkpoint
+usually updated one entry, but the codec rebuilt and validated every entry.
+
+Routine in-progress checkpoints now reuse unchanged entries' validated JSON
+representations from the last successful publication. The session preserves
+the ordered scope, and the shared codec validates changed entries and
+record-wide constraints. State transitions and disk reads use full
+validation. Each move still requires durable before- and after-move
+checkpoints. The version 1 format, DD-086 Option A placement and locator,
+exact-byte journal checks, synchronized atomic publication, and failure and
+retirement behavior are preserved.
+
+Both measurements used three instrumented independent-rename runs per batch
+size on Windows 11 with Python 3.13.17 x64. Source files, journals, and locator
+fixtures used the same local NTFS NVMe volume. Execution timings exclude
+preflight and fixture setup.
+
+| Files | D1 execution median | D2 median (range) | D2 files/s | Execution time saved | Record building, validation, and encoding (D1 to D2) |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 3.62 s | 2.56 s (2.54–2.58) | 39.12 | 29.5% | 1.57 s to 0.33 s |
+| 500 | 52.63 s | 19.13 s (18.75–20.64) | 26.14 | 63.7% | 38.65 s to 6.71 s |
+| 1,000 | 190.46 s | 59.32 s (58.23–59.69) | 16.86 | 68.9% | 158.89 s to 28.03 s |
+
+At 1,000 files, full JSON encoding took 26.10 seconds and journal and locator
+reads and durable writes took 16.00 seconds. Each 1,000-file run performed
+2,004 journal reads totaling 3.264 GB and 2,003 journal writes totaling
+3.261 GB. Counts and logical byte totals matched D1 at each size. Whole
+snapshots still grow with batch size, so cumulative encoding and I/O grow
+faster than the number of files.
+
+The D2 benchmarks verified exact destination names, contents, identities,
+creation and last-write timestamps, the expected checkpoint, synchronization
+and publication counts, and successful journal retirement. The focused
+journal and executor tests passed all 78 cases. The full suite passed 568
+tests with zero failures and skips. Ruff, compileall, and both Git whitespace
+checks passed. The timing results cover independent local renames and do not
+measure power-loss behavior or other storage layouts.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 

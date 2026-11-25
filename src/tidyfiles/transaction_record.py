@@ -294,7 +294,23 @@ def _verification(value: object) -> EntryVerification:
     )
 
 
-def record_to_json(record: TransactionRecord) -> dict:
+def _entry_to_json(entry: TransactionEntry) -> dict:
+    return {
+        "entry_id": str(entry.entry_id),
+        "source_path": entry.source_path,
+        "destination_path": entry.destination_path,
+        "source_observation": _observation_json(entry.source_observation),
+        "destination_observation": _observation_json(entry.destination_observation),
+        "staging_path": entry.staging_path,
+        "temporary_path": entry.temporary_path,
+        "stage": entry.stage,
+        "outcome": entry.outcome.value,
+        "detail": entry.detail,
+        "verification": _verification_json(entry.verification),
+    }
+
+
+def _record_to_json(record: TransactionRecord, rows: list[dict]) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
         "transaction_id": str(record.transaction_id),
@@ -303,26 +319,50 @@ def record_to_json(record: TransactionRecord) -> dict:
         "updated_at": record.updated_at.isoformat(),
         "state": record.state.value,
         "failure": record.failure,
-        "entries": [
-            {
-                "entry_id": str(entry.entry_id),
-                "source_path": entry.source_path,
-                "destination_path": entry.destination_path,
-                "source_observation": _observation_json(entry.source_observation),
-                "destination_observation": _observation_json(entry.destination_observation),
-                "staging_path": entry.staging_path,
-                "temporary_path": entry.temporary_path,
-                "stage": entry.stage,
-                "outcome": entry.outcome.value,
-                "detail": entry.detail,
-                "verification": _verification_json(entry.verification),
-            }
-            for entry in record.entries
-        ],
+        "entries": rows,
     }
 
 
-def record_from_json(value: object) -> TransactionRecord:
+def record_to_json(record: TransactionRecord) -> dict:
+    return _record_to_json(record, [_entry_to_json(entry) for entry in record.entries])
+
+
+def _entry_from_json(value: object) -> TransactionEntry:
+    row = _fields(
+        value,
+        "entry_id",
+        "source_path",
+        "destination_path",
+        "source_observation",
+        "destination_observation",
+        "staging_path",
+        "temporary_path",
+        "stage",
+        "outcome",
+        "detail",
+        "verification",
+    )
+    entry = TransactionEntry(
+        _identifier(row["entry_id"]),
+        _path(row["source_path"]),
+        _path(row["destination_path"]),
+        _observation(row["source_observation"]),
+        _observation(row["destination_observation"])
+        if row["destination_observation"] is not None
+        else None,
+        _optional_path(row["staging_path"]),
+        _optional_path(row["temporary_path"]),
+        _text(row["stage"]),
+        EntryOutcome(row["outcome"]),
+        _optional_text(row["detail"]),
+        _verification(row["verification"]) if row["verification"] is not None else None,
+    )
+    if not _object_is_observed(entry.source_observation):
+        raise ValueError("A source requires its native review identity and directory entry")
+    return entry
+
+
+def _record_fields(value: object) -> dict:
     data = _fields(
         value,
         "schema_version",
@@ -338,40 +378,10 @@ def record_from_json(value: object) -> TransactionRecord:
         raise ValueError("Unsupported journal schema version")
     if not isinstance(data["entries"], list) or not data["entries"]:
         raise ValueError("A transaction requires an ordered, nonempty scope")
-    entries = []
-    for value in data["entries"]:
-        row = _fields(
-            value,
-            "entry_id",
-            "source_path",
-            "destination_path",
-            "source_observation",
-            "destination_observation",
-            "staging_path",
-            "temporary_path",
-            "stage",
-            "outcome",
-            "detail",
-            "verification",
-        )
-        entry = TransactionEntry(
-            _identifier(row["entry_id"]),
-            _path(row["source_path"]),
-            _path(row["destination_path"]),
-            _observation(row["source_observation"]),
-            _observation(row["destination_observation"])
-            if row["destination_observation"] is not None
-            else None,
-            _optional_path(row["staging_path"]),
-            _optional_path(row["temporary_path"]),
-            _text(row["stage"]),
-            EntryOutcome(row["outcome"]),
-            _optional_text(row["detail"]),
-            _verification(row["verification"]) if row["verification"] is not None else None,
-        )
-        if not _object_is_observed(entry.source_observation):
-            raise ValueError("A source requires its native review identity and directory entry")
-        entries.append(entry)
+    return data
+
+
+def _record_from_entries(data: dict, entries: tuple[TransactionEntry, ...]) -> TransactionRecord:
     if len({entry.entry_id for entry in entries}) != len(entries):
         raise ValueError("Duplicate transaction entry ID")
     created, updated = _timestamp(data["created_at"]), _timestamp(data["updated_at"])
@@ -383,7 +393,7 @@ def record_from_json(value: object) -> TransactionRecord:
         created,
         updated,
         TransactionState(data["state"]),
-        tuple(entries),
+        entries,
         _optional_text(data["failure"]),
     )
     terminal = record.state in {TransactionState.FINALIZED, TransactionState.FAILED_SAFE}
@@ -418,6 +428,30 @@ def record_from_json(value: object) -> TransactionRecord:
     ):
         raise ValueError("Transaction state contradicts verified outcomes")
     return record
+
+
+def record_from_json(value: object) -> TransactionRecord:
+    data = _record_fields(value)
+    return _record_from_entries(data, tuple(_entry_from_json(row) for row in data["entries"]))
+
+
+def _checkpoint_round_trip(
+    record: TransactionRecord,
+    previous_entries: tuple[TransactionEntry, ...],
+    previous_rows: tuple[dict, ...],
+) -> tuple[dict, TransactionRecord]:
+    """Use rows owned by the journal session and validated at its last publication."""
+    rows = []
+    entries = []
+    for entry, previous, row in zip(record.entries, previous_entries, previous_rows, strict=True):
+        if entry is previous:
+            entries.append(previous)
+        else:
+            row = _entry_to_json(entry)
+            entries.append(_entry_from_json(row))
+        rows.append(row)
+    data = _record_to_json(record, rows)
+    return data, _record_from_entries(_record_fields(data), tuple(entries))
 
 
 def _object_is_observed(observation: PathObservation) -> bool:

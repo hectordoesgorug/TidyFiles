@@ -176,6 +176,14 @@ publication. Journal and locator updates are separate filesystem operations.
 These mechanisms do not guarantee directory-entry persistence on every
 filesystem, device, or abrupt power loss. [MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)
 
+Before a checkpoint, the session verifies its locator registration and
+compares the current journal to the exact bytes it last published.
+In-progress checkpoints reuse validated representations of unchanged entries,
+validate changed entries and record-wide constraints, and publish a complete
+version 1 record. The session adopts the new representations only after
+successful publication. A failed write leaves the session at its last
+successful checkpoint and blocks further modification.
+
 Finalization requires an independently verified outcome for every entry and
 resolution of each recorded staging or temporary recovery dependency. It
 persists the terminal record first. It then retires the locator entry and
