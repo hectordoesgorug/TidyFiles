@@ -60,14 +60,14 @@ def test_main_window_collection_columns_import_and_persistence(
             app.controls["remove"],
             app.controls["clear_all"],
             *app.movement_buttons.values(),
-            app.sort_dropdown,
-            app.sort_direction_button,
             app.insert_token_button,
             app.profiles_button,
             app.format_reference_button,
             app.process_button,
         ):
             assert control.cget("state") == "disabled"
+        assert app.sort_dropdown.cget("state") == "normal"
+        assert app.sort_direction_button.cget("state") == "normal"
 
         app.open_columns()
         app.column_dialog.update_idletasks()
@@ -363,6 +363,17 @@ def test_main_window_collection_columns_import_and_persistence(
             root.update()
             time.sleep(0.001)
         assert close_entered.is_set()
+        app.open_columns()
+        closing_dialog = app.column_dialog
+        assert closing_dialog is not None
+        dialog_destroyed = []
+        closing_dialog.bind(
+            "<Destroy>",
+            lambda event: dialog_destroyed.append(True)
+            if event.widget is closing_dialog
+            else None,
+            add="+",
+        )
         app.close()
         assert app._close_pending
         assert not app._closing
@@ -372,6 +383,8 @@ def test_main_window_collection_columns_import_and_persistence(
             root.update()
             time.sleep(0.001)
         assert app._closing
+        assert app.column_dialog is None
+        assert dialog_destroyed
         closed = True
     finally:
         if not closed:

@@ -19,9 +19,10 @@ directory counts, ordered evaluation, request-currency checks, progress and
 cancellation. M2-E1 adds the shared main window and per-mode column
 customization. M2-E2 connects explicit Add Files and recursive Add Folder
 requests to read-only progressive discovery, cancellation and persistent
-incomplete-import diagnostics. Filename evaluation, collection management,
-final processing-readiness checks, destination planning, and filesystem
-operations remain unimplemented.
+incomplete-import diagnostics. M2-E3 connects shared collection sorting,
+manual ordering, removal, clearing, selection, and row context actions. Live
+filename evaluation, final processing-readiness checks, destination planning,
+and filesystem operations remain unimplemented.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -29,12 +30,12 @@ operations remain unimplemented.
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
 | M1 | Complete | Pure parser/evaluator, extension resolution, and filename validation, including the M1-D.12 DD-061 diagnostic correction. Application and filesystem integration remain outside M1. |
-| M2 | In progress | M2-A through M2-D domain services and M2-E2 import integration are complete; later GUI integration and filesystem processing remain planned. |
+| M2 | In progress | M2-A through M2-D domain services and M2-E1 through M2-E3 GUI integration are complete; live evaluation and filesystem processing remain planned. |
 | M2-D | Complete | Collection-backed filename evaluation, physical directory counts, bounded metadata cache, structured diagnostics, request currency, background progress and cancellation. |
-| M2-E | In progress | GUI integration continues in staged slices; import discovery is complete, while collection management, previews, and later workflows remain planned. |
+| M2-E | In progress | GUI integration continues in staged slices; import discovery and collection management are complete, while previews and later workflows remain planned. |
 | M2-E1 | Complete | Main-window layout, shared empty collection presentation, context-specific columns, and persisted appearance and geometry preferences. |
 | M2-E2 | Complete | Native import controls, progressive discovery, cancellation, ordering, and incomplete-import reporting. |
-| M2-E3 | Planned | Shared collection management bindings and ordering controls. |
+| M2-E3 | Complete | Shared sorting controls and preference persistence, manual ordering and drag-and-drop, selection shortcuts, row context actions, non-destructive removal and clearing, and collection-change notifications. |
 | M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
@@ -65,7 +66,7 @@ DD-079 through DD-085 are recorded as follows:
 | --- | --- |
 | DD-079 — Horizontal window layout with full-width Treeview | Implemented with responsive grid geometry; no permanent sidebar. |
 | DD-080 — Context-specific, customizable columns | Implemented with the approved per-mode defaults, fixed order, required-column enforcement, optional visibility, saved widths, native header resizing, Restore Defaults, and header context-menu access. |
-| DD-081 — Shared collection toolbar and list interactions | M2-E2 enables Add Files and Add Folder. Remove, Clear All, explicit sort, and manual movement remain disabled pending later integration. |
+| DD-081 — Shared collection toolbar and list interactions | M2-E2 enables Add Files and Add Folder. M2-E3 enables sorting, manual movement, Remove from List, and Clear All against the shared collection. |
 | DD-082 — Compact Bulk Rename format controls | Editable format field and the three approved built-in presets are present. Insert Token, Profiles, Format Reference, and live evaluation remain disabled/deferred. Unsaved field edits are not persisted. |
 | DD-083 — Optional post-processing Counter | The switch is present, defaults OFF, and has no execution effect. The algorithm remains deferred. |
 | DD-084 — Native toggle switches for boolean operation options | Single Folder, Auto-clean, and Counter use CustomTkinter switches. Single Folder and Counter only change session-local UI state. Auto-clean is disabled. |
@@ -199,11 +200,127 @@ rows. The earlier pre-optimization run exceeded four minutes without
 completing and was stopped; repeated per-row Treeview moves were replaced by
 the native child-order update before collecting the results above.
 
-M2-E2 completes the import integration. M2-E3 should bind Remove, Clear All,
-sort selection, and manual movement to the existing collection APIs; preserve
-incomplete-import warnings unless Clear All is explicitly chosen; maintain
-stable row IDs and selection; and remain disabled during active import. It must
-not enable processing or infer preview validity.
+M2-E2's manual acceptance backlog remains: cancellation and rollback, a
+subsequent import after cancellation, and application closure during discovery.
+M2-E3 completes the collection-management controls. They use stable entry IDs
+and the existing collection APIs, preserve prior incomplete-import warnings
+until Clear All, and remain unavailable during conflicting work. M2-E3 does not
+enable processing or infer preview validity.
+
+## M2-E3 — Collection management and ordering
+
+M2-E3 connects the shared collection toolbar and Treeview to `WorkingCollection`.
+The seven sort criteria and direction control remain available for an empty
+collection, persist through the existing atomic config save, and apply across
+all three tabs. Sorting uses captured metadata, runs preparation off the Tk
+thread, rejects stale collection revisions, and updates row values in chunks of
+96 after one Treeview child-order update. Natural sorting, missing-metadata
+placement, deterministic tie-breakers, and compound-key behavior come from the
+existing sorting module. A successful explicit sort restores automatic mode;
+saved preferences determine ordering of later imports.
+
+The four movement controls delegate to collection operations and preserve the
+relative order of selected and unselected entries. Dragging moves a selected
+group in one complete ordering update, indicates a before/after row target, and
+rejects stale revisions. Invalid or outside drops cancel safely. Drag
+auto-scrolling is not implemented. Effective manual reorder enters manual mode;
+no-op movement does not. The summary shows total files, selected count, known
+size or unavailable-size count, and a Manual order indicator when applicable.
+
+Remove from List removes selected IDs from memory, preserves retained order,
+folder-root records and prior incomplete-import warnings, and permits paths to
+be imported again. Clear All removes entries, import sessions, roots and
+collection diagnostics, resets manual mode, and retains sorting and other saved
+preferences. Neither operation changes the filesystem. Ctrl+A and Delete are
+scoped to the Treeview; Ctrl+A in the rename-format field selects that field's
+text and Delete keeps its text-editing behavior. The row context menu opens
+files or containing folders, copies selected filenames or full paths in
+effective order, removes entries, and moves the selection. Right-clicking a
+selected member preserves multi-selection; clicking an unselected row selects
+it. Open File and Open Containing Folder require one selected row; copy actions
+support multiple rows. Common executable and script extensions are disabled for
+Open File; this suffix check cannot identify
+every potentially launchable format. Header customization remains separate.
+
+The GUI exposes `root.application.collection` for immutable snapshots and emits
+`<<TidyFilesCollectionChanged>>` after effective order or membership changes and
+import completion or rollback. `root.collection_revision` carries the revision
+associated with the notification. Selection and column changes do not emit
+collection-change events. M2-E4 can observe this interface and request current
+filename evaluation; live evaluation and previews are not part of M2-E3.
+
+### GUI interaction corrections
+
+The row-drag defect came from the native Treeview press binding collapsing an
+existing multi-selection before drag motion read it. The widget now saves the
+ordered selection on press and restores it when movement crosses the drag
+threshold. An unselected row becomes a one-row drag; release without a valid
+target still leaves collection order unchanged. The filename-width defect came
+from automatic column stretching overriding deliberate widths during layout.
+Filename columns now retain explicit widths, which are saved on divider release
+and before a tab change. The Columns window is a single instance, raises when
+reopened, closes on a mode change, clears its reference on destruction, and is
+disposed of during application shutdown.
+
+These corrections do not change explicit sorting: choosing a sort criterion or
+direction returns the collection to automatic order. Imports continue to
+preserve an existing manual order.
+
+Automated M2-E3 checks use isolated synthetic files and mock external opening.
+They cover sorting criteria and directions, preference restoration in a fresh
+process, manual movement, drag group and stale-drop behavior, busy and stale
+sort handling, worker and Treeview error recovery, closing during a pending
+sort, removal and reimport, warning retention, Clear All preference
+preservation, keyboard and context actions, source-file preservation, and
+collection-change notifications. Corrective regressions drive native Tk press,
+motion and release events for multi-selection drag and column-divider resizing,
+and cover width persistence across refresh, import, tabs, and application
+restart, plus the Columns window's close and mode-switch lifecycle. Manual
+Windows GUI acceptance remains outstanding because the Computer Use native pipe
+could not connect; generated Tk events do not replace visual review with a
+physical mouse.
+
+On Windows 11 build 26300 with Python 3.13.17, the focused application,
+collection-management, sorting, configuration, and discovery-integration run
+passed 64 tests; the isolated collection-controls worker suite passed 5 tests.
+The complete repository suite passed 412 tests with no skips. Ruff,
+`compileall -q src tests`, and `git diff --check` passed. No CI run is claimed
+for this working-tree implementation.
+
+The corrective GUI follow-up was checked on 2026-11-25 with the application and
+collection-controls entry points (2 passed), the isolated collection-controls
+worker suite (8 passed), and the complete repository suite (412 passed). Ruff,
+`compileall -q src tests`, and `git diff --check` passed. Windows Computer Use
+could not connect, so hands-on visual acceptance remains outstanding; no CI run
+is claimed for these local changes.
+
+Synthetic GUI performance runs used Windows 11 build 26300, Python 3.13.17, and
+an Intel Core i5-10300H. Collections used synthetic paths and stored metadata;
+no source files were created for the sort, move, reorder, or clear measurements.
+Sort preparation was timed in the worker; GUI time includes polling and Treeview
+updates. Other GUI time includes the synchronous action and any bounded row
+updates. Times are seconds converted to milliseconds, rounded to 0.01 ms.
+
+| Operation | 1,000 domain ms | 1,000 GUI ms | 1,000 total ms | 10,000 domain ms | 10,000 GUI ms | 10,000 total ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Natural filename sort | 10.22 | 316.79 | 327.01 | 138.38 | 1,695.36 | 1,833.75 |
+| File Type + Name sort | 16.58 | 312.66 | 329.23 | 173.26 | 1,770.61 | 1,943.87 |
+| Size sort | 8.87 | 290.37 | 299.24 | 90.26 | 1,790.09 | 1,880.35 |
+| Move middle 10% to top | 0.48 | 314.10 | 314.58 | 4.54 | 1,720.62 | 1,725.16 |
+| Complete manual reorder | 0.43 | 253.00 | 253.43 | 5.87 | 1,627.98 | 1,633.85 |
+| Remove half the entries | 0.62 | 226.73 | 227.35 | 7.60 | 883.48 | 891.08 |
+| Clear All | 0.04 | 56.64 | 56.68 | 0.49 | 71.45 | 71.94 |
+
+Clear All was measured against a complete collection at each size; removal
+selected half the entries. A 10 ms Tk heartbeat continued during the GUI
+measurements. The largest observed heartbeat gap was 80.52 ms at 1,000 entries
+and 165.45 ms at 10,000 entries. At 10,000 rows, sorting and full reorder took
+about 1.6–1.9 seconds overall, with Treeview synchronization as the main cost.
+These runs did not simulate a person clicking during the operation, so they
+show event-loop servicing, not complete interactive responsiveness. M2-E2's
+10,000-file import observed a 264 ms maximum heartbeat delay; the different
+workloads do not establish a direct performance improvement. These measurements
+are local observations, not CI thresholds or production-volume guarantees.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 

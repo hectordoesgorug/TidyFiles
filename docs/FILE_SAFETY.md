@@ -3,9 +3,13 @@
 The GUI presents one shared collection across three modes. Add Files and Add
 Folder import selected paths using read-only discovery metadata; file contents
 are not opened. Cancellation rolls back only entries from the active import
-and does not change source files. Collection removal, clearing, sorting,
-reordering, evaluation, and processing remain unavailable in the GUI. No file
-operation renames, deletes, moves, repacks, or otherwise modifies user files.
+and does not change source files. Sorting, manual ordering, Remove from List,
+and Clear All manage the shared in-memory collection. Remove and Clear All leave
+source files unchanged; they do not delete, move, or Trash files. Opening a row
+or its containing folder is an explicit Windows shell action. Known executable
+and script extensions are disabled for Open File; suffix checks cannot identify
+every potentially launchable file. No rename, deduplication, repacking, or
+cleanup operation is available.
 
 The Auto-clean switch is disabled until its permanent-deletion disclosure and
 eligible-folder workflow are implemented. Its approved future deletion scope

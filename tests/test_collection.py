@@ -426,3 +426,33 @@ def test_prepared_manual_import_order_keeps_prior_entries_first() -> None:
 
     collection.finalize_import(next_session, prepared_order=prepared)
     assert tuple(entry.entry_id for entry in collection.snapshot().entries) == prepared.entry_ids
+
+
+def test_prepared_sort_order_applies_only_to_matching_revision() -> None:
+    collection = WorkingCollection()
+    session = collection.begin_import(ImportMode.ADD_FILES)
+    large = collection.register_path(
+        session, r"C:\Batch\z-large.txt", metadata=FileMetadataSnapshot(size_bytes=20)
+    ).entry
+    small = collection.register_path(
+        session, r"C:\Batch\a-small.txt", metadata=FileMetadataSnapshot(size_bytes=2)
+    ).entry
+    collection.finalize_import(session)
+    preferences = SortPreferences(SortCriterion.SIZE, SortDirection.DESCENDING)
+    snapshot = collection.snapshot()
+
+    prepared = collection.prepare_sort_order(preferences)
+    assert prepared.revision == snapshot.revision
+    assert collection.apply_prepared_sorting(prepared)
+    assert [entry.entry_id for entry in collection.snapshot().entries] == [
+        large.entry_id,
+        small.entry_id,
+    ]
+    assert collection.snapshot().sort_preferences == preferences
+    assert collection.snapshot().ordering_mode is OrderingMode.AUTOMATIC
+    assert not collection.is_current(snapshot)
+
+    stale = collection.prepare_sort_order(SortPreferences(SortCriterion.NAME))
+    collection.move_to_top((small.entry_id,))
+    with pytest.raises(CollectionError, match="stale or incomplete"):
+        collection.apply_prepared_sorting(stale)

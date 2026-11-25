@@ -6,10 +6,12 @@ single-instance modules. The pure filename engine is implemented as a library
 component but is not connected to the GUI. The shared in-memory collection
 domain model supports ordered snapshots and import-session finalization or
 rollback. The GUI connects read-only file and recursive-folder discovery through
-an application controller; the filename-evaluation service remains unconnected
-to the GUI. A finalized collection snapshot can be adapted to the pure filename
-engine, including on-demand physical directory counts. Preview rendering,
-destination planning, and filesystem processing remain planned.
+an application controller. M2-E3 connects sorting, manual ordering, selection,
+context actions, removal, and clearing to that collection. The filename-
+evaluation service remains unconnected to the GUI. A finalized collection
+snapshot can be adapted to the pure filename engine, including on-demand
+physical directory counts. Preview rendering, destination planning, and
+filesystem processing remain planned.
 
 ## Startup and shutdown
 
@@ -46,7 +48,7 @@ not implemented.
 | `src/tidyfiles/storage.py` | Writable application-directory selection and `%LOCALAPPDATA%\TidyFiles` fallback for ordinary application data. |
 | `src/tidyfiles/config.py` | Schema-v1 defaults, validation, loading, and atomic saving, including backward-compatible sort preferences. Invalid sort values use defaults without rewriting the file during load; other invalid configuration remains an error. |
 | `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
-| `src/tidyfiles/app.py` | CustomTkinter main window, three mode panels, one shared collection-backed Treeview, common controls, column customization, appearance, and window geometry preferences. |
+| `src/tidyfiles/app.py` | CustomTkinter main window, three mode panels, one shared collection-backed Treeview, collection controls, column customization, appearance, and window geometry preferences. |
 | `src/tidyfiles/import_controller.py` | One active discovery session, Tk-thread result consumption, bounded incremental rendering, asynchronous final-order preparation, cancellation rollback, and shutdown coordination. |
 | `src/tidyfiles/ui_preferences.py` | Per-mode Treeview column defaults and safe preference recovery, plus window-geometry parsing and virtual-screen clamping. |
 | `src/tidyfiles/collection.py` | GUI-independent working collection with one authoritative ordered ID sequence, indexed membership, import lifecycle, management operations, ordering mode, and immutable snapshots. |
@@ -124,7 +126,8 @@ checks collection identity and revision so membership or effective-order
 changes, including canceled imports, invalidate downstream results without
 reusing a prior revision. No-op reorder and removal operations do not advance
 the revision. M2-E2 presents this collection progressively through one shared
-Treeview.
+Treeview. M2-E3 connects collection management to the same model rather than
+maintaining feature-specific order or membership state.
 The scan is a metadata snapshot and does not replace M3 execution-time
 revalidation. The pure
 `filename_evaluator.py` module consumes an existing parsed
@@ -177,9 +180,61 @@ its immutable snapshot for infrequent complete refreshes.
 each mode, restores required columns, ignores unknown saved identifiers, and
 falls back safely from invalid widths. Width changes, column visibility,
 appearance, and window geometry use the existing atomic configuration file.
+Filename columns do not stretch automatically, so manually resized widths stay
+fixed while the window changes size; the horizontal scrollbar exposes columns
+outside the viewport. Widths save on divider release and before a mode switch.
+Column customization uses one dialog: reopening raises the existing window,
+switching modes closes it, and application shutdown disposes of it.
 Window geometry is clamped to Tk's current virtual-screen bounds and rechecked
 after window configuration changes. Manual monitor/DPI acceptance remains
 tracked for M2-E5.
+
+## Collection controls and change notifications
+
+The shared toolbar exposes seven explicit sort criteria and an ascending or
+descending direction. Preferences are saved in the existing atomic config file
+and are shared across all tabs. Sorting uses captured entry metadata only;
+missing values remain last in either direction. An explicit sort restores
+automatic ordering. Manual movement buttons and row dragging change only the
+collection's effective order; an effective change enters temporary manual mode.
+Future imports keep the existing order and append their new entries sorted by
+the saved preference. No-op movement does not change the mode or revision.
+
+The Treeview uses entry UUIDs for row identities and selection. Sorting,
+movement, and dragging preserve selected IDs. Dragging moves the selected rows
+as an ordered group and highlights its before/after target. Releasing without a
+valid target cancels the drag, and a changed collection revision rejects a stale
+drop. The handler snapshots selection before the native Treeview press binding
+runs, then restores it after motion crosses the drag threshold; dragging an
+unselected row moves only that row. Drag auto-scroll is not implemented.
+Ctrl+A and Delete are bound to the Treeview. The rename-format field has its own
+Ctrl+A text-selection binding; Delete keeps its native text-editing behavior.
+Row context actions open a file
+or containing folder, copy selected names or paths in effective order, remove
+entries, or move the selection. Open File and Open Containing Folder require
+exactly one selected entry; copying supports multiple selected entries.
+Right-click on a selected row
+preserves a multi-selection; an unselected row becomes the selection. Header
+customization remains a separate action. Open File uses Windows' native file
+association and disables a known set of executable and script extensions;
+extension checks cannot identify every potentially launchable file.
+
+Remove from List deletes only selected collection entries and retains folder
+root records and incomplete-import warnings, so those paths can be imported
+again. Clear All clears entries, import records, folder roots, diagnostics, and
+manual mode while preserving sort preferences, column settings, window
+appearance and geometry, and other global settings. Both controls, sorting,
+movement, and dragging are unavailable during import or another collection
+operation. Open and copy actions require a valid selection; copying can remain
+available during discovery.
+
+Downstream code can observe `root.application.collection` and its immutable
+snapshots. After effective order or membership changes and import completion or
+rollback, the application updates `root.collection_revision` and emits
+`<<TidyFilesCollectionChanged>>`. Selection and column changes do not emit this
+event. M2-E4 can subscribe to the event, inspect a current snapshot, and request
+filename evaluation; it must also treat an active import as non-current. Live
+evaluation and preview display are not implemented by M2-E3.
 
 M2-E2 enables Add Files and Add Folder while idle. During discovery, both import
 buttons, remove, clear, sorting, movement, and processing controls are disabled;
@@ -204,10 +259,11 @@ discovery service retains exclusions, metadata capture, bounded queue capacity
 file contents are read. Import does not imply filename validation or processing
 readiness.
 
-Remove, clear, explicit sort controls, manual movement, live evaluation and
-preview, token insertion, profiles, format help, and all processing actions
-remain deferred. The Columns dialog is functional. The rename field is
-session-only. Auto-clean stays disabled, and Counter is an off-by-default,
+Live evaluation and preview, token insertion, profiles, format help, and all
+processing actions remain deferred. Collection removal, clearing, sorting, and
+manual movement are functional while idle and disabled during conflicting
+work. The Columns dialog is functional. The rename field is session-only.
+Auto-clean stays disabled, and Counter is an off-by-default,
 session-only switch with no execution behavior. Resolution and length cells
 show “— (not probed)” for filename extensions that identify applicable media
 types and stay blank otherwise; no media probing is performed. The File type

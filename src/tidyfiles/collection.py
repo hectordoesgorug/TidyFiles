@@ -139,6 +139,14 @@ class PreparedImportOrder:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedSortOrder:
+    collection_id: UUID
+    revision: int
+    preferences: SortPreferences
+    entry_ids: tuple[UUID, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CollectionCapabilities:
     is_importing: bool
     can_reorder: bool
@@ -467,12 +475,38 @@ class WorkingCollection:
             self._sort_preferences.criterion if criterion is None else criterion,
             self._sort_preferences.direction if direction is None else direction,
         )
-        sorted_entries = sort_entries(
-            tuple(self._entries[entry_id] for entry_id in self._entry_order), preferences
+        return self.apply_prepared_sorting(self.prepare_sort_order(preferences))
+
+    def prepare_sort_order(self, preferences: SortPreferences) -> PreparedSortOrder:
+        """Sort an immutable snapshot for asynchronous, revision-checked application."""
+        self._require_idle("sort")
+        if not isinstance(preferences, SortPreferences):
+            raise TypeError("preferences must be SortPreferences")
+        snapshot = self.snapshot()
+        sorted_entries = sort_entries(snapshot.entries, preferences)
+        return PreparedSortOrder(
+            snapshot.collection_id,
+            snapshot.revision,
+            preferences,
+            tuple(entry.entry_id for entry in sorted_entries),
         )
-        order = [entry.entry_id for entry in sorted_entries]
+
+    def apply_prepared_sorting(self, prepared: PreparedSortOrder) -> bool:
+        """Apply a complete sort only while its collection snapshot is current."""
+        self._require_idle("sort")
+        if (
+            not isinstance(prepared, PreparedSortOrder)
+            or prepared.collection_id != self._collection_id
+            or prepared.revision != self._revision
+            or not isinstance(prepared.preferences, SortPreferences)
+            or len(prepared.entry_ids) != len(self._entry_order)
+            or len(set(prepared.entry_ids)) != len(prepared.entry_ids)
+            or set(prepared.entry_ids) != set(self._entry_order)
+        ):
+            raise CollectionError("Prepared sort order is stale or incomplete")
+        order = list(prepared.entry_ids)
         changed = order != self._entry_order
-        self._sort_preferences = preferences
+        self._sort_preferences = prepared.preferences
         self._ordering_mode = OrderingMode.AUTOMATIC
         if changed:
             self._entry_order = order
