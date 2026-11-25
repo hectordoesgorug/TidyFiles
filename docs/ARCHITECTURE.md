@@ -7,8 +7,8 @@ collection snapshots, and Bulk Rename displays its read-only previews through
 the existing GUI. The shared in-memory collection supports import finalization
 or rollback, sorting, manual ordering, selection, removal, and clearing. File
 discovery and filename evaluation run in background services while all Tk
-updates stay on the main thread. Destination planning and filesystem processing
-remain planned.
+updates stay on the main thread. A separate read-only service plans rename
+destinations. Filesystem processing remains planned.
 
 ## Startup and shutdown
 
@@ -56,6 +56,9 @@ not implemented.
 | `src/tidyfiles/filename_integration.py` | Collection-snapshot adapter, read-only directory-count cache, structured evaluation results, request-currency checks, cooperative cancellation, progress, and one bounded background worker. |
 | `src/tidyfiles/format_reference.py` | Categorized parser-valid token insertion examples and the read-only filename-format reference text. |
 | `src/tidyfiles/filename_validation.py` | Pure legacy-character substitution and validation of one Windows filename component, including reserved device names, Unicode safety, and UTF-16 component length. |
+| `src/tidyfiles/destination_planning.py` | Read-only batch planning from a finalized snapshot and current filename evaluation, collision and dependency classification, and collision-only subset replanning. |
+| `src/tidyfiles/destination_observation.py` | Literal local Windows path, ancestor, volume, directory case, and occupancy observations. |
+| `src/tidyfiles/filesystem_paths.py` | Shared Windows system path and clutter-name exclusions. |
 
 The GUI imports selected files and recursively selected folders by reading
 metadata, without opening file contents. Import updates the shared collection
@@ -353,17 +356,52 @@ prove complete discovery, destination availability, collision safety, current
 source identity, duplicate-analysis readiness, or authorization to change
 files.
 
-An evaluation marked valid establishes only that the filename expression was
-evaluated and each filename component passed validation. M2-E must separately
-preserve incomplete-import acknowledgment requirements and later duplicate,
-destination-collision, preflight and user-authorization checks. The evaluation
-service exposes no global processing-ready flag.
+An evaluation marked valid establishes that the filename expression was
+evaluated and each filename component passed validation. Destination planning,
+incomplete-import acknowledgment, duplicate analysis, preflight, and user
+authorization are separate checks.
 
 Directory observations are path-based snapshots. An external process can
 replace a path between no-follow component checks and enumeration, and
 metadata can change after observation. M3 must independently check sources,
 filesystem metadata, destination availability, volume constraints and
 collisions immediately before any proposed filesystem operation.
+
+## Read-only destination planning
+
+`plan_destinations()` consumes a finalized ordered collection snapshot, the
+matching filename evaluation, the caller's current evaluation request ID, and
+immutable destination options. It checks result currency, row coverage and
+ordering, and complete filename validity before observing paths. It retains
+evaluation diagnostics and blocks snapshots with incomplete imports. A plan
+records the collection ID and revision, evaluation request,
+expression and settings, options, and ordered rows keyed by stable collection
+entry IDs.
+
+Bulk Rename uses the current source parent. Single Folder uses the entry's
+first-established import root independently of other roots. Add Files already
+records the immediate parent as its root. Both modes use the engine's validated
+filename verbatim, including sanitization and the evaluated extension. An
+evaluation with a Repacker output extension can describe a path, while future
+conversion and original retention have their own execution requirements.
+
+The planner indexes source and destination keys and tracks edges from each
+operation to an occupant that must move. All rows targeting one path conflict,
+including an unchanged row. A queue propagates blocked destinations backwards
+through dependent moves. Valid chains list the vacating operation first. Swaps
+and longer cycles are represented as groups that require staging. A case-only
+rename also carries a staging requirement. The row sequence follows the input
+collection regardless of dependency order. The service has a synchronous
+callable interface with an injectable observer and uses no worker or queue.
+A future GUI caller must schedule observation outside the Tk thread.
+
+`replan_collision_subset()` checks the current revision, request ID, and options
+against the reviewed plan and observes its proposed collision-only subset
+again. It keeps the original candidate filenames and destination paths, and
+reports IDs excluded from the original review. Safety and observation failures,
+incomplete imports, and format failures prevent collision-only replanning.
+The resulting plan describes the observations in that call. Execution still
+requires confirmation, fresh preflight, and transaction safeguards.
 
 ## Tests and CI
 
@@ -378,10 +416,8 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Destination planning, filesystem transactions, duplicate verification, and
-repacking are future components. Their behavior is
-specified in local planning references, not implemented in this package. Do not
-infer implementation status from an approved requirement.
+Execution preflight, filesystem transactions, duplicate verification, and
+repacking are future components.
 
 ## Deferred package restructuring
 

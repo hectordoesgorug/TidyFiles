@@ -23,10 +23,9 @@ M2-E1 adds the shared main window and per-mode column customization. M2-E2
 connects progressive imports, M2-E3 connects collection management, and M2-E4
 connects session-only format controls and live read-only filename previews.
 M2-E5 improves large-table updates, clarifies preview status and refresh
-behavior, and adds lifecycle regression coverage. M2 is implemented locally and
-awaits owner acceptance and publication/CI verification. Destination planning,
-processing-readiness checks, and filesystem-changing operations remain
-unimplemented.
+behavior, and adds lifecycle regression coverage. M2 is complete. M3-A adds a
+standalone read-only destination planner. Execution preflight and
+filesystem-changing operations remain planned.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -34,15 +33,16 @@ unimplemented.
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
 | M1 | Complete | Pure parser/evaluator, extension resolution, and filename validation, including the M1-D.12 DD-061 diagnostic correction. Application and filesystem integration remain outside M1. |
-| M2 | Implemented; awaiting acceptance | M2-A through M2-D services and M2-E1 through M2-E5 GUI integration are implemented locally; owner review, publication, and CI verification remain. Filesystem processing remains planned. |
+| M2 | Complete | Collection, discovery, management, filename integration and GUI previews accepted by the owner. |
 | M2-D | Complete | Collection-backed filename evaluation, physical directory counts, bounded metadata cache, structured diagnostics, request currency, background progress and cancellation. |
-| M2-E | Implemented; awaiting acceptance | M2-E1 through M2-E5 provide the current shared collection, import, management, and preview GUI; later workflows remain planned. |
+| M2-E | Complete | Shared collection, import, management, and preview GUI. |
 | M2-E1 | Complete | Main-window layout, shared empty collection presentation, context-specific columns, and persisted appearance and geometry preferences. |
 | M2-E2 | Complete | Native import controls, progressive discovery, cancellation, ordering, and incomplete-import reporting. |
 | M2-E3 | Complete | Shared sorting controls and preference persistence, manual ordering and drag-and-drop, selection shortcuts, row context actions, non-destructive removal and clearing, and collection-change notifications. |
 | M2-E4 | Complete | Session-only live filename-format controls, token insertion and reference, background ordered previews, structured diagnostics, metadata refresh, and stale-result protection. |
-| M2-E5 | Implemented; awaiting acceptance | Targeted large-table optimization, Valid preview wording, Refresh Preview help, lifecycle regressions, and consolidated M2 readiness review. |
-| M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
+| M2-E5 | Complete | Targeted large-table optimization, preview guidance, and lifecycle coverage. Owner manual acceptance passed 21/21. |
+| M3 | In progress | Read-only destination planning is implemented. Preflight, execution, Trash, transaction journals, and recovery remain planned. |
+| M3-A | Implemented | Standalone destination planning, collision and dependency classification, and read-only collision-only subset replanning. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
@@ -108,8 +108,8 @@ filename extension using Python's MIME database; file contents are not checked.
 The header Settings dialog exposes System, Light, and Dark appearance modes.
 System is the default and updates the Treeview styling with the detected system
 appearance. Window size and position are saved in the existing configuration
-and clamped to the current Tk virtual-screen bounds. Physical monitor-layout and
-DPI-change acceptance remains a manual M2-E5 check.
+and clamped to the current Tk virtual-screen bounds. Physical multi-monitor and
+DPI-change verification remains outstanding.
 
 Representative empty-state Windows GUI captures are in
 [`screenshots/m2-e1/`](screenshots/m2-e1/): [Bulk Rename](screenshots/m2-e1/bulk-rename.png),
@@ -400,8 +400,7 @@ widget tests do not replace visual review of M2-E5 refinements.
 
 ## M2-E5 — GUI Acceptance, Performance Optimization and M2 Readiness Review
 
-M2-E5 is implemented in the current working tree and awaits owner acceptance,
-publication, and Windows CI verification. The optimization retains one shared
+M2-E5 is complete. The optimization retains one shared
 collection and stable Treeview row IDs. A collection-position index avoids
 scanning all rows for selection order and movement state. Revision-based preview
 currency checks avoid copying a full collection snapshot for routine GUI checks.
@@ -522,18 +521,8 @@ M2 exposes ordered collection snapshots, stable entry IDs, original/current
 source paths, per-file import-root context, filesystem identity observations,
 folder-root records, incomplete-import diagnostics, revision tracking, current
 evaluation results, structured file diagnostics, forced count refresh,
-candidate comparison, and collection-change notifications. M3 still needs
-unified destination planning, batch collision prevention, protection of
-unrelated destinations, case-only rename and cycle handling, source/destination
-identity revalidation, Single Folder semantics, execution authorization,
-transaction and recovery behavior, and applicable cleanup safeguards. Counter
-remains deferred. A valid preview is not an executable plan. The older
-`/planning/` package predates DD-074 through DD-085; it remains unchanged and
-does not replace the current tracked architecture and progress records.
-
-Owner review of M2-E5, an authorized Git publication step, and Windows CI remain
-outstanding. No changes to `/planning/` or `/legacy/`, dependency installation,
-staging, commit, or push were performed.
+candidate comparison, and collection-change notifications. These are inputs to
+M3 destination planning and preflight. Counter remains deferred.
 
 ### M2-E5 verification
 
@@ -542,8 +531,57 @@ collection, discovery, import, filename, instance, and preference suites passed
 398 tests. The isolated filename-preview worker passed 5 tests and the isolated
 collection-controls worker passed 9 tests. The full repository suite passed
 413 tests with no skips. Ruff, `compileall -q src tests`, and `git diff --check`
-passed locally. No Windows CI run or actual interactive GUI acceptance is
-claimed; the changes remain uncommitted for owner review.
+passed locally during M2-E5 development.
+
+On November 25, 2026, the owner reported 21/21 manual acceptance checks passed
+and confirmed the push of
+`22c3f96512cfa6251f872e94c5f5d4c6032ae302` and successful Windows CI.
+These are historical M2-E5 results. Physical multi-monitor and DPI-change
+verification remains outstanding.
+
+## M3-A — Read-only destination planning
+
+The standalone planner consumes finalized snapshots and current filename
+evaluations. It uses the immediate source parent for Bulk Rename and the
+first-established import root for Single Folder. Immutable plans retain
+evaluation identity, options, observations, diagnostics, and dependency
+groups. The service recognizes no-ops, case-only renames, competing targets,
+unrelated occupants, chains, swaps, and cycles. Collision-only subset
+replanning propagates dependency exclusions and observes the remaining
+destinations again with the original reviewed names.
+
+This covers the planning clauses of DD-009, DD-021, DD-048, DD-056,
+DD-063, DD-065, DD-074, DD-075, DD-076, and DD-085. DD-009 confirmation,
+preflight and execution remain future work. DD-075 acknowledgment is still
+required before future processing. Single Folder execution, final source and
+destination identity checks, and transaction and recovery safeguards also
+remain planned. The GUI continues to display filename-level previews with
+Process, Deduplicate, and Repack disabled. See
+[Architecture](ARCHITECTURE.md#read-only-destination-planning) and
+[File Safety](FILE_SAFETY.md#destination-planning-observations).
+
+The planning benchmark used Windows 11 build 26300, Python 3.13.17 x64, and
+an Intel Core i5-10300H. It planned independent renames to vacant names in one
+temporary directory from precomputed collection and evaluation results.
+Timings exclude fixture setup and filename evaluation.
+
+| Entries | Simulated observations | Native observations | Endpoint observations per run | Native literal lookups |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 0.085 s | 0.337 s | 2,000 | 2,006 |
+| 10,000 | 0.870 s | 3.316 s | 20,000 | 20,006 |
+| 50,000 | 4.463 s | 17.279 s | 100,000 | 100,006 |
+
+The six extra literal lookups checked shared ancestors. The native runs used
+volume and directory-case metadata queries and performed no directory
+enumerations or content reads. The timings describe this fixture and machine.
+
+On the same Windows environment, the focused planner suite passed 34 tests
+and the full repository suite passed 447 tests, both with zero skips.
+Standalone GUI workers passed 5 filename-preview tests and 9
+collection-controls tests. Ruff and compileall passed. Native planner
+fixtures covered hard links, junctions, case-only naming, distinct directory
+spellings, and unchanged file contents, identities, and directory membership.
+Permission failures and constrained component limits used fault injection.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 

@@ -81,13 +81,50 @@ operation.
   The Process, Deduplicate, and Repack controls remain disabled, and preview
   evaluation neither opens file contents nor changes source files.
 
-These are startup and persistence foundations, not a file-recovery system.
+## Destination planning observations
+
+The standalone planner checks sources and candidate destinations without
+opening file contents or creating directories. Exactly unchanged paths are
+no-ops. Case-only changes remain rename operations. An existing regular file
+can be a vacating dependency only when its observed volume, long parent
+spelling, and directory-entry name match a batch source. Distinct hard-link
+names remain independent entries even when they refer to the same file object.
+A hard-link name outside the batch can occupy and block a destination.
+
+The native observer uses literal Win32 metadata lookups and caches shared
+ancestor and volume observations for one plan. It refuses reparse entries and
+their descendants, non-file destinations, protected system paths, the shared
+clutter names, and supplied managed locations. Volume mapping also protects
+managed paths across drive letters that point to the same local volume.
+Absence is accepted only for a missing leaf below an observed eligible parent.
+Permission errors, disconnected volumes and other failed queries are
+unverifiable. [FindFirstFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfilew)
+
+The observer supports ordinary absolute drive-letter paths on directly mapped
+local disk volumes. It treats UNC, mapped network, SUBST, device and extended
+paths as unverifiable. It detects an existing short-name alias when the lookup
+returns a different long name. A vacant name shaped like a generated 8.3 alias
+is also unverifiable because another operation could create that alias. The
+planner groups filename case variants conservatively within each observed
+parent, preserves Unicode spelling, and refuses case-sensitive directories.
+This can block names a particular filesystem would distinguish.
+[Windows path naming](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file)
+[Windows case sensitivity](https://learn.microsoft.com/en-us/windows/wsl/case-sensitivity)
+[QueryDosDeviceW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-querydosdevicew)
+
+The observer checks the reported volume component limit in UTF-16 units,
+applies the ordinary Win32 path limit of 259 units plus the terminator, and
+blocks modifications on read-only volumes. Case-only renames require a volume
+that preserves case. A successful plan does not establish rename permission,
+source identity continuity, or freedom from later changes and races.
+[GetVolumeInformationW](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationw)
+[Windows path length limits](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)
 
 ## Planned safety components
 
 The following are not implemented:
 
-- Collision-safe batch rename planning and execution.
+- Execution of rename plans and explicit confirmation of collision-only subsets.
 - Protected staging for multi-step filesystem changes.
 - Durable transaction journals and interrupted-operation recovery inspection.
 - Safe original retention and verified installation during repacking.

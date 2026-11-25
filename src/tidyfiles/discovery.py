@@ -24,9 +24,8 @@ from tidyfiles.collection import (
     WorkingCollection,
     normalize_windows_path,
 )
+from tidyfiles.filesystem_paths import CLUTTER_FILENAMES, is_protected_system_path
 
-_CLUTTER_FILES = {"thumbs.db", ".ds_store", "desktop.ini"}
-_PROTECTED_DIRECTORIES = {"$recycle.bin", "system volume information"}
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _WAKE = object()
 
@@ -727,7 +726,7 @@ class DiscoverySession:
         reason = self._protected_reason(path)
         if reason:
             return _Record(path, DiscoveryDisposition.EXCLUDED, reason, entry_type="file")
-        if os.path.basename(path).casefold() in _CLUTTER_FILES:
+        if os.path.basename(path).casefold() in CLUTTER_FILENAMES:
             return _Record(path, DiscoveryDisposition.EXCLUDED, "clutter_file", entry_type="file")
         identity_warning = None
         if os.name == "nt" and getattr(info, "st_ino", 0) == 0:
@@ -811,10 +810,7 @@ class DiscoverySession:
         key = normalize_windows_path(path)
         if any(self._is_within(key, root) for root in self.service.managed_paths):
             return "managed_location"
-        if any(
-            part.casefold() in _PROTECTED_DIRECTORIES
-            for part in PureWindowsPath(path).parts
-        ):
+        if is_protected_system_path(path):
             return "protected_system_directory"
         return None
 

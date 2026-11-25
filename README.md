@@ -37,6 +37,10 @@ Refresh Preview recalculates names for the existing collection and refreshes
 required directory counts without rescanning folders or changing collection
 membership.
 
+The package includes a read-only destination planner for finalized batches.
+It checks candidate paths, collisions and rename dependencies. The planner is
+currently available through the Python service API.
+
 ## Run locally
 
 Use Python 3.13 x64 on Windows 11:
