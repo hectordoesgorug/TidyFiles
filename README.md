@@ -40,6 +40,8 @@ membership.
 The Python service API includes read-only destination planning and preflight
 for finalized batches. Preflight refreshes filename evaluation and checks
 reviewed paths, filesystem identities, collisions, and rename dependencies.
+The service API also provides transaction journals and read-only recovery
+discovery for future processing workflows.
 
 ## Run locally
 

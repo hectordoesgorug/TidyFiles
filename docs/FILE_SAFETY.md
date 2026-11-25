@@ -158,13 +158,47 @@ permission nor no-overwrite behavior. Execution needs its own immediate
 identity and occupancy checks, handle-based race protection, authorization
 and durable transaction safeguards.
 
+## Journal persistence and retention
+
+DD-086 Option A keeps journals portable-first and uses LocalAppData fallback
+only before preparation publishes a journal. The fixed recovery locator in
+LocalAppData registers the journal's original absolute path. The initial
+journal and its registration must both succeed before the modifying phase can
+begin. A failed registration can leave a prepared journal visible to direct
+discovery. A journal session pins its location and blocks further modification
+after a failed required write. Missing or damaged records stay visible.
+
+Persistence validates the JSON, writes a temporary sibling, flushes and
+synchronizes its contents, then publishes it with a same-directory atomic
+replacement. On Windows, publication uses `MoveFileExW` with write-through.
+The old contents remain available when a write or replacement fails before
+publication. Journal and locator updates are separate filesystem operations.
+These mechanisms do not guarantee directory-entry persistence on every
+filesystem, device, or abrupt power loss. [MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)
+
+Finalization requires an independently verified outcome for every entry and
+resolution of each recorded staging or temporary recovery dependency. It
+persists the terminal record first. It then retires the locator entry and
+removes the terminal journal. If removal fails, it retains the journal and
+attempts to restore its locator entry while the locator remains unchanged.
+A cleanup failure is surfaced, with any remaining evidence preserved.
+Discovery can find a terminal journal
+left between those steps through a known journal directory. Source, staging,
+and temporary processing paths remain untouched by journal finalization.
+
+Directory and record checks refuse observed links and reparse points and
+recheck expected journal contents before cleanup. These are path-based
+checks against external changes. Recovery discovery reports evidence only.
+The executor must perform its own immediate source and destination checks
+and wait for required checkpoints before crossing modification boundaries.
+
 ## Planned safety components
 
 The following are not implemented:
 
 - Execution of rename plans and explicit confirmation of collision-only subsets.
 - Protected staging for multi-step filesystem changes.
-- Durable transaction journals and interrupted-operation recovery inspection.
+- Startup recovery notification, staging inspection and overlap enforcement.
 - Safe original retention and verified installation during repacking.
 - Duplicate verification before any deletion action.
 - Central application Trash, Trash capacity/error handling, and explicit cleanup

@@ -60,6 +60,9 @@ not implemented.
 | `src/tidyfiles/destination_observation.py` | Literal local Windows path, ancestor, volume, directory case, and occupancy observations. |
 | `src/tidyfiles/execution_preflight.py` | Review-time identity capture, full-batch refresh, and read-only identity, destination and exact-set revalidation. |
 | `src/tidyfiles/preflight_service.py` | A bounded preflight worker with replacement, cancellation, progress, and current-result tracking. |
+| `src/tidyfiles/transaction_record.py` | Versioned transaction records, Windows identity encoding, and finalization evidence validation. |
+| `src/tidyfiles/transaction_journal.py` | Pinned journal sessions, atomic persistence, the independent recovery locator, and read-only discovery. |
+| `src/tidyfiles/modifying_jobs.py` | Exclusive job reservation and preparation, modification, cancellation, and closure state. |
 | `src/tidyfiles/filesystem_paths.py` | Shared Windows system path and clutter-name exclusions. |
 
 The GUI imports selected files and recursively selected folders by reading
@@ -439,6 +442,38 @@ Cancellation is cooperative, including across a blocking native call once it
 returns. Worker callbacks must be marshalled to the Tk thread by any future GUI
 caller.
 
+## Transaction infrastructure
+
+A version-1 journal records the operation, transaction ID and UTC timestamps,
+ordered entry IDs and paths, stage and outcome, native object and parent
+observations, and any failure or verification evidence. Volume serials and
+128-bit file IDs are fixed-width hexadecimal strings. Rename records can be
+built from the exact intended set in a passing preflight. Persisted records
+carry enough context for inspection without the working collection.
+
+DD-086 Option A places new journals in `journals/` beside the executable,
+with `%LOCALAPPDATA%\TidyFiles\journals` as the preparation-time fallback.
+The versioned `%LOCALAPPDATA%\TidyFiles\recovery_index.json` always maps
+transaction IDs to absolute journal paths independently of configuration,
+logs, and the selected journal directory. Preparation publishes the journal
+before registering its path. Successful registration returns a writer pinned
+to that path. Required checkpoints publish one complete record, and callers
+can checkpoint several rows together. Identical checkpoints skip replacement.
+
+`ModifyingJobCoordinator` reserves one slot per application. Preparation
+can be cancelled. Entering modification requires a registered journal and
+persists the in-progress boundary. The modifying phase disables cancellation
+and normal application closure. The owner releases the slot after workers
+have stopped and terminal evidence or failure has been recorded. The Windows
+named mutex still owns process-level exclusivity. Journal writes and job
+transitions that persist data belong off the Tk thread.
+
+Recovery discovery inspects the current portable directory, fallback
+directory, and locator paths. It groups locations by transaction ID and
+reports unresolved, cleanup-pending, missing, inaccessible, and damaged
+evidence. Startup notification, overlap enforcement, and staging inspection
+will consume this report in M3-F.
+
 ## Tests and CI
 
 Tests are in `tests/` and use pytest. Configuration, storage, logging, package
@@ -452,7 +487,7 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Filesystem execution and transactions, duplicate verification, and
+Filesystem execution, startup recovery workflows, duplicate verification, and
 repacking are future components.
 
 ## Deferred package restructuring

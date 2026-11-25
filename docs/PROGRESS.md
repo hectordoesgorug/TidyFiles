@@ -25,7 +25,8 @@ connects session-only format controls and live read-only filename previews.
 M2-E5 improves large-table updates, clarifies preview status and refresh
 behavior, and adds lifecycle regression coverage. M2 is complete. M3-A adds a
 standalone read-only destination planner. M3-B adds read-only preflight for
-reviewed plans. Filesystem-changing operations remain planned.
+reviewed plans. M3-C adds journals, recovery discovery, and exclusive job
+coordination. File processing remains planned.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -41,9 +42,10 @@ reviewed plans. Filesystem-changing operations remain planned.
 | M2-E3 | Complete | Shared sorting controls and preference persistence, manual ordering and drag-and-drop, selection shortcuts, row context actions, non-destructive removal and clearing, and collection-change notifications. |
 | M2-E4 | Complete | Session-only live filename-format controls, token insertion and reference, background ordered previews, structured diagnostics, metadata refresh, and stale-result protection. |
 | M2-E5 | Complete | Targeted large-table optimization, preview guidance, and lifecycle coverage. Owner manual acceptance passed 21/21. |
-| M3 | In progress | Read-only destination planning and preflight are implemented. Execution, Trash, transaction journals, and recovery remain planned. |
+| M3 | In progress | Destination planning, preflight, and transaction infrastructure are implemented. Execution, Trash, and startup recovery workflows remain planned. |
 | M3-A | Complete | Standalone destination planning, collision and dependency classification, and read-only collision-only subset replanning. |
-| M3-B | Implemented | Review-time identity capture and cancellable read-only execution preflight. |
+| M3-B | Complete | Review-time identity capture and cancellable read-only execution preflight. |
+| M3-C | Implemented | Durable journals, persistent recovery locator, recovery discovery, and modifying-job coordination. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
@@ -629,6 +631,34 @@ earlier full runs each failed one GUI test because a discovery fixture
 released itself before a shutdown assertion. The fixtures now wait for their
 explicit release events. Ruff, compileall, and both Git whitespace checks
 passed.
+
+The M3-B commit `897c3f7dd12823cda9b9056868a6f689a09ed237` was pushed and
+passed Windows CI, as recorded at the M3-C checkpoint.
+
+## M3-C — Transaction infrastructure
+
+Versioned journals persist the exact intended scope, native Windows identity
+observations, entry stages, outcomes, and verified finalization evidence.
+DD-086 Option A uses portable journals with a LocalAppData fallback and
+an independent LocalAppData recovery locator. A failed required write stops
+the pinned journal session. Read-only recovery discovery preserves and reports
+interrupted, damaged, unavailable, and cleanup-pending records.
+
+The application-level coordinator provides one job slot, cancelable
+preparation, and a non-cancelable modifying phase gated by a registered
+journal and an in-progress checkpoint. The existing named mutex continues
+to guard the process. This covers infrastructure clauses of DD-012, DD-035,
+DD-037 through DD-042, and DD-086. Operation-specific checkpoints and
+verification belong to M3-D. Startup notification, staging inspection, and
+overlap protection belong to M3-F. The GUI controls remain disabled.
+
+On Windows with Python 3.13.17, the focused transaction suite passed 28
+tests and the full suite passed 518, with zero failures and skips. Fault
+injection covered initial writes, publication, registration, checkpoint
+failures, and cleanup. Native fixtures covered journal publication and
+retirement, relocation, a redirected journal directory, and identity
+round-tripping from preflight. Ruff, compileall, and both Git whitespace
+checks passed.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 
