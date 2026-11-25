@@ -7,8 +7,9 @@ collection snapshots, and Bulk Rename displays its read-only previews through
 the existing GUI. The shared in-memory collection supports import finalization
 or rollback, sorting, manual ordering, selection, removal, and clearing. File
 discovery and filename evaluation run in background services while all Tk
-updates stay on the main thread. Separate read-only services plan rename
-destinations and revalidate reviewed plans. Filesystem processing remains planned.
+updates stay on the main thread. Separate read-only services plan destinations
+and revalidate reviewed plans. The standalone Windows rename executor is
+available to controlled callers.
 
 ## Startup and shutdown
 
@@ -63,6 +64,8 @@ not implemented.
 | `src/tidyfiles/transaction_record.py` | Versioned transaction records, Windows identity encoding, and finalization evidence validation. |
 | `src/tidyfiles/transaction_journal.py` | Pinned journal sessions, atomic persistence, the independent recovery locator, and read-only discovery. |
 | `src/tidyfiles/modifying_jobs.py` | Exclusive job reservation and preparation, modification, cancellation, and closure state. |
+| `src/tidyfiles/rename_executor.py` | Authorized scope binding, sequential dependency execution, journal checkpoints, and verified results. |
+| `src/tidyfiles/windows_rename.py` | Handle-relative, non-overwriting Windows rename and creation-time preservation. |
 | `src/tidyfiles/filesystem_paths.py` | Shared Windows system path and clutter-name exclusions. |
 
 The GUI imports selected files and recursively selected folders by reading
@@ -474,6 +477,37 @@ reports unresolved, cleanup-pending, missing, inaccessible, and damaged
 evidence. Startup notification, overlap enforcement, and staging inspection
 will consume this report in M3-F.
 
+## Standalone rename execution
+
+`RenameExecutor` accepts an explicitly authorized `RenameScope` and
+the caller's current passing preflight result. It matches the intended IDs,
+excluded IDs, source and destination paths, revision, and options to the
+reviewed scope. It reobserves the selected plan before preparing the
+transaction and checks result currency again before the first move.
+The caller owns the current-result check and keeps that context stable
+through execution. Conversion-specific input is rejected.
+
+The executor reserves the modifying-job slot, registers the journal, and
+persists the in-progress transition. Independent renames and Single Folder
+moves are direct same-volume operations. Chains follow the planner's
+vacating order. For a swap or cycle, the executor stages one pivot in its
+source parent, moves the remaining entries in reverse dependency order, and
+installs the pivot. A case-only rename uses the same two-hop staging.
+Exactly unchanged paths are verified in place.
+
+Each move holds the source entry and parent handles across its before-move
+checkpoint, rechecks the paths and vacancy, and issues a non-replacing move.
+A fresh observer verifies the resulting entry and vacated path before its
+after-move checkpoint. The executor stops on the first failure. Independent
+final observations establish completed and untouched entries and staging
+vacancies. Only fully verified outcomes retire the record. Results include
+per-entry outcomes, observed locations, and the transaction ID.
+
+The standalone service returns results without changing the working collection.
+It reports correlated progress without calling Tk. M3-G supplies confirmation,
+GUI scheduling, and completion updates. M3-F consumes retained journal
+evidence for startup notification, overlap protection, and staging inspection.
+
 ## Tests and CI
 
 Tests are in `tests/` and use pytest. Configuration, storage, logging, package
@@ -487,7 +521,7 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Filesystem execution, startup recovery workflows, duplicate verification, and
+Startup recovery workflows, duplicate verification, and
 repacking are future components.
 
 ## Deferred package restructuring

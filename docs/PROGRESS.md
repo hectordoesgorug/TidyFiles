@@ -7,7 +7,8 @@ with an empty collection and exposes no file-processing or destructive actions.
 M1 parser, evaluator, extension resolution, and pure filename validation are
 complete, including M1-D.12's DD-061 parser diagnostic correction. They remain
 pure filename-engine components; M2-D and M2-E4 connect them to read-only
-evaluation and GUI previews. Filesystem-changing operations remain unavailable.
+evaluation and GUI previews. Filesystem-changing operations remain unavailable
+through the desktop interface.
 See `docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-decision audit and
 historical verification record.
 
@@ -26,7 +27,8 @@ M2-E5 improves large-table updates, clarifies preview status and refresh
 behavior, and adds lifecycle regression coverage. M2 is complete. M3-A adds a
 standalone read-only destination planner. M3-B adds read-only preflight for
 reviewed plans. M3-C adds journals, recovery discovery, and exclusive job
-coordination. File processing remains planned.
+coordination. M3-D adds a standalone Windows rename executor. Desktop
+processing controls remain disabled.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -42,10 +44,11 @@ coordination. File processing remains planned.
 | M2-E3 | Complete | Shared sorting controls and preference persistence, manual ordering and drag-and-drop, selection shortcuts, row context actions, non-destructive removal and clearing, and collection-change notifications. |
 | M2-E4 | Complete | Session-only live filename-format controls, token insertion and reference, background ordered previews, structured diagnostics, metadata refresh, and stale-result protection. |
 | M2-E5 | Complete | Targeted large-table optimization, preview guidance, and lifecycle coverage. Owner manual acceptance passed 21/21. |
-| M3 | In progress | Destination planning, preflight, and transaction infrastructure are implemented. Execution, Trash, and startup recovery workflows remain planned. |
+| M3 | In progress | Destination planning, preflight, journals, and standalone rename execution are implemented. Desktop processing, Trash, and startup recovery workflows remain planned. |
 | M3-A | Complete | Standalone destination planning, collision and dependency classification, and read-only collision-only subset replanning. |
 | M3-B | Complete | Review-time identity capture and cancellable read-only execution preflight. |
-| M3-C | Implemented | Durable journals, persistent recovery locator, recovery discovery, and modifying-job coordination. |
+| M3-C | Complete | Durable journals, persistent recovery locator, recovery discovery, and modifying-job coordination. |
+| M3-D | Implemented | Standalone, journaled, handle-relative rename and same-volume Single Folder execution. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
@@ -659,6 +662,45 @@ failures, and cleanup. Native fixtures covered journal publication and
 retirement, relocation, a redirected journal directory, and identity
 round-tripping from preflight. Ruff, compileall, and both Git whitespace
 checks passed.
+
+The M3-C commit `04dbb1fde3d8e62c54d06eafa9a71d8190de05d2` was pushed and
+passed Windows CI, as recorded at the M3-D checkpoint.
+
+## M3-D — Safe rename executor
+
+The standalone executor runs an authorized, current rename scope against
+its reviewed destinations. It reuses planner order, preflight observations,
+the modifying-job slot, and the pinned journal. Same-volume moves use
+source and destination-directory handles and Windows no-replace semantics.
+Chains run in vacating order. Case-only changes, swaps, and cycles use a
+single journaled sibling stage per dependency group.
+
+Each move is checked and recorded before and after the filesystem action.
+The executor preserves verified completed moves and leaves staged originals
+and their journals available for inspection after failure. It verifies
+every outcome and stage vacancy before retiring records. The executor
+restores the original creation time if NTFS name tunneling changes it.
+
+The executor covers the rename-specific parts of DD-009, DD-037 through
+DD-038, DD-040 through DD-043, DD-063, DD-065, DD-074 through DD-076, and
+DD-086. Repacker execution belongs to M3-E, recovery workflows and overlap
+protection to M3-F, and confirmation, activation and collection updates to
+M3-G. See [Architecture](ARCHITECTURE.md#standalone-rename-execution) and
+[File Safety](FILE_SAFETY.md#rename-execution-safety).
+
+Native Windows fixtures verified independent roots on two physical volumes.
+The 100-file independent-rename run took 4.475 seconds. A separate 250-file
+run took 15.291 seconds and measured pre-move journal records of
+407,012–407,759 bytes. Both measurements exclude preflight and include
+journal preparation, before- and after-move checkpoints, and final
+verification. Each required checkpoint still publishes the entire record,
+which adds persistence cost as the batch grows.
+
+On Windows with Python 3.13.17, 37 executor tests, 105 related regression
+tests, and the full 555-test suite passed with zero failures and skips.
+Ruff, compileall, and both Git whitespace checks passed. The first executor
+run exposed NTFS creation-time changes in a chain and a cycle. The native
+tests passed after creation-time preservation was added.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 

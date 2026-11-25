@@ -11,8 +11,8 @@ and script extensions are disabled for Open File; suffix checks cannot identify
 every potentially launchable file. Bulk Rename shows read-only filename
 previews. The **Valid preview** label means filename-level validation passed;
 it does not verify destination collisions, source identity or execution
-readiness. No rename, deduplication, repacking, or cleanup operation is
-available.
+readiness. The desktop rename, deduplication, repacking, and cleanup controls
+are disabled.
 
 The Auto-clean switch is disabled until its permanent-deletion disclosure and
 eligible-folder workflow are implemented. Its approved future deletion scope
@@ -192,19 +192,61 @@ checks against external changes. Recovery discovery reports evidence only.
 The executor must perform its own immediate source and destination checks
 and wait for required checkpoints before crossing modification boundaries.
 
+## Rename execution safety
+
+The standalone Windows executor binds `NtSetInformationFile(FileRenameInformation)`
+to the verified source handle and destination-directory handle. Windows
+rejects an occupied target because replacement is disabled. Directory
+handles are opened component by component without traversing reparse points
+and held without delete sharing during the move. The source handle denies
+write and delete sharing. The executor also reobserves volume mapping, both
+endpoints, and vacancy after the journal checkpoint and before moving.
+[NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)
+[FILE_RENAME_INFORMATION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)
+
+Every staged move first records its unique sibling path in the journal.
+The path must be vacant and separate from planned paths on the same volume.
+The executor owns an artifact only when it verifies its original identity
+at the staged path. A successful installation consumes that entry by rename
+and verifies the staging name is vacant. A surviving or unverifiable stage
+remains recorded. The executor creates no destination directories and
+performs neither file copying nor deletion to make room.
+
+NTFS name tunneling can inherit a creation time from a recently vacated
+name. Source handles request `FILE_WRITE_ATTRIBUTES` so the executor can
+preserve the original creation time on the same object when this occurs.
+It verifies identity, spelling, creation and last-write times, size and
+attributes. Change time may advance through the authorized move, including
+at other hard links to the same object. [NTFS name tunneling](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/fltkernel/nf-fltkernel-fltgettunneledname)
+[FILE_BASIC_INFORMATION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_file_basic_information)
+
+A failure stops further moves and leaves completed files and any staged
+originals in place. The executor preserves the last durable checkpoint if
+an after-move write fails. It attempts verified finalization only when the
+journal remains healthy and all entries and artifact vacancies can be
+established. An interruption can leave a prepared or in-progress record.
+The executor performs no automatic rollback, restoration, or startup
+cleanup.
+
+These safeguards apply to supported local Windows paths and sharing
+semantics. Metadata, drive mappings, and names can still change between
+separate observations or after handles close, including after final
+verification. Permission and sharing failures block a move when it cannot
+be safely established. A power loss can occur between the move and its
+after-move record.
+
 ## Planned safety components
 
 The following are not implemented:
 
-- Execution of rename plans and explicit confirmation of collision-only subsets.
-- Protected staging for multi-step filesystem changes.
+- GUI confirmation of authorized rename scopes and collision-only subsets.
+- Protected staging for other processing workflows.
 - Startup recovery notification, staging inspection and overlap enforcement.
 - Safe original retention and verified installation during repacking.
 - Duplicate verification before any deletion action.
 - Central application Trash, Trash capacity/error handling, and explicit cleanup
   behavior.
-- Execution-time filesystem revalidation and race-safe mutation protections for
-  symlinks, junctions, and reparse points.
+- Operator inspection and recovery of interrupted transactions.
 
 Future filesystem work must independently validate a complete destination plan,
 revalidate before mutation, avoid unauthorized overwrites and deletion, and use

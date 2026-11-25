@@ -204,6 +204,12 @@ class JournalStore:
     def locator_path(self) -> Path | None:
         return self._fallback / "recovery_index.json" if self._fallback is not None else None
 
+    @property
+    def managed_paths(self) -> tuple[str, ...]:
+        locator = self.locator_path
+        paths = self._directories() + ((locator,) if locator is not None else ())
+        return tuple(str(path) for path in paths)
+
     def _directories(self) -> tuple[Path, ...]:
         fallback = self._fallback / "journals" if self._fallback is not None else None
         return tuple(dict.fromkeys(path for path in (self._portable, fallback) if path is not None))
@@ -428,7 +434,7 @@ class JournalSession:
             updated = replace(updated, updated_at=max(datetime.now(UTC), updated.updated_at))
             payload = _record_payload(updated)
             _atomic_write(self._path, payload, overwrite=True)
-        except (OSError, ValueError, TypeError, AttributeError, RecursionError) as error:
+        except Exception as error:
             self._failed = True
             raise JournalError(f"Cannot persist checkpoint at {self._path}: {error}") from error
         self._payload = payload

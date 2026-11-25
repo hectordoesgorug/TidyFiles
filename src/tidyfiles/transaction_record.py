@@ -456,7 +456,10 @@ def validate_verification(
         raise ValueError("Verification must cover the intended entry and all recorded artifacts")
     baseline = entry.source_observation if original else entry.destination_observation
     expected_name = ntpath.basename(expected)
-    if original or entry.source_path == entry.destination_path:
+    if original or entry.source_path == entry.destination_path or (
+        entry.destination_observation == entry.source_observation
+        and ntpath.basename(entry.source_path) == ntpath.basename(entry.destination_path)
+    ):
         expected_name = entry.source_observation.actual_name
     if observed.actual_name != expected_name or (
         baseline is not None
