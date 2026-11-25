@@ -2,16 +2,13 @@
 
 TidyFiles currently consists of a small Python package with a Windows desktop
 shell and foundational startup, configuration, storage, logging, and
-single-instance modules. The pure filename engine is implemented as a library
-component but is not connected to the GUI. The shared in-memory collection
-domain model supports ordered snapshots and import-session finalization or
-rollback. The GUI connects read-only file and recursive-folder discovery through
-an application controller. M2-E3 connects sorting, manual ordering, selection,
-context actions, removal, and clearing to that collection. The filename-
-evaluation service remains unconnected to the GUI. A finalized collection
-snapshot can be adapted to the pure filename engine, including on-demand
-physical directory counts. Preview rendering, destination planning, and
-filesystem processing remain planned.
+single-instance modules. The pure filename engine evaluates finalized ordered
+collection snapshots, and Bulk Rename displays its read-only previews through
+the existing GUI. The shared in-memory collection supports import finalization
+or rollback, sorting, manual ordering, selection, removal, and clearing. File
+discovery and filename evaluation run in background services while all Tk
+updates stay on the main thread. Destination planning and filesystem processing
+remain planned.
 
 ## Startup and shutdown
 
@@ -48,7 +45,7 @@ not implemented.
 | `src/tidyfiles/storage.py` | Writable application-directory selection and `%LOCALAPPDATA%\TidyFiles` fallback for ordinary application data. |
 | `src/tidyfiles/config.py` | Schema-v1 defaults, validation, loading, and atomic saving, including backward-compatible sort preferences. Invalid sort values use defaults without rewriting the file during load; other invalid configuration remains an error. |
 | `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
-| `src/tidyfiles/app.py` | CustomTkinter main window, three mode panels, one shared collection-backed Treeview, collection controls, column customization, appearance, and window geometry preferences. |
+| `src/tidyfiles/app.py` | CustomTkinter main window, three mode panels, one shared collection-backed Treeview, collection controls, debounced filename previews and diagnostics, column customization, appearance, and window geometry preferences. |
 | `src/tidyfiles/import_controller.py` | One active discovery session, Tk-thread result consumption, bounded incremental rendering, asynchronous final-order preparation, cancellation rollback, and shutdown coordination. |
 | `src/tidyfiles/ui_preferences.py` | Per-mode Treeview column defaults and safe preference recovery, plus window-geometry parsing and virtual-screen clamping. |
 | `src/tidyfiles/collection.py` | GUI-independent working collection with one authoritative ordered ID sequence, indexed membership, import lifecycle, management operations, ordering mode, and immutable snapshots. |
@@ -57,12 +54,14 @@ not implemented.
 | `src/tidyfiles/filename_format.py` | Pure parser producing immutable, source-ordered literal spans and token occurrences; structured parse errors retain the exact input expression, offset, and optional offending token. |
 | `src/tidyfiles/filename_evaluator.py` | Pure per-file and ordered-batch evaluation of parsed tokens and extensions; returns raw values, resolved candidates, validated names, and file-specific diagnostics. |
 | `src/tidyfiles/filename_integration.py` | Collection-snapshot adapter, read-only directory-count cache, structured evaluation results, request-currency checks, cooperative cancellation, progress, and one bounded background worker. |
+| `src/tidyfiles/format_reference.py` | Categorized parser-valid token insertion examples and the read-only filename-format reference text. |
 | `src/tidyfiles/filename_validation.py` | Pure legacy-character substitution and validation of one Windows filename component, including reserved device names, Unicode safety, and UTF-16 component length. |
 
 The GUI imports selected files and recursively selected folders by reading
 metadata, without opening file contents. Import updates the shared collection
-and table progressively; it does not evaluate rename formats, hash duplicates,
-repack media, or modify the filesystem.
+and table progressively. After the import is finalized, Bulk Rename can evaluate
+the complete ordered collection without reading file contents. No mode hashes
+duplicates, repacks media, or modifies the filesystem.
 `collection.py` stores the selected path spelling and a separate
 case-insensitive, normalized Windows path key without resolving paths or
 accessing the filesystem. Filesystem object identity is optional metadata and
@@ -232,9 +231,10 @@ Downstream code can observe `root.application.collection` and its immutable
 snapshots. After effective order or membership changes and import completion or
 rollback, the application updates `root.collection_revision` and emits
 `<<TidyFilesCollectionChanged>>`. Selection and column changes do not emit this
-event. M2-E4 can subscribe to the event, inspect a current snapshot, and request
-filename evaluation; it must also treat an active import as non-current. Live
-evaluation and preview display are not implemented by M2-E3.
+event. The Bulk Rename preview integration subscribes to the event, inspects a
+current snapshot, and requests filename evaluation only after collection work is
+finalized. It invalidates current previews as soon as import activity begins;
+selection and column changes do not trigger evaluation.
 
 M2-E2 enables Add Files and Add Folder while idle. During discovery, both import
 buttons, remove, clear, sorting, movement, and processing controls are disabled;
@@ -259,10 +259,11 @@ discovery service retains exclusions, metadata capture, bounded queue capacity
 file contents are read. Import does not imply filename validation or processing
 readiness.
 
-Live evaluation and preview, token insertion, profiles, format help, and all
-processing actions remain deferred. Collection removal, clearing, sorting, and
-manual movement are functional while idle and disabled during conflicting
-work. The Columns dialog is functional. The rename field is session-only.
+Live filename preview, token insertion, and format help are implemented.
+Profiles and all processing actions remain deferred. Collection removal,
+clearing, sorting, and manual movement are functional while idle and disabled
+during conflicting work. The Columns dialog is functional. The rename field is
+session-only.
 Auto-clean stays disabled, and Counter is an off-by-default,
 session-only switch with no execution behavior. Resolution and length cells
 show “— (not probed)” for filename extensions that identify applicable media
@@ -313,6 +314,37 @@ an active import, a superseded request, or changed expression or settings. A
 candidate comparison reports raw candidate changes separately from
 validated filename changes, so an invalid name is never promoted to a valid
 preview candidate.
+
+The Bulk Rename controls use the three built-in formats and a categorized menu
+of parser-valid insertion examples for all 20 tokens. The expression remains an
+editable session value and starts empty; it is not saved to configuration. A
+300 ms debounce feeds the existing single-worker service and its replaceable
+pending request. Progress passes through a bounded thread-safe queue and is
+coalesced on the Tk thread. Results are checked against request ID, expression,
+collection identity and revision before being rendered in 96-row chunks. The
+renderer checks currency again before each chunk and applies results by stable
+entry ID. Active imports invalidate prior results and defer evaluation until
+finalization. Switching tabs clears Bulk Rename values from the shared table;
+the completed current result is restored on return without an unnecessary
+evaluation. Duplicate Finder and Repacker do not receive fabricated analysis
+or output results.
+
+The preview status column distinguishes Pending, Evaluating, Ready, Unchanged,
+Invalid format, Invalid filename, Metadata unavailable, and Stale. Unchanged
+uses exact filename equality, including case. Parser errors highlight the
+format field, show one inline diagnostic, and mark all rows Invalid format with
+neutral backgrounds. File-specific token, metadata, and validation errors
+highlight only affected rows and are available through the row Details action.
+Any error invalidates the complete rename batch; valid rows may remain visible
+for review. The reference dialog is read-only and single-instance. Refresh
+Preview invalidates cached directory observations and forces fresh acquisition
+for count tokens. No filesystem watcher is used.
+
+The common status and progress area reports evaluation stages only when import
+work is idle. Processing controls remain disabled. A valid preview does not
+prove complete discovery, destination availability, collision safety, current
+source identity, duplicate-analysis readiness, or authorization to change
+files.
 
 An evaluation marked valid establishes only that the filename expression was
 evaluated and each filename component passed validation. M2-E must separately

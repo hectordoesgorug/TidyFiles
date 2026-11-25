@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import queue
 import threading
 import tkinter as tk
 from copy import deepcopy
@@ -35,6 +36,14 @@ from tidyfiles.discovery import (
     DiscoverySession,
     DiscoveryState,
 )
+from tidyfiles.filename_integration import (
+    DiagnosticKind,
+    EvaluationProgress,
+    EvaluationStage,
+    FilenameEvaluationResult,
+    FilenameEvaluationService,
+)
+from tidyfiles.format_reference import FORMAT_REFERENCE, TOKEN_GROUPS
 from tidyfiles.import_controller import ImportController
 from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
 from tidyfiles.ui_preferences import (
@@ -56,6 +65,7 @@ _FORMAT_PRESETS = (
     "<SubDirName> <IncNr>",
     "<Name> <IncNr>",
 )
+_COLUMN_INDEX = {column.identifier: index for index, column in enumerate(COLUMNS)}
 _SORT_LABELS = {
     SortCriterion.FILE_TYPE_AND_NAME: "File Type + Name",
     SortCriterion.NAME: "Name",
@@ -208,6 +218,33 @@ class _MainWindow:
         self._drag_target: tuple[str, bool] | None = None
         self._drag_prior_status = ""
         self.column_dialog: ctk.CTkToplevel | None = None
+        self._preview_service: FilenameEvaluationService | None = None
+        self._preview_progress: queue.Queue[EvaluationProgress] = queue.Queue(maxsize=64)
+        self._preview_after: str | None = None
+        self._preview_debounce_after: str | None = None
+        self._preview_clear_after: str | None = None
+        self._preview_render_after: str | None = None
+        self._preview_generation = 0
+        self._preview_request_id: UUID | None = None
+        self._preview_future: Any = None
+        self._preview_request_generation = 0
+        self._preview_force_metadata = False
+        self._preview_clear_ids: tuple[str, ...] = ()
+        self._preview_clear_offset = 0
+        self._preview_clear_generation = 0
+        self._preview_clear_schedule = False
+        self._preview_clear_status = "Pending"
+        self._preview_clear_baseline = True
+        self._preview_render_result: FilenameEvaluationResult | None = None
+        self._preview_render_offset = 0
+        self._preview_render_generation = 0
+        self._preview_result: FilenameEvaluationResult | None = None
+        self._preview_diagnostics_by_id: dict[UUID, Any] = {}
+        self._preview_import_invalidated = False
+        self._format_reference_dialog: ctk.CTkToplevel | None = None
+        self._preview_details_dialog: ctk.CTkToplevel | None = None
+        self._preview_details_textbox: ctk.CTkTextbox | None = None
+        self._context_entry_id: UUID | None = None
 
         self.root = ctk.CTk()
         self.root.application = self  # type: ignore[attr-defined]
@@ -230,6 +267,12 @@ class _MainWindow:
             on_error=self._on_import_error,
             on_shutdown=self._finish_close,
         )
+        self._preview_service = FilenameEvaluationService()
+        self.rename_format.trace_add("write", self._on_format_changed)
+        self.root.bind(
+            "<<TidyFilesCollectionChanged>>", self._on_collection_changed, add="+"
+        )
+        self._preview_after = self.root.after(20, self._poll_filename_preview)
         self._update_control_states()
         self._update_import_warnings()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -274,7 +317,7 @@ class _MainWindow:
         self.settings_button.grid(row=0, column=1, sticky="e")
 
         self.tabs = ctk.CTkTabview(
-            self.root, anchor="nw", height=132, command=self._on_mode_change
+            self.root, anchor="nw", height=154, command=self._on_mode_change
         )
         self.tabs.grid(row=1, column=0, padx=16, pady=(0, 7), sticky="ew")
         self.mode_panels: dict[str, ctk.CTkFrame] = {}
@@ -310,23 +353,37 @@ class _MainWindow:
             values=_FORMAT_PRESETS,
             state="normal",
             height=30,
+            command=self._on_preset_selected,
         )
         self.format_field._entry.bind("<Control-a>", self._select_all_format_text, add="+")
         self.format_field._entry.bind("<Control-A>", self._select_all_format_text, add="+")
         self.format_field.grid(row=0, column=0, padx=(0, 6), sticky="ew")
-        self.insert_token_button = _disabled_button(
-            formats, text="Insert Token", width=100
+        self.insert_token_button = ctk.CTkButton(
+            formats,
+            text="Insert Token",
+            width=100,
+            command=self._show_insert_token_menu,
         )
         self.insert_token_button.grid(row=0, column=1, padx=3)
         self.profiles_button = _disabled_button(formats, text="Profiles", width=85)
         self.profiles_button.grid(row=0, column=2, padx=3)
-        self.format_reference_button = _disabled_button(
-            formats, text="Format Reference", width=125
+        self.format_reference_button = ctk.CTkButton(
+            formats, text="Format Reference", width=125, command=self.open_format_reference
         )
         self.format_reference_button.grid(row=0, column=3, padx=(3, 0))
+        self.refresh_preview_button = ctk.CTkButton(
+            formats, text="Refresh Preview", width=112, command=self.refresh_filename_preview
+        )
+        self.refresh_preview_button.grid(row=0, column=4, padx=(6, 0))
+        self._format_border_normal = self.format_field.cget("border_color")
+        self.format_diagnostic = ctk.CTkLabel(
+            panel, text="", anchor="w", text_color=("#B42318", "#FF8D85")
+        )
+        self.format_diagnostic.grid(row=1, column=0, padx=8, pady=(0, 1), sticky="w")
+        self.format_diagnostic.grid_remove()
 
         options = ctk.CTkFrame(panel, fg_color="transparent")
-        options.grid(row=1, column=0, padx=4, pady=(0, 1), sticky="w")
+        options.grid(row=2, column=0, padx=4, pady=(0, 1), sticky="w")
         self.single_folder_switch = ctk.CTkSwitch(
             options, text="Single Folder", onvalue=True, offvalue=False
         )
@@ -354,7 +411,7 @@ class _MainWindow:
             justify="left",
             font=ctk.CTkFont(size=10),
             wraplength=980,
-        ).grid(row=2, column=0, padx=6, pady=(0, 3), sticky="ew")
+        ).grid(row=3, column=0, padx=6, pady=(0, 3), sticky="ew")
 
     @staticmethod
     def _build_placeholder_panel(panel: ctk.CTkFrame, text: str) -> None:
@@ -487,6 +544,11 @@ class _MainWindow:
             self.context_menu.add_command(label=label, command=command)
             self._context_menu_indices[key] = int(self.context_menu.index("end"))
         self.context_menu.add_separator()
+        self.context_menu.add_command(
+            label="Preview Details", command=self.open_preview_details, state="disabled"
+        )
+        self._context_menu_indices["preview_details"] = int(self.context_menu.index("end"))
+        self.context_menu.add_separator()
         for key, label, command in (
             ("remove", "Remove from List", self.remove_selected),
             ("move_top", "Move to Top", lambda: self._move_selected("move_top")),
@@ -583,10 +645,640 @@ class _MainWindow:
     def _on_mode_change(self) -> None:
         mode = self.tabs.get()
         if mode in self.mode_panels:
-            if mode != self.active_mode:
+            previous = self.active_mode
+            if mode != previous:
                 self._close_columns()
                 self._persist_column_widths()
-            self._apply_mode(mode)
+                self._apply_mode(mode)
+                if previous == "Bulk Rename":
+                    self._leave_bulk_rename()
+                elif mode == "Bulk Rename":
+                    self._return_to_bulk_rename()
+            else:
+                self._apply_mode(mode)
+
+    def _on_preset_selected(self, value: str) -> None:
+        if value not in _FORMAT_PRESETS:
+            return
+        self.rename_format.set(value)
+        self.format_field._entry.icursor("end")
+        self.format_field._entry.focus_set()
+
+    def _show_insert_token_menu(self) -> None:
+        menu = self._build_insert_token_menu()
+        try:
+            menu.tk_popup(
+                self.insert_token_button.winfo_rootx(),
+                self.insert_token_button.winfo_rooty() + self.insert_token_button.winfo_height(),
+            )
+        finally:
+            menu.grab_release()
+
+    def _build_insert_token_menu(self) -> tk.Menu:
+        menu = getattr(self, "_insert_token_menu", None)
+        if menu is None:
+            menu = tk.Menu(self.root, tearoff=False)
+            self._insert_token_submenus = []
+            for category, tokens in TOKEN_GROUPS:
+                submenu = tk.Menu(menu, tearoff=False)
+                self._insert_token_submenus.append(submenu)
+                menu.add_cascade(label=category, menu=submenu)
+                for token, template in tokens:
+                    submenu.add_command(
+                        label=token.value,
+                        command=lambda value=template: self._insert_format_token(value),
+                    )
+            self._insert_token_menu = menu
+        return menu
+
+    def _insert_format_token(self, template: str) -> None:
+        entry = self.format_field._entry
+        current = self.rename_format.get()
+        try:
+            start = entry.index("sel.first")
+            end = entry.index("sel.last")
+        except tk.TclError:
+            start = end = entry.index("insert")
+        self.rename_format.set(current[:start] + template + current[end:])
+        entry.icursor(start + len(template))
+        entry.focus_set()
+
+    def open_format_reference(self) -> None:
+        if self._closing:
+            return
+        if self._format_reference_dialog is not None:
+            try:
+                if self._format_reference_dialog.winfo_exists():
+                    self._format_reference_dialog.deiconify()
+                    self._format_reference_dialog.lift()
+                    self._format_reference_dialog.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Filename Format Reference")
+        dialog.geometry("760x720")
+        dialog.minsize(600, 480)
+        dialog.transient(self.root)
+        self._format_reference_dialog = dialog
+        dialog.bind(
+            "<Destroy>",
+            lambda event, window=dialog: self._on_preview_dialog_destroy(
+                event, window, "reference"
+            ),
+            add="+",
+        )
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        text = ctk.CTkTextbox(dialog, wrap="word")
+        text.pack(fill="both", expand=True, padx=12, pady=12)
+        text.insert("1.0", FORMAT_REFERENCE)
+        text.configure(state="disabled")
+
+    def _on_preview_dialog_destroy(
+        self, event: tk.Event[Any], window: ctk.CTkToplevel, kind: str
+    ) -> None:
+        if event.widget is not window:
+            return
+        if kind == "reference" and self._format_reference_dialog is window:
+            self._format_reference_dialog = None
+        elif kind == "details" and self._preview_details_dialog is window:
+            self._preview_details_dialog = None
+            self._preview_details_textbox = None
+
+    def _import_is_busy(self) -> bool:
+        return (
+            getattr(self, "import_controller", None) is not None
+            and self.import_controller.busy
+        ) or self.collection.capabilities.is_importing
+
+    def _on_format_changed(self, *_args: Any) -> None:
+        if self._closing:
+            return
+        self._set_format_diagnostic(None)
+        self._invalidate_filename_preview(schedule=True)
+        if not self.rename_format.get() and self.collection.snapshot().entries:
+            self.format_diagnostic.configure(text="A rename format is required.")
+            self.format_diagnostic.grid()
+        self._update_control_states()
+
+    def _on_collection_changed(self, _event: tk.Event[Any] | None = None) -> None:
+        if self._closing:
+            return
+        self._invalidate_filename_preview(schedule=True)
+        if not self.rename_format.get() and not self.collection.snapshot().entries:
+            self._set_format_diagnostic(None)
+
+    def _set_format_diagnostic(self, diagnostic: Any | None) -> None:
+        if diagnostic is None:
+            self.format_diagnostic.configure(text="")
+            self.format_diagnostic.grid_remove()
+            self.format_field.configure(border_color=self._format_border_normal)
+            return
+        detail = diagnostic.message
+        if diagnostic.token is not None:
+            detail += f" · {diagnostic.token}"
+        if diagnostic.position is not None:
+            detail += f" · offset {diagnostic.position}"
+        self.format_diagnostic.configure(text=detail)
+        self.format_diagnostic.grid()
+        self.format_field.configure(border_color=("#B42318", "#F97066"))
+
+    def _cancel_preview_after(self, name: str) -> None:
+        after_id = getattr(self, name)
+        if after_id is None:
+            return
+        try:
+            self.root.after_cancel(after_id)
+        except tk.TclError:
+            pass
+        setattr(self, name, None)
+
+    def _invalidate_filename_preview(
+        self,
+        *,
+        schedule: bool,
+        force_metadata: bool = False,
+        invalidate_metadata: bool = False,
+    ) -> None:
+        if self._closing:
+            return
+        self._preview_generation += 1
+        self._cancel_preview_after("_preview_debounce_after")
+        self._cancel_preview_after("_preview_render_after")
+        self._cancel_preview_after("_preview_clear_after")
+        if self._preview_service is not None:
+            self._preview_service.cancel(self._preview_request_id)
+            if invalidate_metadata:
+                self._preview_service.invalidate_metadata()
+        self._preview_request_id = None
+        self._preview_future = None
+        self._preview_result = None
+        self._preview_render_result = None
+        self._preview_diagnostics_by_id.clear()
+        self._preview_force_metadata = self._preview_force_metadata or force_metadata
+        while True:
+            try:
+                self._preview_progress.get_nowait()
+            except queue.Empty:
+                break
+
+        expression = self.rename_format.get()
+        busy = self._import_is_busy() or self._collection_operation_pending
+        should_schedule = (
+            schedule
+            and self.active_mode == "Bulk Rename"
+            and bool(expression)
+            and bool(self.collection.snapshot().entries)
+            and not busy
+        )
+        status = "Pending" if should_schedule else None
+        if self.active_mode == "Bulk Rename" and should_schedule:
+            self.status.configure(text="Filename preview pending")
+        elif (
+            self.active_mode == "Bulk Rename"
+            and expression
+            and not busy
+            and self.collection.snapshot().entries
+        ):
+            self.status.configure(text="Filename preview pending")
+        elif self.active_mode == "Bulk Rename" and not expression:
+            entries = self.collection.snapshot().entries
+            if entries and not busy:
+                self.format_diagnostic.configure(text="A rename format is required.")
+                self.format_diagnostic.grid()
+
+        self._begin_preview_clear(
+            generation=self._preview_generation,
+            schedule=should_schedule,
+            status=status,
+            baseline=not should_schedule,
+        )
+
+    def _begin_preview_clear(
+        self,
+        *,
+        generation: int,
+        schedule: bool,
+        status: str | None,
+        baseline: bool,
+    ) -> None:
+        self._preview_clear_generation = generation
+        self._preview_clear_schedule = schedule
+        self._preview_clear_status = status or "Imported"
+        self._preview_clear_baseline = baseline
+        self._preview_clear_ids = tuple(self.tree.get_children(""))
+        self._preview_clear_offset = 0
+        if self._preview_clear_ids:
+            self._preview_clear_after = self.root.after(0, self._clear_preview_chunk)
+        else:
+            self._finish_preview_clear(generation)
+
+    def _clear_preview_chunk(self) -> None:
+        self._preview_clear_after = None
+        generation = self._preview_clear_generation
+        if self._closing or generation != self._preview_generation:
+            return
+        end = min(self._preview_clear_offset + 96, len(self._preview_clear_ids))
+        for item_id in self._preview_clear_ids[self._preview_clear_offset:end]:
+            if not self.tree.exists(item_id):
+                continue
+            try:
+                entry_id = UUID(item_id)
+            except ValueError:
+                continue
+            entry = self._entries_by_id.get(entry_id)
+            if entry is None:
+                continue
+            values = list(self.tree.item(item_id, "values"))
+            filename_index = _COLUMN_INDEX["new_filename"]
+            status_index = _COLUMN_INDEX["status"]
+            baseline_status = (
+                values[status_index] if self._import_is_busy() else "Imported"
+            )
+            target_status = (
+                baseline_status if self._preview_clear_baseline else self._preview_clear_status
+            )
+            if (
+                values[filename_index]
+                or values[status_index] != target_status
+                or tuple(self.tree.item(item_id, "tags")) != ("normal",)
+            ):
+                values[filename_index] = ""
+                values[status_index] = target_status
+                self.tree.item(item_id, values=tuple(values), tags=("normal",))
+        self._preview_clear_offset = end
+        if end < len(self._preview_clear_ids):
+            self._preview_clear_after = self.root.after(1, self._clear_preview_chunk)
+            return
+        self._finish_preview_clear(generation)
+
+    def _finish_preview_clear(self, generation: int) -> None:
+        self._preview_clear_after = None
+        if self._closing or generation != self._preview_generation:
+            return
+        if self._preview_clear_schedule:
+            self._preview_debounce_after = self.root.after(
+                300, self._submit_filename_preview
+            )
+
+    def _submit_filename_preview(self) -> None:
+        self._preview_debounce_after = None
+        if self._closing or self._preview_service is None:
+            return
+        snapshot = self.collection.snapshot()
+        expression = self.rename_format.get()
+        if (
+            self.active_mode != "Bulk Rename"
+            or self._import_is_busy()
+            or self._collection_operation_pending
+            or not expression
+            or not snapshot.entries
+            or snapshot.capabilities.is_importing
+        ):
+            return
+        generation = self._preview_generation
+        force_metadata = self._preview_force_metadata
+        self._preview_force_metadata = False
+        while True:
+            try:
+                self._preview_progress.get_nowait()
+            except queue.Empty:
+                break
+
+        def progress(update: EvaluationProgress) -> None:
+            try:
+                self._preview_progress.put_nowait(update)
+            except queue.Full:
+                try:
+                    self._preview_progress.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._preview_progress.put_nowait(update)
+                except queue.Full:
+                    pass
+
+        self.status.configure(text="Evaluating filenames")
+        self.progress.set(0)
+        try:
+            self._preview_future = self._preview_service.submit(
+                snapshot,
+                expression,
+                force_metadata_refresh=force_metadata,
+                progress_callback=progress,
+            )
+        except RuntimeError as error:
+            self.status.configure(text=f"Filename preview could not start: {error}")
+            return
+        self._preview_request_id = self._preview_future.request_id
+        self._preview_request_generation = generation
+
+    def _preview_result_is_current(self, result: FilenameEvaluationResult) -> bool:
+        service = self._preview_service
+        snapshot = self.collection.snapshot()
+        return bool(
+            service is not None
+            and not self._closing
+            and not self._import_is_busy()
+            and not self._collection_operation_pending
+            and self.active_mode == "Bulk Rename"
+            and result.request_id == self._preview_request_id
+            and result.expression == self.rename_format.get()
+            and service.is_current(result, snapshot, expression=self.rename_format.get())
+        )
+
+    def _poll_filename_preview(self) -> None:
+        self._preview_after = None
+        if self._closing:
+            return
+        request_id = self._preview_request_id
+        latest_update: EvaluationProgress | None = None
+        for _ in range(64):
+            try:
+                update = self._preview_progress.get_nowait()
+            except queue.Empty:
+                break
+            if (
+                update.request_id != request_id
+                or request_id is None
+                or self._import_is_busy()
+            ):
+                continue
+            latest_update = update
+        if (
+            latest_update is not None
+            and not self._collection_operation_pending
+            and self.active_mode == "Bulk Rename"
+        ):
+            labels = {
+                EvaluationStage.PARSING: "Parsing filename format",
+                EvaluationStage.METADATA: "Acquiring directory counts",
+                EvaluationStage.CONTEXTS: "Preparing filename context",
+                EvaluationStage.EVALUATING: "Evaluating filenames",
+            }
+            self.status.configure(text=labels[latest_update.stage])
+            if latest_update.total > 0:
+                self.progress.set(min(1.0, latest_update.completed / latest_update.total))
+
+        future = self._preview_future
+        if future is not None and future.done():
+            self._preview_future = None
+            try:
+                result = future.result()
+            except Exception as error:
+                if request_id == self._preview_request_id and not self._import_is_busy():
+                    self.status.configure(text=f"Filename preview failed: {error}")
+            else:
+                if (
+                    request_id == self._preview_request_id
+                    and getattr(self, "_preview_request_generation", -1)
+                    == self._preview_generation
+                    and result.request_id == request_id
+                ):
+                    if self.active_mode == "Bulk Rename":
+                        if self._preview_result_is_current(result):
+                            self._start_preview_render(result)
+                    elif self._preview_service is not None and self._preview_service.is_current(
+                        result, self.collection.snapshot(), expression=self.rename_format.get()
+                    ):
+                        self._preview_result = result
+                        self._index_preview_diagnostics(result)
+            if not self._import_is_busy():
+                self.progress.set(0)
+
+        self._preview_after = self.root.after(20, self._poll_filename_preview)
+
+    def _start_preview_render(self, result: FilenameEvaluationResult) -> None:
+        self._preview_render_result = result
+        self._preview_render_offset = 0
+        self._preview_render_generation = self._preview_generation
+        parse_error = next(
+            (
+                diagnostic
+                for diagnostic in result.diagnostics
+                if diagnostic.kind is DiagnosticKind.PARSE
+            ),
+            None,
+        )
+        self._set_format_diagnostic(parse_error)
+        self._index_preview_diagnostics(result)
+        self.status.configure(text="Updating filename preview rows")
+        if result.entries:
+            self._preview_render_after = self.root.after(0, self._render_preview_chunk)
+        else:
+            self._finish_preview_render(result)
+
+    def _index_preview_diagnostics(self, result: FilenameEvaluationResult) -> None:
+        global_diagnostics = tuple(
+            diagnostic
+            for diagnostic in result.diagnostics
+            if diagnostic.entry_id is None
+        )
+        priority = {
+            DiagnosticKind.METADATA: 0,
+            DiagnosticKind.TOKEN: 1,
+            DiagnosticKind.VALIDATION: 2,
+        }
+        by_id: dict[UUID, Any] = {}
+        for diagnostic in result.diagnostics:
+            if diagnostic.entry_id is None:
+                continue
+            previous = by_id.get(diagnostic.entry_id)
+            if previous is None or priority.get(diagnostic.kind, 3) < priority.get(
+                previous.kind, 3
+            ):
+                by_id[diagnostic.entry_id] = diagnostic
+        if global_diagnostics and any(
+            diagnostic.kind is DiagnosticKind.PARSE for diagnostic in global_diagnostics
+        ):
+            by_id.update({item.entry.entry_id: global_diagnostics[0] for item in result.entries})
+        self._preview_diagnostics_by_id = by_id
+
+    def _preview_row_values(
+        self, entry_id: UUID, filename: str, status: str, *, problem: bool
+    ) -> None:
+        item_id = str(entry_id)
+        if not self.tree.exists(item_id):
+            return
+        row = self.tree.item(item_id)
+        values = list(row["values"])
+        values[_COLUMN_INDEX["new_filename"]] = filename
+        values[_COLUMN_INDEX["status"]] = status
+        tags = ("problem" if problem else "normal",)
+        if tuple(values) != tuple(row["values"]) or tuple(row["tags"]) != tags:
+            self.tree.item(item_id, values=tuple(values), tags=tags)
+
+    def _render_preview_chunk(self) -> None:
+        self._preview_render_after = None
+        result = self._preview_render_result
+        if result is None or self._closing:
+            return
+        if (
+            self._preview_render_generation != self._preview_generation
+            or not self._preview_result_is_current(result)
+        ):
+            self._invalidate_filename_preview(schedule=True)
+            return
+        end = min(self._preview_render_offset + 96, len(result.entries))
+        parse_error = next(
+            (
+                diagnostic
+                for diagnostic in result.diagnostics
+                if diagnostic.kind is DiagnosticKind.PARSE
+            ),
+            None,
+        )
+        for item in result.entries[self._preview_render_offset:end]:
+            entry_id = item.entry.entry_id
+            if parse_error is not None:
+                self._preview_row_values(entry_id, "", "Invalid format", problem=False)
+                continue
+            diagnostic = self._preview_diagnostics_by_id.get(entry_id)
+            if diagnostic is not None and diagnostic.kind is DiagnosticKind.METADATA:
+                self._preview_row_values(entry_id, "", "Metadata unavailable", problem=True)
+            elif diagnostic is not None and diagnostic.kind is DiagnosticKind.TOKEN:
+                self._preview_row_values(entry_id, "", "Invalid format", problem=True)
+            elif diagnostic is not None and diagnostic.kind is DiagnosticKind.VALIDATION:
+                self._preview_row_values(entry_id, "", "Invalid filename", problem=True)
+            elif item.is_valid:
+                filename = item.validated_filename or ""
+                status = "Unchanged" if filename == item.entry.original_filename else "Ready"
+                self._preview_row_values(entry_id, filename, status, problem=False)
+            else:
+                self._preview_row_values(entry_id, "", "Invalid format", problem=True)
+        self._preview_render_offset = end
+        if end < len(result.entries):
+            self._preview_render_after = self.root.after(1, self._render_preview_chunk)
+            return
+        self._finish_preview_render(result)
+
+    def _finish_preview_render(self, result: FilenameEvaluationResult) -> None:
+        if not self._preview_result_is_current(result):
+            self._invalidate_filename_preview(schedule=True)
+            return
+        self._preview_result = result
+        self._preview_render_result = None
+        self.progress.set(0)
+        if result.is_valid:
+            self.status.configure(
+                text=(
+                    f"Preview complete · {len(result.entries)} filenames · "
+                    "processing unavailable"
+                )
+            )
+        else:
+            self.status.configure(
+                text="Preview contains errors · the complete batch cannot be processed"
+            )
+
+    def _leave_bulk_rename(self) -> None:
+        if self._preview_render_after is not None:
+            self._cancel_preview_after("_preview_render_after")
+            if self._preview_render_result is not None and self._preview_service is not None:
+                if self._preview_service.is_current(
+                    self._preview_render_result,
+                    self.collection.snapshot(),
+                    expression=self.rename_format.get(),
+                ):
+                    self._preview_result = self._preview_render_result
+            self._preview_render_result = None
+        self._cancel_preview_after("_preview_clear_after")
+        self._begin_preview_clear(
+            generation=self._preview_generation,
+            schedule=False,
+            status=None,
+            baseline=True,
+        )
+
+    def _return_to_bulk_rename(self) -> None:
+        self._cancel_preview_after("_preview_clear_after")
+        if self._preview_result is not None and self._preview_result_is_current(
+            self._preview_result
+        ):
+            self._start_preview_render(self._preview_result)
+        elif self.rename_format.get() and self.collection.snapshot().entries:
+            if self._preview_future is None:
+                self._invalidate_filename_preview(schedule=True)
+        elif not self.collection.snapshot().entries:
+            self._set_format_diagnostic(None)
+        else:
+            self.format_diagnostic.configure(text="A rename format is required.")
+            self.format_diagnostic.grid()
+
+    def refresh_filename_preview(self) -> None:
+        if self._closing or self._import_is_busy() or self._collection_operation_pending:
+            return
+        self._invalidate_filename_preview(
+            schedule=True, force_metadata=True, invalidate_metadata=True
+        )
+
+    def open_preview_details(self, entry_id: UUID | None = None) -> None:
+        entry_id = entry_id or self._context_entry_id
+        if self._closing or entry_id is None:
+            return
+        diagnostic = self._preview_diagnostics_by_id.get(entry_id)
+        entry = self._entries_by_id.get(entry_id)
+        if diagnostic is None or entry is None:
+            return
+        if self._preview_details_dialog is not None:
+            try:
+                if self._preview_details_dialog.winfo_exists():
+                    self._preview_details_dialog.deiconify()
+                    self._preview_details_dialog.lift()
+                    self._set_preview_detail_text(entry, diagnostic)
+                    return
+            except tk.TclError:
+                pass
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Filename Preview Details")
+        dialog.geometry("620x380")
+        dialog.minsize(480, 300)
+        dialog.transient(self.root)
+        self._preview_details_dialog = dialog
+        dialog.bind(
+            "<Destroy>",
+            lambda event, window=dialog: self._on_preview_dialog_destroy(
+                event, window, "details"
+            ),
+            add="+",
+        )
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        self._preview_details_textbox = ctk.CTkTextbox(dialog, wrap="word")
+        self._preview_details_textbox.pack(fill="both", expand=True, padx=12, pady=12)
+        self._set_preview_detail_text(entry, diagnostic)
+
+    def _set_preview_detail_text(self, entry: CollectionEntry, diagnostic: Any) -> None:
+        details = [
+            f"Source filename: {entry.original_filename}",
+            f"Source path: {entry.source_path}",
+            f"Category: {diagnostic.kind.value}",
+            f"Reason: {diagnostic.message}",
+        ]
+        if diagnostic.token is not None:
+            details.append(f"Token: {diagnostic.token}")
+        if diagnostic.position is not None:
+            details.append(f"Expression offset: {diagnostic.position}")
+        if diagnostic.required_tokens:
+            details.append("Required metadata tokens: " + ", ".join(diagnostic.required_tokens))
+        result = self._preview_result
+        if result is not None:
+            item = next(
+                (row for row in result.entries if row.entry.entry_id == entry.entry_id),
+                None,
+            )
+            if item is not None:
+                file_result = item.file_result
+                candidate = None if file_result is None else file_result.candidate_filename
+                if file_result is not None and file_result.validation_error is not None:
+                    candidate = file_result.validation_error.candidate_filename
+                if candidate is not None:
+                    details.append(f"Candidate: {candidate!r}")
+        textbox = self._preview_details_textbox
+        if textbox is not None and textbox.winfo_exists():
+            textbox.configure(state="normal")
+            textbox.delete("1.0", "end")
+            textbox.insert("1.0", "\n\n".join(details))
+            textbox.configure(state="disabled")
 
     def refresh_collection(self) -> None:
         """Render the shared collection snapshot using stable entry IDs as row IDs."""
@@ -707,6 +1399,7 @@ class _MainWindow:
             self.sort_direction_button.configure(state="disabled")
             for button in self.movement_buttons.values():
                 button.configure(state="disabled")
+            self.refresh_preview_button.configure(state="disabled")
             return
 
         self.controls["add_files"].configure(state="normal")
@@ -723,6 +1416,13 @@ class _MainWindow:
         )
         self.sort_dropdown.configure(state="normal")
         self.sort_direction_button.configure(state="normal")
+        self.refresh_preview_button.configure(
+            state=(
+                "normal"
+                if snapshot.entries and self.rename_format.get()
+                else "disabled"
+            )
+        )
         positions_by_id = {
             entry_id: position for position, entry_id in enumerate(self._display_order)
         }
@@ -885,6 +1585,7 @@ class _MainWindow:
         *,
         notify: bool,
     ) -> bool:
+        self._invalidate_filename_preview(schedule=False)
         if not self._collection_operation_pending:
             self._collection_operation_pending = True
         self._collection_render_order = order
@@ -1085,6 +1786,7 @@ class _MainWindow:
         self, phase: str, session: DiscoverySession | None
     ) -> None:
         if phase == "idle":
+            self._preview_import_invalidated = False
             if self._progress_running:
                 self.progress.stop()
                 self._progress_running = False
@@ -1092,6 +1794,12 @@ class _MainWindow:
             self.cancel_button.grid_remove()
             self._update_control_states()
             return
+
+        if not self._preview_import_invalidated:
+            self._preview_import_invalidated = True
+            self._invalidate_filename_preview(
+                schedule=False, invalidate_metadata=True
+            )
 
         self._update_control_states()
         self.cancel_button.grid()
@@ -1315,6 +2023,10 @@ class _MainWindow:
         item_id = self.tree.identify_row(event.y)
         if not item_id:
             return
+        try:
+            self._context_entry_id = UUID(item_id)
+        except ValueError:
+            self._context_entry_id = None
         if item_id not in self.tree.selection():
             self.tree.selection_set(item_id)
         self.tree.focus(item_id)
@@ -1346,6 +2058,14 @@ class _MainWindow:
             if busy and key in {"remove", "move_top", "move_up", "move_down", "move_bottom"}:
                 state = "disabled"
             self.context_menu.entryconfigure(index, state=state)
+        has_preview_error = (
+            self.active_mode == "Bulk Rename"
+            and self._context_entry_id in self._preview_diagnostics_by_id
+        )
+        self.context_menu.entryconfigure(
+            self._context_menu_indices["preview_details"],
+            state="normal" if has_preview_error else "disabled",
+        )
         try:
             self.context_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1812,6 +2532,22 @@ class _MainWindow:
             return
         self._closing = True
         self.import_controller.dispose()
+        for name in (
+            "_preview_after",
+            "_preview_debounce_after",
+            "_preview_clear_after",
+            "_preview_render_after",
+        ):
+            self._cancel_preview_after(name)
+        if self._preview_service is not None:
+            self._preview_service.close(wait=False)
+            self._preview_service = None
+        for dialog in (self._format_reference_dialog, self._preview_details_dialog):
+            if dialog is not None:
+                try:
+                    dialog.destroy()
+                except tk.TclError:
+                    pass
         self._close_columns()
         if self._collection_after is not None:
             try:

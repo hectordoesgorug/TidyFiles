@@ -20,9 +20,10 @@ cancellation. M2-E1 adds the shared main window and per-mode column
 customization. M2-E2 connects explicit Add Files and recursive Add Folder
 requests to read-only progressive discovery, cancellation and persistent
 incomplete-import diagnostics. M2-E3 connects shared collection sorting,
-manual ordering, removal, clearing, selection, and row context actions. Live
-filename evaluation, final processing-readiness checks, destination planning,
-and filesystem operations remain unimplemented.
+manual ordering, removal, clearing, selection, and row context actions. M2-E4
+connects session-only format controls and live read-only filename previews.
+Final processing-readiness checks, destination planning, and filesystem
+operations remain unimplemented.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -30,12 +31,13 @@ and filesystem operations remain unimplemented.
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
 | M1 | Complete | Pure parser/evaluator, extension resolution, and filename validation, including the M1-D.12 DD-061 diagnostic correction. Application and filesystem integration remain outside M1. |
-| M2 | In progress | M2-A through M2-D domain services and M2-E1 through M2-E3 GUI integration are complete; live evaluation and filesystem processing remain planned. |
+| M2 | In progress | M2-A through M2-D domain services and M2-E1 through M2-E4 GUI integration are complete; filesystem processing remains planned. |
 | M2-D | Complete | Collection-backed filename evaluation, physical directory counts, bounded metadata cache, structured diagnostics, request currency, background progress and cancellation. |
-| M2-E | In progress | GUI integration continues in staged slices; import discovery and collection management are complete, while previews and later workflows remain planned. |
+| M2-E | In progress | GUI integration continues in staged slices; import discovery, collection management, and filename previews are complete, while later workflows remain planned. |
 | M2-E1 | Complete | Main-window layout, shared empty collection presentation, context-specific columns, and persisted appearance and geometry preferences. |
 | M2-E2 | Complete | Native import controls, progressive discovery, cancellation, ordering, and incomplete-import reporting. |
 | M2-E3 | Complete | Shared sorting controls and preference persistence, manual ordering and drag-and-drop, selection shortcuts, row context actions, non-destructive removal and clearing, and collection-change notifications. |
+| M2-E4 | Complete | Session-only live filename-format controls, token insertion and reference, background ordered previews, structured diagnostics, metadata refresh, and stale-result protection. |
 | M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
@@ -246,8 +248,8 @@ The GUI exposes `root.application.collection` for immutable snapshots and emits
 `<<TidyFilesCollectionChanged>>` after effective order or membership changes and
 import completion or rollback. `root.collection_revision` carries the revision
 associated with the notification. Selection and column changes do not emit
-collection-change events. M2-E4 can observe this interface and request current
-filename evaluation; live evaluation and previews are not part of M2-E3.
+collection-change events. M2-E4 observes this interface and requests current
+filename evaluation only after collection work is finalized.
 
 ### GUI interaction corrections
 
@@ -321,6 +323,74 @@ show event-loop servicing, not complete interactive responsiveness. M2-E2's
 10,000-file import observed a 264 ms maximum heartbeat delay; the different
 workloads do not establish a direct performance improvement. These measurements
 are local observations, not CI thresholds or production-volume guarantees.
+
+## M2-E4 — Live filename previews and format controls
+
+Bulk Rename has an editable, empty-at-startup format field, the three approved
+built-in presets, a categorized Insert Token menu for all 20 supported token
+types, and a scrollable read-only Format Reference. Edits, preset choices, and
+token insertion share a 300 ms debounced preview path. The expression remains
+session-only and is not written to configuration. Profiles remain disabled.
+
+The preview integration reuses the existing single-worker evaluation service,
+its replaceable pending request, immutable ordered collection snapshot, and
+directory-count cache. It listens for finalized collection changes, rejects
+stale request or snapshot results, and renders by stable entry ID in chunks of
+96. Active imports invalidate prior previews and defer evaluation until
+finalization. Progress is passed through a bounded queue and coalesced on the Tk
+thread. Selection changes do not request evaluation. Switching away from Bulk
+Rename clears its proposal cells in the shared table; a current result is
+restored on return without reevaluation. Physical count tokens use the existing
+nonrecursive metadata provider, and Refresh Preview forces a new observation.
+
+Parser errors show one inline format diagnostic and leave all rows neutral with
+Invalid format status. File-specific token, metadata, and validation failures
+highlight only affected rows and expose read-only Details. Any such failure
+invalidates the complete rename batch, even when other rows have valid previews.
+Exact case-sensitive filename equality determines Unchanged. Process,
+Deduplicate, and Repack remain disabled. Preview evaluation reads no file
+contents and performs no filesystem mutation.
+
+Automated GUI-worker coverage exercises format controls and parser-valid token
+templates, the reference text and representative engine examples, finalized
+imports, rapid typing and request debouncing, selection-only and column changes,
+numbering and effective-order changes, cumulative imports and removal,
+tab restoration, parser/token/validation/metadata failures and recovery,
+explicit forced metadata refresh, external count changes, source-content
+preservation, and shutdown while a metadata call is stalled. The isolated Tk
+worker runs inside the repository verification process; it is not a manual
+visual acceptance test.
+
+Synthetic preview measurements used Windows 11 build 26300, Python 3.13.17,
+and an Intel Core i5-10300H. The app window was withdrawn while the Tk event
+loop and Treeview were measured. Collection paths were synthetic; ten real
+temporary parent directories each contained one marker file for physical-count
+workloads. The first-row measurement records when a current filename was
+written to the Treeview; it is not an on-screen paint measurement. Values are
+seconds converted to milliseconds. The 10,000-entry count-token run reused ten
+cached directory observations from the preceding 1,000-entry workload.
+
+| Entries | Expression | Edit to submit | Service | Edit to first row | Render | Total | Enumerations / cache hits | Largest heartbeat gap |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | `<Name>` | 367.52 | 32.09 | 405.50 | 54.27 | 459.77 | 0 / 0 | 33.95 |
+| 1,000 | `<Name>_<IncNr>` | 368.45 | 61.63 | 434.59 | 53.89 | 488.48 | 0 / 0 | 44.24 |
+| 1,000 | `<SubDirName>_<IncNrDir>` | 361.11 | 44.51 | 411.85 | 55.00 | 466.85 | 0 / 0 | 47.30 |
+| 1,000 | `<NumFiles>_<NumDirs>_<Name>` | 363.83 | 47.74 | 416.13 | 53.67 | 469.80 | 10 / 0 | 33.59 |
+| 10,000 | `<Name>` | 868.93 | 328.38 | 1,205.93 | 819.25 | 2,025.18 | 0 / 0 | 216.41 |
+| 10,000 | `<Name>_<IncNr>` | 888.32 | 380.75 | 1,278.23 | 825.80 | 2,104.03 | 0 / 0 | 287.35 |
+| 10,000 | `<SubDirName>_<IncNrDir>` | 971.42 | 431.97 | 1,414.60 | 872.50 | 2,287.11 | 0 / 0 | 208.84 |
+| 10,000 | `<NumFiles>_<NumDirs>_<Name>` | 919.50 | 451.96 | 1,380.96 | 1,076.51 | 2,457.47 | 0 / 10 | 107.75 |
+
+The long 10,000-row clear and render passes show that large Treeview updates can
+delay the event loop; the largest measured heartbeat gap was 287.35 ms. These
+hidden-window measurements do not establish visual latency or interactive
+responsiveness. They identify large-list chunking and redraw behavior as M2-E5
+optimization work. No larger-than-10,000 workload was measured.
+
+Interactive on-screen Windows acceptance was not completed because the native
+Windows automation channel was unavailable. Manual inspection of the reference,
+cursor insertion, visible preview progression, and tab appearance remains
+outstanding; automated widget tests do not replace that review.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 

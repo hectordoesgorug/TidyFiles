@@ -16,9 +16,13 @@ the existing configuration. The shared collection supports seven sorting
 criteria, saved sort preferences, manual movement and row dragging, selection,
 context-menu actions, Remove from List, and Clear All. These controls change only
 the in-memory collection; sorting uses stored metadata, and removing or clearing
-entries leaves source files unchanged. Filename previews, duplicate analysis,
-repacking, and filesystem changes are not yet available. The application is
-not production-ready.
+entries leaves source files unchanged. Bulk Rename provides live filename
+previews, three built-in formats, token insertion, a scrollable token reference,
+and an explicit refresh for physical directory-count metadata. The format is
+session-only. Expression and file-specific errors are shown in the preview;
+processing remains unavailable. Duplicate analysis, repacking, and all
+filesystem-changing operations are not yet available. The application is not
+production-ready.
 
 Collection controls are shared across Bulk Rename, Duplicate Finder, and
 Repacker. Use Ctrl+A in the table to select all rows and Delete to remove the

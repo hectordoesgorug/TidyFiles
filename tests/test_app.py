@@ -60,12 +60,12 @@ def test_main_window_collection_columns_import_and_persistence(
             app.controls["remove"],
             app.controls["clear_all"],
             *app.movement_buttons.values(),
-            app.insert_token_button,
             app.profiles_button,
-            app.format_reference_button,
             app.process_button,
         ):
             assert control.cget("state") == "disabled"
+        assert app.insert_token_button.cget("state") == "normal"
+        assert app.format_reference_button.cget("state") == "normal"
         assert app.sort_dropdown.cget("state") == "normal"
         assert app.sort_direction_button.cget("state") == "normal"
 
@@ -83,6 +83,7 @@ def test_main_window_collection_columns_import_and_persistence(
         assert checkboxes["Extension"].cget("state") == "normal"
         assert checkboxes["Extension"].get() == 0
         app.column_dialog.destroy()
+        assert app.rename_format.get() == ""
 
         session = app.collection.begin_import(ImportMode.ADD_FILES)
         photo = app.collection.register_path(

@@ -8,8 +8,9 @@ and Clear All manage the shared in-memory collection. Remove and Clear All leave
 source files unchanged; they do not delete, move, or Trash files. Opening a row
 or its containing folder is an explicit Windows shell action. Known executable
 and script extensions are disabled for Open File; suffix checks cannot identify
-every potentially launchable file. No rename, deduplication, repacking, or
-cleanup operation is available.
+every potentially launchable file. Bulk Rename shows read-only filename
+previews, but no rename, deduplication, repacking, or cleanup operation is
+available.
 
 The Auto-clean switch is disabled until its permanent-deletion disclosure and
 eligible-folder workflow are implemented. Its approved future deletion scope
@@ -65,6 +66,16 @@ operation.
   processing-ready state and does not satisfy incomplete-import
   acknowledgment, duplicate analysis, destination collision checks, execution
   preflight or explicit user authorization.
+- **Filename previews:** The Bulk Rename tab displays filenames evaluated from
+  the complete finalized collection order. The editable format is session-only.
+  Preview results are invalidated by expression, collection, import, or metadata
+  refresh changes, and stale results are rejected before rendering. Directory
+  counts are acquired only for count tokens; Refresh Preview discards cached
+  observations and requests fresh counts. Parser errors invalidate every row;
+  file-specific errors affect only their rows visually but invalidate the full
+  rename batch. A valid preview is not permission or readiness to rename files.
+  The Process, Deduplicate, and Repack controls remain disabled, and preview
+  evaluation neither opens file contents nor changes source files.
 
 These are startup and persistence foundations, not a file-recovery system.
 
