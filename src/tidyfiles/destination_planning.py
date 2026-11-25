@@ -228,18 +228,31 @@ def replan_collision_subset(
         return replace(plan, state=PlanState.INCOMPLETE_IMPORT, reason="incomplete_import")
     if reviewed.state is not PlanState.COLLISION_BLOCKED or not reviewed.collision_subset_ids:
         return replace(plan, reason="no_collision_only_subset")
+    result = reobserve_destination_set(reviewed, reviewed.collision_subset_ids, observe=observe)
     included = set(reviewed.collision_subset_ids)
+    return replace(result, excluded_entry_ids=tuple(
+        row.entry_id for row in snapshot.entries if row.entry_id not in included
+    ))
+
+
+def reobserve_destination_set(
+    plan: DestinationPlan, entry_ids: tuple[UUID, ...], *, observe: PathObserver | None = None
+) -> DestinationPlan:
+    """Reclassify an exact ordered projection without changing filenames or execution scope."""
+    included = set(entry_ids)
     entries = tuple(
         DestinationEntry(
             row.entry_id, row.source_path, row.candidate_filename, row.destination_path
         )
-        for row in reviewed.entries
+        for row in plan.entries
         if row.entry_id in included
     )
+    if not entries or tuple(row.entry_id for row in entries) != entry_ids:
+        return replace(plan, state=PlanState.INCOMPATIBLE_INPUT, reason="invalid_destination_set")
     plan = replace(
         plan,
         excluded_entry_ids=tuple(
-            row.entry_id for row in snapshot.entries if row.entry_id not in included
+            row.entry_id for row in plan.entries if row.entry_id not in included
         ),
     )
     return _classify(plan, entries, observe)
@@ -271,18 +284,18 @@ def _observed_path_key(path: str, observation: PathObservation) -> _PathKey:
     return path_key(parent), path_key(name)
 
 
-def _classify(
-    plan: DestinationPlan, entries: tuple[DestinationEntry, ...], observe: PathObserver | None
-) -> DestinationPlan:
-    if any(
-        literal_windows_path(path, allow_root=True) is None for path in plan.options.managed_paths
-    ):
-        return replace(plan, state=PlanState.SAFETY_BLOCKED, reason="managed_path_unverifiable")
-    managed = tuple(path_key(path) for path in plan.options.managed_paths)
-    observer = observe if observe is not None else WindowsPathObserver(plan.options.managed_paths)
+def planning_observer(options: DestinationOptions, observe: PathObserver) -> PathObserver:
+    """Apply the planner's path exclusions and cache literal probes within one pass."""
+    managed = (
+        tuple(path_key(path) for path in options.managed_paths)
+        if all(literal_windows_path(path, allow_root=True) for path in options.managed_paths)
+        else None
+    )
     observations: dict[str, PathObservation] = {}
 
     def probe(path: str) -> PathObservation:
+        if managed is None:
+            return PathObservation(PathOccupancy.UNVERIFIABLE, reason="managed_path_unverifiable")
         literal = literal_windows_path(path)
         if literal is None:
             return PathObservation(PathOccupancy.UNVERIFIABLE, reason="unsupported_path")
@@ -296,13 +309,25 @@ def _classify(
                 result = PathObservation(PathOccupancy.UNSAFE, reason="protected_path")
             else:
                 try:
-                    result = observer(literal)
+                    result = observe(literal)
                 except OSError as error:
                     code = getattr(error, "winerror", None) or error.errno or type(error).__name__
                     result = PathObservation(PathOccupancy.UNVERIFIABLE, reason=f"os_error_{code}")
             observations[literal] = result
         return observations[literal]
 
+    return probe
+
+
+def _classify(
+    plan: DestinationPlan, entries: tuple[DestinationEntry, ...], observe: PathObserver | None
+) -> DestinationPlan:
+    if any(
+        literal_windows_path(path, allow_root=True) is None for path in plan.options.managed_paths
+    ):
+        return replace(plan, state=PlanState.SAFETY_BLOCKED, reason="managed_path_unverifiable")
+    observer = observe if observe is not None else WindowsPathObserver(plan.options.managed_paths)
+    probe = planning_observer(plan.options, observer)
     rows = [_observe_entry(entry, probe, plan.options.single_folder) for entry in entries]
     sources = defaultdict(list)
     targets = Counter()

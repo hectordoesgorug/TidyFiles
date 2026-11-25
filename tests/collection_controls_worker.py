@@ -1116,7 +1116,7 @@ def test_close_during_active_discovery_restores_prior_view_before_shutdown(
             yield record
             if index == 0:
                 entered.set()
-                release.wait(5)
+                release.wait()
 
     monkeypatch.setattr(DiscoverySession, "_walk_folder", blocked_walk)
     try:

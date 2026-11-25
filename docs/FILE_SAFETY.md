@@ -120,6 +120,44 @@ source identity continuity, or freedom from later changes and races.
 [GetVolumeInformationW](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationw)
 [Windows path length limits](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)
 
+## Preflight identity and safety
+
+Preflight augments the planner's literal lookups with `OPEN_EXISTING` handles
+using `FILE_READ_ATTRIBUTES`, shared read/write/delete, and
+`FILE_FLAG_OPEN_REPARSE_POINT`. It checks disk object type, regular-file or
+directory status, and reparse and delete-pending state. Each handle closes
+before its observation returns. Metadata queries are limited to sources and
+relevant parent or occupant objects. Handles request metadata access only.
+File contents remain unopened.
+
+File and parent identities use `FileIdInfo` volume serial and the 128-bit file
+ID. A volume GUID and the DOS device mapping bind the observed drive. An
+occupied name also records the actual long parent and entry names, which
+distinguish hard-link paths. Size, last-write time, creation time when
+available, change time and attributes come from the same opened object.
+Access time is excluded. Windows CPython 3.13 represents its modern stat
+volume serial and file ID in the same integer form. Preflight requires a
+matching discovery identity and compares its available metadata, including
+size and modification time. An absent or incomparable import or review
+baseline blocks validation. [Windows file identity](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info)
+[CPython 3.13 stat conversion](https://github.com/python/cpython/blob/3.13/Python/fileutils.c)
+
+The review baseline must be captured before review. A native preflight uses
+fresh observers on both sides of filename evaluation and caches only within
+each pass. It rechecks the exact scope and compares the current parents,
+objects, relevant metadata, and included occupants with the review.
+Parent and volume-mapping continuity begins at review-time capture because
+the import snapshot carries file identities and metadata only.
+The existing UNC, mapped drive, SUBST, device, long-path and case-sensitive
+directory restrictions apply.
+
+Successful validation describes a point-in-time observation. Ancestor checks
+and subsequent opens are path-based, so external changes can still occur
+within a pass and after preflight. Metadata access establishes neither rename
+permission nor no-overwrite behavior. Execution needs its own immediate
+identity and occupancy checks, handle-based race protection, authorization
+and durable transaction safeguards.
+
 ## Planned safety components
 
 The following are not implemented:

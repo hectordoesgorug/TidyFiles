@@ -7,8 +7,8 @@ collection snapshots, and Bulk Rename displays its read-only previews through
 the existing GUI. The shared in-memory collection supports import finalization
 or rollback, sorting, manual ordering, selection, removal, and clearing. File
 discovery and filename evaluation run in background services while all Tk
-updates stay on the main thread. A separate read-only service plans rename
-destinations. Filesystem processing remains planned.
+updates stay on the main thread. Separate read-only services plan rename
+destinations and revalidate reviewed plans. Filesystem processing remains planned.
 
 ## Startup and shutdown
 
@@ -58,6 +58,8 @@ not implemented.
 | `src/tidyfiles/filename_validation.py` | Pure legacy-character substitution and validation of one Windows filename component, including reserved device names, Unicode safety, and UTF-16 component length. |
 | `src/tidyfiles/destination_planning.py` | Read-only batch planning from a finalized snapshot and current filename evaluation, collision and dependency classification, and collision-only subset replanning. |
 | `src/tidyfiles/destination_observation.py` | Literal local Windows path, ancestor, volume, directory case, and occupancy observations. |
+| `src/tidyfiles/execution_preflight.py` | Review-time identity capture, full-batch refresh, and read-only identity, destination and exact-set revalidation. |
+| `src/tidyfiles/preflight_service.py` | A bounded preflight worker with replacement, cancellation, progress, and current-result tracking. |
 | `src/tidyfiles/filesystem_paths.py` | Shared Windows system path and clutter-name exclusions. |
 
 The GUI imports selected files and recursively selected folders by reading
@@ -403,6 +405,40 @@ incomplete imports, and format failures prevent collision-only replanning.
 The resulting plan describes the observations in that call. Execution still
 requires confirmation, fresh preflight, and transaction safeguards.
 
+## Execution preflight
+
+`capture_review_plan()` runs the planner with handle-based identity capture
+before a plan is presented for review. `PreflightRequest` binds that full plan
+and its evaluation to a current snapshot, evaluation ID, expression, settings,
+destination options, and ordered intended IDs. The intended set is either the
+full valid batch or the exact collision-only proposal from the review. The
+request carries review context and scope. Confirmation and authorization are
+separate workflow steps.
+
+`run_preflight()` first checks input consistency by replaying the planner
+against recorded observations. It checks source continuity against the import
+and review baselines, then calls the existing evaluator for the full ordered
+collection with forced metadata refresh. The new evaluation uses the preflight
+request ID. Required directory counts refresh without rescanning the collection.
+The result reports changed validated filenames and destination paths for review.
+A format failure in any row blocks the batch, including a collision-only subset.
+
+A second filesystem pass rechecks sources, parent identities and occupancy,
+and rebuilds the full collision analysis. The planner then reclassifies the
+exact intended subset with the same second-pass observations. Excluded source
+names still occupy their paths and an excluded conflict clearing leaves the
+intended set unchanged. A newly blocked row stops the set. Failures carry a
+structured reason, request ID, and row or path where available. The result
+retains the reviewed plan and available fresh evaluation and plan evidence.
+
+`PreflightService` runs one request at a time with one replaceable pending
+request. The worker reports correlated stage progress, batching item counts
+where available. A new request supersedes the previous result. Callers use
+`current_result()` alongside the current collection and evaluation context.
+Cancellation is cooperative, including across a blocking native call once it
+returns. Worker callbacks must be marshalled to the Tk thread by any future GUI
+caller.
+
 ## Tests and CI
 
 Tests are in `tests/` and use pytest. Configuration, storage, logging, package
@@ -416,7 +452,7 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Execution preflight, filesystem transactions, duplicate verification, and
+Filesystem execution and transactions, duplicate verification, and
 repacking are future components.
 
 ## Deferred package restructuring

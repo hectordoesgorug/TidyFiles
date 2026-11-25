@@ -33,6 +33,7 @@ def test_main_window_collection_columns_import_and_persistence(
     root = create_main_window(config, config_path)
     app = root.application
     closed = False
+    close_release = threading.Event()
     try:
         root.update()
         assert root.active_mode == "Bulk Rename"
@@ -300,7 +301,7 @@ def test_main_window_collection_columns_import_and_persistence(
                 yield record
                 if index == 0:
                     entered_wait.set()
-                    release_walk.wait(5)
+                    release_walk.wait()
 
         monkeypatch.setattr(DiscoverySession, "_walk_folder", blocked_walk)
         monkeypatch.setattr(
@@ -345,14 +346,12 @@ def test_main_window_collection_columns_import_and_persistence(
         final_folder.mkdir()
         (final_folder / "close.txt").write_text("close")
         close_entered = threading.Event()
-        close_release = threading.Event()
-
         def blocked_close_walk(session, selected_root):
             for index, record in enumerate(original_walk(session, selected_root)):
                 yield record
                 if index == 0:
                     close_entered.set()
-                    close_release.wait(5)
+                    close_release.wait()
 
         monkeypatch.setattr(DiscoverySession, "_walk_folder", blocked_close_walk)
         app.add_folder()
@@ -388,7 +387,8 @@ def test_main_window_collection_columns_import_and_persistence(
         assert dialog_destroyed
         closed = True
     finally:
-        if not closed:
+        close_release.set()
+        if not closed and not app._closing:
             root.destroy()
 
     saved = load_config(config_path)

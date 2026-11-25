@@ -37,9 +37,9 @@ Refresh Preview recalculates names for the existing collection and refreshes
 required directory counts without rescanning folders or changing collection
 membership.
 
-The package includes a read-only destination planner for finalized batches.
-It checks candidate paths, collisions and rename dependencies. The planner is
-currently available through the Python service API.
+The Python service API includes read-only destination planning and preflight
+for finalized batches. Preflight refreshes filename evaluation and checks
+reviewed paths, filesystem identities, collisions, and rename dependencies.
 
 ## Run locally
 

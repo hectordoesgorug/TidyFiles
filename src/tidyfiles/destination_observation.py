@@ -11,7 +11,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from enum import StrEnum
 
-from tidyfiles.collection import normalize_windows_path
+from tidyfiles.collection import FileSystemIdentitySnapshot, normalize_windows_path
 
 # shortcut: ordinary Win32 paths only, extend when preflight can verify long-path support.
 _MAX_WIN32_PATH = 259
@@ -23,6 +23,11 @@ _FILE_CASE_SENSITIVE_SEARCH = 0x00000001
 _FILE_CASE_PRESERVED_NAMES = 0x00000002
 _FILE_READ_ONLY_VOLUME = 0x00080000
 _FILE_CASE_SENSITIVE_INFO = 23
+_FILE_BASIC_INFO = 0
+_FILE_STANDARD_INFO = 1
+_FILE_ID_INFO = 18
+_FILE_TYPE_DISK = 1
+_FILETIME_UNIX_EPOCH = 116444736000000000
 _FILE_READ_ATTRIBUTES = 0x80
 _FILE_SHARE_ALL = 0x07
 _OPEN_EXISTING = 3
@@ -38,6 +43,18 @@ class PathOccupancy(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class WindowsObjectObservation:
+    """FileIdInfo identity with handle-observed metadata, excluding access time."""
+
+    identity: FileSystemIdentitySnapshot
+    size_bytes: int
+    modified_time_ns: int
+    created_time_ns: int | None
+    change_time_ns: int
+    attributes: int
+
+
+@dataclass(frozen=True, slots=True)
 class PathObservation:
     occupancy: PathOccupancy
     actual_name: str | None = None
@@ -46,6 +63,9 @@ class PathObservation:
     read_only_volume: bool = False
     preserves_case: bool = True
     actual_parent: str | None = None
+    volume_guid: str | None = None
+    parent_identity: FileSystemIdentitySnapshot | None = None
+    object_metadata: WindowsObjectObservation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +73,26 @@ class _Volume:
     key: str
     component_limit: int
     flags: int
+    guid: str | None = None
+
+
+class _FileIdInfo(ctypes.Structure):
+    _fields_ = [("serial", ctypes.c_uint64), ("identifier", ctypes.c_ubyte * 16)]
+
+
+class _BasicInfo(ctypes.Structure):
+    _fields_ = [
+        ("created", ctypes.c_int64), ("accessed", ctypes.c_int64),
+        ("written", ctypes.c_int64), ("changed", ctypes.c_int64),
+        ("attributes", wintypes.DWORD),
+    ]
+
+
+class _StandardInfo(ctypes.Structure):
+    _fields_ = [
+        ("allocation", ctypes.c_int64), ("size", ctypes.c_int64), ("links", wintypes.DWORD),
+        ("delete_pending", ctypes.c_ubyte), ("directory", ctypes.c_ubyte),
+    ]
 
 
 def path_key(path: str) -> str:
@@ -88,11 +128,15 @@ def _unverifiable(reason: str) -> PathObservation:
 class WindowsPathObserver:
     """One plan's literal path probes with call-local ancestor and volume observations."""
 
-    def __init__(self, managed_paths: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, managed_paths: tuple[str, ...] = (), *, capture_identity: bool = False
+    ) -> None:
+        self._capture_identity = capture_identity
         self._managed_paths = managed_paths
         self._managed_keys: tuple[tuple[str, str], ...] | None = None
         self._volumes: dict[str, _Volume | PathObservation] = {}
         self._parents: dict[str, str | PathObservation] = {}
+        self._directory_ids: dict[str, FileSystemIdentitySnapshot] = {}
         if os.name != "nt":
             return
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -125,6 +169,13 @@ class WindowsPathObserver:
         self._close = kernel.CloseHandle
         self._close.argtypes = [wintypes.HANDLE]
         self._close.restype = wintypes.BOOL
+        if capture_identity:
+            self._file_type = kernel.GetFileType
+            self._file_type.argtypes = [wintypes.HANDLE]
+            self._file_type.restype = wintypes.DWORD
+            self._volume_name = kernel.GetVolumeNameForVolumeMountPointW
+            self._volume_name.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+            self._volume_name.restype = wintypes.BOOL
 
     def __call__(self, path: str) -> PathObservation:
         if os.name != "nt":
@@ -144,13 +195,16 @@ class WindowsPathObserver:
         managed = self._check_managed_paths(volume, tail)
         if managed is not None:
             return managed
-        parent = self._parent(ntpath.dirname(literal), volume)
+        parent_path = ntpath.dirname(literal)
+        parent = self._parent(parent_path, volume)
         if isinstance(parent, PathObservation):
             return parent
         name = ntpath.basename(literal)
         if len(name.encode("utf-16-le")) // 2 > volume.component_limit:
             return PathObservation(PathOccupancy.UNSAFE, reason="volume_component_limit")
         found = self._find(literal)
+        parent_identity = self._directory_ids.get(parent_path)
+        metadata = None
         if isinstance(found, PathObservation):
             if found.occupancy is not PathOccupancy.VACANT:
                 return found
@@ -163,6 +217,13 @@ class WindowsPathObserver:
             if attributes & (_UNSAFE_ATTRIBUTES | stat.FILE_ATTRIBUTE_DIRECTORY):
                 return PathObservation(PathOccupancy.UNSAFE, reason="directory_or_unsafe_entry")
             occupancy = PathOccupancy.FILE
+            if self._capture_identity:
+                metadata = self._inspect_handle(literal, directory=False, check_case=False)
+                if isinstance(metadata, PathObservation):
+                    return metadata
+                assert metadata is not None and parent_identity is not None
+                if metadata.identity.volume_id != parent_identity.volume_id:
+                    return _unverifiable("object_volume_changed")
         return PathObservation(
             occupancy,
             actual_name,
@@ -170,6 +231,9 @@ class WindowsPathObserver:
             read_only_volume=bool(volume.flags & _FILE_READ_ONLY_VOLUME),
             preserves_case=bool(volume.flags & _FILE_CASE_PRESERVED_NAMES),
             actual_parent=parent,
+            volume_guid=volume.guid,
+            parent_identity=parent_identity,
+            object_metadata=metadata,
         )
 
     def _volume(self, drive: str) -> _Volume | PathObservation:
@@ -192,7 +256,19 @@ class WindowsPathObserver:
             return _unverifiable(f"volume_query_error_{ctypes.get_last_error()}")
         if not maximum.value:
             return _unverifiable("volume_component_limit_unavailable")
-        return _Volume(mapping.value.upper(), maximum.value, flags.value)
+        guid = None
+        if self._capture_identity:
+            volume_name = ctypes.create_unicode_buffer(64)
+            if not self._volume_name(drive + "\\", volume_name, len(volume_name)):
+                return _unverifiable(f"volume_name_error_{ctypes.get_last_error()}")
+            mapping_again = ctypes.create_unicode_buffer(4096)
+            if (
+                not self._query_device(drive, mapping_again, len(mapping_again))
+                or mapping_again.value != mapping.value
+            ):
+                return _unverifiable("drive_mapping_changed")
+            guid = volume_name.value.lower()
+        return _Volume(mapping.value.upper(), maximum.value, flags.value, guid)
 
     def _check_managed_paths(self, volume: _Volume, tail: str) -> PathObservation | None:
         if not self._managed_paths:
@@ -240,30 +316,69 @@ class WindowsPathObserver:
             if attributes & _UNSAFE_ATTRIBUTES or not attributes & stat.FILE_ATTRIBUTE_DIRECTORY:
                 return PathObservation(PathOccupancy.UNSAFE, reason="unsafe_parent")
             actual_path = ntpath.join(parent, name)
-        if volume.flags & _FILE_CASE_SENSITIVE_SEARCH:
-            failure = self._check_directory_case(path)
-            if failure is not None:
-                return failure
+        check_case = bool(volume.flags & _FILE_CASE_SENSITIVE_SEARCH)
+        if check_case or self._capture_identity:
+            result = self._inspect_handle(path, directory=True, check_case=check_case)
+            if isinstance(result, PathObservation):
+                return result
+            if result is not None:
+                ancestor_id = self._directory_ids.get(ancestor)
+                if ancestor_id and ancestor_id.volume_id != result.identity.volume_id:
+                    return _unverifiable("parent_volume_changed")
+                self._directory_ids[path] = result.identity
         return actual_path
 
-    def _check_directory_case(self, path: str) -> PathObservation | None:
+    def _inspect_handle(
+        self, path: str, *, directory: bool, check_case: bool
+    ) -> WindowsObjectObservation | PathObservation | None:
         handle = self._open(
             path, _FILE_READ_ATTRIBUTES, _FILE_SHARE_ALL, None, _OPEN_EXISTING,
             _OPEN_DIRECTORY_NOFOLLOW, None,
         )
         if handle == _INVALID_HANDLE:
-            return _unverifiable(f"parent_open_error_{ctypes.get_last_error()}")
+            return _unverifiable(f"metadata_open_error_{ctypes.get_last_error()}")
         try:
-            flags = wintypes.DWORD()
-            if not self._file_info(
-                handle, _FILE_CASE_SENSITIVE_INFO, ctypes.byref(flags), ctypes.sizeof(flags)
-            ):
-                return _unverifiable(f"directory_case_query_error_{ctypes.get_last_error()}")
-            if flags.value:
-                return _unverifiable("case_sensitive_directory")
+            metadata = None
+            if self._capture_identity:
+                metadata = self._object_metadata(handle, directory)
+                if isinstance(metadata, PathObservation):
+                    return metadata
+            if check_case:
+                flags = wintypes.DWORD()
+                if not self._file_info(
+                    handle, _FILE_CASE_SENSITIVE_INFO, ctypes.byref(flags), ctypes.sizeof(flags)
+                ):
+                    return _unverifiable(f"directory_case_query_error_{ctypes.get_last_error()}")
+                if flags.value:
+                    return _unverifiable("case_sensitive_directory")
+            return metadata
         finally:
             self._close(handle)
-        return None
+
+    def _object_metadata(
+        self, handle: int, directory: bool
+    ) -> WindowsObjectObservation | PathObservation:
+        if self._file_type(handle) != _FILE_TYPE_DISK:
+            return PathObservation(PathOccupancy.UNSAFE, reason="non_disk_object")
+        basic, standard, identity = _BasicInfo(), _StandardInfo(), _FileIdInfo()
+        for code, buffer in (
+            (_FILE_BASIC_INFO, basic), (_FILE_STANDARD_INFO, standard), (_FILE_ID_INFO, identity)
+        ):
+            if not self._file_info(handle, code, ctypes.byref(buffer), ctypes.sizeof(buffer)):
+                return _unverifiable(f"handle_query_{code}_error_{ctypes.get_last_error()}")
+        if basic.attributes & _UNSAFE_ATTRIBUTES or bool(standard.directory) != directory:
+            return PathObservation(PathOccupancy.UNSAFE, reason="unsafe_handle_object")
+        file_id = int.from_bytes(bytes(identity.identifier), "little")
+        if not file_id or standard.delete_pending or not basic.written or not basic.changed:
+            return _unverifiable("incomplete_handle_metadata")
+        return WindowsObjectObservation(
+            FileSystemIdentitySnapshot(identity.serial, file_id),
+            standard.size,
+            (basic.written - _FILETIME_UNIX_EPOCH) * 100,
+            (basic.created - _FILETIME_UNIX_EPOCH) * 100 if basic.created else None,
+            (basic.changed - _FILETIME_UNIX_EPOCH) * 100,
+            basic.attributes,
+        )
 
     def _find(self, path: str) -> tuple[int, str] | PathObservation:
         data = wintypes.WIN32_FIND_DATAW()

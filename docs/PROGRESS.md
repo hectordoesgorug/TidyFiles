@@ -24,8 +24,8 @@ connects progressive imports, M2-E3 connects collection management, and M2-E4
 connects session-only format controls and live read-only filename previews.
 M2-E5 improves large-table updates, clarifies preview status and refresh
 behavior, and adds lifecycle regression coverage. M2 is complete. M3-A adds a
-standalone read-only destination planner. Execution preflight and
-filesystem-changing operations remain planned.
+standalone read-only destination planner. M3-B adds read-only preflight for
+reviewed plans. Filesystem-changing operations remain planned.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -41,8 +41,9 @@ filesystem-changing operations remain planned.
 | M2-E3 | Complete | Shared sorting controls and preference persistence, manual ordering and drag-and-drop, selection shortcuts, row context actions, non-destructive removal and clearing, and collection-change notifications. |
 | M2-E4 | Complete | Session-only live filename-format controls, token insertion and reference, background ordered previews, structured diagnostics, metadata refresh, and stale-result protection. |
 | M2-E5 | Complete | Targeted large-table optimization, preview guidance, and lifecycle coverage. Owner manual acceptance passed 21/21. |
-| M3 | In progress | Read-only destination planning is implemented. Preflight, execution, Trash, transaction journals, and recovery remain planned. |
-| M3-A | Implemented | Standalone destination planning, collision and dependency classification, and read-only collision-only subset replanning. |
+| M3 | In progress | Read-only destination planning and preflight are implemented. Execution, Trash, transaction journals, and recovery remain planned. |
+| M3-A | Complete | Standalone destination planning, collision and dependency classification, and read-only collision-only subset replanning. |
+| M3-B | Implemented | Review-time identity capture and cancellable read-only execution preflight. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
@@ -551,14 +552,17 @@ replanning propagates dependency exclusions and observes the remaining
 destinations again with the original reviewed names.
 
 This covers the planning clauses of DD-009, DD-021, DD-048, DD-056,
-DD-063, DD-065, DD-074, DD-075, DD-076, and DD-085. DD-009 confirmation,
-preflight and execution remain future work. DD-075 acknowledgment is still
-required before future processing. Single Folder execution, final source and
-destination identity checks, and transaction and recovery safeguards also
-remain planned. The GUI continues to display filename-level previews with
+DD-063, DD-065, DD-074, DD-075, DD-076, and DD-085. M3-A established the
+planning contract used by M3-B. DD-009 confirmation, DD-075 acknowledgment,
+execution-time checks, and transaction and recovery safeguards remain planned.
+The GUI continues to display filename-level previews with
 Process, Deduplicate, and Repack disabled. See
 [Architecture](ARCHITECTURE.md#read-only-destination-planning) and
 [File Safety](FILE_SAFETY.md#destination-planning-observations).
+
+The M3-A commit `e1b651302f1037e07472120a13fca5445dda5f50` was pushed and
+passed Windows CI, as recorded at the M3-B checkpoint. M3-A's historical
+local repository suite passed 447 tests.
 
 The planning benchmark used Windows 11 build 26300, Python 3.13.17 x64, and
 an Intel Core i5-10300H. It planned independent renames to vacant names in one
@@ -582,6 +586,49 @@ collection-controls tests. Ruff and compileall passed. Native planner
 fixtures covered hard links, junctions, case-only naming, distinct directory
 spellings, and unchanged file contents, identities, and directory membership.
 Permission failures and constrained component limits used fault injection.
+
+## M3-B — Execution preflight
+
+Preflight independently checks a reviewed plan, including a collision-only
+subset, against source and parent identity baselines, refreshed filenames,
+and current destinations and dependencies. A new candidate or destination
+requires review. A newly blocked intended row blocks the whole intended set.
+The full finalized collection is retained for filename evaluation and import
+restrictions. The standalone worker supports cancellation and supersession
+during read-only preparation.
+
+M3-B implements preflight clauses of DD-009, DD-021, DD-037, DD-041, DD-048,
+DD-049, DD-056, DD-063, DD-065, DD-074, DD-075, DD-076, and DD-085.
+DD-041 journal durability, DD-037's modifying-job boundary, DD-009 user
+confirmation and execution, and DD-075 acknowledgment remain future work.
+The GUI continues to show filename previews and the modifying controls are
+disabled. See [Architecture](ARCHITECTURE.md#execution-preflight) and
+[File Safety](FILE_SAFETY.md#preflight-identity-and-safety).
+
+The native benchmark ran on Windows 11 build 26300 and Python 3.13.17 x64.
+It used independent renames with `<Name>_<NumFiles>` in one temporary
+directory. Timings start after review capture and include the forced count
+refresh and both source observation passes.
+
+| Entries | Total | Evaluation and refresh | Source observations | Directory observations | Destination observations | Enumerations |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 0.939 s | 0.038 s | 2,000 | 14 | 1,000 | 1 |
+| 10,000 | 9.328 s | 0.392 s | 20,000 | 14 | 10,000 | 1 |
+| 50,000 | 61.543 s | 2.340 s | 100,000 | 14 | 50,000 | 1 |
+
+The directory count includes shared ancestors queried in both passes.
+Cancellation requested at the 128-source progress checkpoint returned in
+0.051 ms, 0.384 ms, and 6.536 ms, respectively. That measures a cooperative
+checkpoint after a query returned.
+
+The focused preflight suite passed 43 tests and related planning, evaluation,
+discovery, and collection suites passed 141. The final repository run passed
+490 tests with zero failures or skips. Standalone checks passed the GUI smoke
+test and 9 collection-controls and 5 filename-preview worker tests. Two
+earlier full runs each failed one GUI test because a discovery fixture
+released itself before a shutdown assertion. The fixtures now wait for their
+explicit release events. Ruff, compileall, and both Git whitespace checks
+passed.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 
