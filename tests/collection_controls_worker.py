@@ -4,6 +4,7 @@ import subprocess
 import sys
 import threading
 import time
+import tkinter as tk
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from tidyfiles.collection import (
     OrderingMode,
 )
 from tidyfiles.config import ConfigError, load_config
+from tidyfiles.discovery import DiscoverySession
 from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences, sort_entries
 
 
@@ -1072,3 +1074,91 @@ def test_sort_preference_save_failure_preserves_existing_config(
         assert "preference could not be saved" in app.status.cget("text")
     finally:
         app.clear_all()
+
+
+def test_close_during_active_discovery_restores_prior_view_before_shutdown(
+    app_runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = app_runtime["root"]
+    app = app_runtime["app"]
+    if app.collection.snapshot().entries:
+        app.clear_all()
+        root.update()
+
+    callback_errors = []
+    root.report_callback_exception = lambda *args: callback_errors.append(args)
+    prior_path = tmp_path / "shutdown-prior.txt"
+    prior_path.write_text("preserved", encoding="utf-8")
+    assert app.import_controller.start_files((prior_path,))
+    _wait_for_idle(root, app)
+    prior_entry = app.collection.snapshot().entries[0]
+    assert app.tree.selection() == ()
+    root.update()
+
+    rollback = app.import_controller.on_rollback_complete
+    restored_selections = []
+
+    def capture_restored_selection(removed_ids, previous_view):
+        rollback(removed_ids, previous_view)
+        restored_selections.append(app.tree.selection())
+
+    app.import_controller.on_rollback_complete = capture_restored_selection
+    folder = tmp_path / "active-discovery"
+    folder.mkdir()
+    (folder / "one.txt").write_text("one", encoding="utf-8")
+    (folder / "two.txt").write_text("two", encoding="utf-8")
+    entered = threading.Event()
+    release = threading.Event()
+    original_walk = DiscoverySession._walk_folder
+
+    def blocked_walk(session, selected_root):
+        for index, record in enumerate(original_walk(session, selected_root)):
+            yield record
+            if index == 0:
+                entered.set()
+                release.wait(5)
+
+    monkeypatch.setattr(DiscoverySession, "_walk_folder", blocked_walk)
+    try:
+        assert app.import_controller.start_folder(folder)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            root.update()
+            if entered.is_set() and len(app.tree.get_children("")) > 1:
+                break
+            time.sleep(0.002)
+        assert entered.is_set() and len(app.tree.get_children("")) > 1
+        assert app.import_controller.busy
+        app.tree.selection_set(str(prior_entry.entry_id))
+        root.update()
+        started = time.monotonic()
+        app.close()
+        assert time.monotonic() - started < 1
+        assert app._close_pending and not app._closing
+        release.set()
+        deadline = time.monotonic() + 8
+        while not app._closing and time.monotonic() < deadline:
+            try:
+                root.update()
+            except tk.TclError:
+                break
+            time.sleep(0.002)
+        assert app._closing
+        assert tuple(entry.entry_id for entry in app.collection.snapshot().entries) == (
+            prior_entry.entry_id,
+        )
+        assert app._display_order == [prior_entry.entry_id]
+        assert restored_selections == [()]
+        assert callback_errors == []
+        assert prior_path.read_text(encoding="utf-8") == "preserved"
+    finally:
+        release.set()
+        if not app._closing:
+            app.close()
+            deadline = time.monotonic() + 8
+            while not app._closing and time.monotonic() < deadline:
+                try:
+                    root.update()
+                except tk.TclError:
+                    break
+                time.sleep(0.002)

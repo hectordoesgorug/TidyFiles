@@ -6,24 +6,27 @@ The M0 foundation and minimal GUI shell are implemented. The application opens
 with an empty collection and exposes no file-processing or destructive actions.
 M1 parser, evaluator, extension resolution, and pure filename validation are
 complete, including M1-D.12's DD-061 parser diagnostic correction. They remain
-unconnected to the GUI and filesystem operations. See
-`docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-decision audit and
-historical verification record. M2-A adds the GUI-independent shared working
-collection and import-session lifecycle. M2-B adds a read-only filesystem
-discovery service with bounded background work, metadata snapshots, exclusions,
-cooperative cancellation, and incomplete-import records. The service is not
-connected to the GUI. M2-C adds deterministic collection sorting, manual
-ordering, non-destructive row management, persistent sort preferences, and
-snapshot revision checks. M2-D adds a filename-evaluator adapter with bounded
-directory counts, ordered evaluation, request-currency checks, progress and
-cancellation. M2-E1 adds the shared main window and per-mode column
-customization. M2-E2 connects explicit Add Files and recursive Add Folder
-requests to read-only progressive discovery, cancellation and persistent
-incomplete-import diagnostics. M2-E3 connects shared collection sorting,
-manual ordering, removal, clearing, selection, and row context actions. M2-E4
+pure filename-engine components; M2-D and M2-E4 connect them to read-only
+evaluation and GUI previews. Filesystem-changing operations remain unavailable.
+See `docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-decision audit and
+historical verification record.
+
+M2-A adds the GUI-independent shared working collection and import-session
+lifecycle. M2-B adds bounded read-only discovery, metadata snapshots, exclusions,
+cooperative cancellation, and incomplete-import records; M2-E2 connects it to
+explicit Add Files and Add Folder requests. M2-C adds deterministic sorting,
+manual ordering, non-destructive row management, persistent sort preferences,
+and snapshot revision checks. M2-D adds bounded directory counts, ordered
+filename evaluation, request-currency checks, progress, and cancellation.
+
+M2-E1 adds the shared main window and per-mode column customization. M2-E2
+connects progressive imports, M2-E3 connects collection management, and M2-E4
 connects session-only format controls and live read-only filename previews.
-Final processing-readiness checks, destination planning, and filesystem
-operations remain unimplemented.
+M2-E5 improves large-table updates, clarifies preview status and refresh
+behavior, and adds lifecycle regression coverage. M2 is implemented locally and
+awaits owner acceptance and publication/CI verification. Destination planning,
+processing-readiness checks, and filesystem-changing operations remain
+unimplemented.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -31,13 +34,14 @@ operations remain unimplemented.
 | M0-B | Complete | Python project foundation, tests, portable storage, configuration, rotating logging, single-instance protection, and Windows CI. |
 | M0-C | Complete | Minimal CustomTkinter shell with three tabs and an empty shared Treeview. |
 | M1 | Complete | Pure parser/evaluator, extension resolution, and filename validation, including the M1-D.12 DD-061 diagnostic correction. Application and filesystem integration remain outside M1. |
-| M2 | In progress | M2-A through M2-D domain services and M2-E1 through M2-E4 GUI integration are complete; filesystem processing remains planned. |
+| M2 | Implemented; awaiting acceptance | M2-A through M2-D services and M2-E1 through M2-E5 GUI integration are implemented locally; owner review, publication, and CI verification remain. Filesystem processing remains planned. |
 | M2-D | Complete | Collection-backed filename evaluation, physical directory counts, bounded metadata cache, structured diagnostics, request currency, background progress and cancellation. |
-| M2-E | In progress | GUI integration continues in staged slices; import discovery, collection management, and filename previews are complete, while later workflows remain planned. |
+| M2-E | Implemented; awaiting acceptance | M2-E1 through M2-E5 provide the current shared collection, import, management, and preview GUI; later workflows remain planned. |
 | M2-E1 | Complete | Main-window layout, shared empty collection presentation, context-specific columns, and persisted appearance and geometry preferences. |
 | M2-E2 | Complete | Native import controls, progressive discovery, cancellation, ordering, and incomplete-import reporting. |
 | M2-E3 | Complete | Shared sorting controls and preference persistence, manual ordering and drag-and-drop, selection shortcuts, row context actions, non-destructive removal and clearing, and collection-change notifications. |
 | M2-E4 | Complete | Session-only live filename-format controls, token insertion and reference, background ordered previews, structured diagnostics, metadata refresh, and stale-result protection. |
+| M2-E5 | Implemented; awaiting acceptance | Targeted large-table optimization, Valid preview wording, Refresh Preview help, lifecycle regressions, and consolidated M2 readiness review. |
 | M3 | Planned | Destination planning, filesystem safety, Trash, transaction journals, and recovery. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
@@ -69,10 +73,10 @@ DD-079 through DD-085 are recorded as follows:
 | DD-079 — Horizontal window layout with full-width Treeview | Implemented with responsive grid geometry; no permanent sidebar. |
 | DD-080 — Context-specific, customizable columns | Implemented with the approved per-mode defaults, fixed order, required-column enforcement, optional visibility, saved widths, native header resizing, Restore Defaults, and header context-menu access. |
 | DD-081 — Shared collection toolbar and list interactions | M2-E2 enables Add Files and Add Folder. M2-E3 enables sorting, manual movement, Remove from List, and Clear All against the shared collection. |
-| DD-082 — Compact Bulk Rename format controls | Editable format field and the three approved built-in presets are present. Insert Token, Profiles, Format Reference, and live evaluation remain disabled/deferred. Unsaved field edits are not persisted. |
+| DD-082 — Compact Bulk Rename format controls | The editable format field and three approved built-in presets are present. M2-E4 adds Insert Token, Format Reference, and live evaluation. Profiles remain deferred, and unsaved field edits are not persisted. |
 | DD-083 — Optional post-processing Counter | The switch is present, defaults OFF, and has no execution effect. The algorithm remains deferred. |
 | DD-084 — Native toggle switches for boolean operation options | Single Folder, Auto-clean, and Counter use CustomTkinter switches. Single Folder and Counter only change session-local UI state. Auto-clean is disabled. |
-| DD-085 — Problematic-row highlighting and expression-wide errors | A subtle problem-row Treeview style is available for later rendering. Live evaluation, row diagnostics, expression-wide invalidation, and preview clearing remain deferred. |
+| DD-085 — Problematic-row highlighting and expression-wide errors | M2-E1 supplied the subtle problem-row Treeview style. M2-E4 implements live evaluation, row diagnostics, expression-wide invalidation, and preview clearing. |
 
 The default visible columns are:
 
@@ -202,8 +206,9 @@ rows. The earlier pre-optimization run exceeded four minutes without
 completing and was stopped; repeated per-row Treeview moves were replaced by
 the native child-order update before collecting the results above.
 
-M2-E2's manual acceptance backlog remains: cancellation and rollback, a
-subsequent import after cancellation, and application closure during discovery.
+At the M2-E2 checkpoint, manual acceptance for cancellation and rollback, a
+subsequent import after cancellation, and application closure during discovery
+remained outstanding. M2-E5 adds automated lifecycle coverage for those paths.
 M2-E3 completes the collection-management controls. They use stable entry IDs
 and the existing collection APIs, preserve prior incomplete-import warnings
 until Clear All, and remain unavailable during conflicting work. M2-E3 does not
@@ -381,16 +386,164 @@ cached directory observations from the preceding 1,000-entry workload.
 | 10,000 | `<SubDirName>_<IncNrDir>` | 971.42 | 431.97 | 1,414.60 | 872.50 | 2,287.11 | 0 / 0 | 208.84 |
 | 10,000 | `<NumFiles>_<NumDirs>_<Name>` | 919.50 | 451.96 | 1,380.96 | 1,076.51 | 2,457.47 | 0 / 10 | 107.75 |
 
-The long 10,000-row clear and render passes show that large Treeview updates can
-delay the event loop; the largest measured heartbeat gap was 287.35 ms. These
-hidden-window measurements do not establish visual latency or interactive
-responsiveness. They identify large-list chunking and redraw behavior as M2-E5
-optimization work. No larger-than-10,000 workload was measured.
+The long 10,000-row clear and render passes showed that large Treeview updates
+can delay the event loop; the largest measured heartbeat gap was 287.35 ms.
+These hidden-window measurements do not establish visual latency or interactive
+responsiveness. They prompted the M2-E5 optimization recorded below. No
+larger-than-10,000 workload was measured.
 
-Interactive on-screen Windows acceptance was not completed because the native
-Windows automation channel was unavailable. Manual inspection of the reference,
-cursor insertion, visible preview progression, and tab appearance remains
-outstanding; automated widget tests do not replace that review.
+Interactive on-screen Windows acceptance was not completed during the earlier
+automated review because the native Windows automation channel was unavailable.
+The M2-E5 acceptance baseline reports owner acceptance of 17/17 M2-E4 manual
+checks; that result was not independently repeated in this local run. Automated
+widget tests do not replace visual review of M2-E5 refinements.
+
+## M2-E5 — GUI Acceptance, Performance Optimization and M2 Readiness Review
+
+M2-E5 is implemented in the current working tree and awaits owner acceptance,
+publication, and Windows CI verification. The optimization retains one shared
+collection and stable Treeview row IDs. A collection-position index avoids
+scanning all rows for selection order and movement state. Revision-based preview
+currency checks avoid copying a full collection snapshot for routine GUI checks.
+Sorting, import finalization, preview rendering and invalidation update only
+affected Treeview cells; repeated preview clears and unchanged selection
+restoration are skipped. Discovery queue and worker settings were not changed.
+
+Bulk Rename uses **Valid preview** for an individually valid filename result.
+This label does not establish destination availability, collision safety,
+current source identity, or execution readiness. The Refresh Preview help text
+explains that it recalculates filenames and required directory counts for the
+existing collection without rescanning folders or changing membership. Forced
+refresh continues to bypass the directory-count cache.
+
+### Performance environment and measurements
+
+Measurements ran on Windows 11 Home build 26300, Python 3.13.17 x64, an Intel
+Core i5-10300H, and 15.87 GiB installed RAM (about 4.89 GiB available before
+the runs). The synthetic discovery fixture was on C:, a fixed NTFS volume. GUI
+measurements ran with the Tk window withdrawn, the Bulk Rename mode active, and
+synthetic in-memory collection paths. Although the application requests a
+1000×680 initial window, the automated runner reported a 200×200 geometry after
+virtual-screen clamping. These results describe Treeview operations and event
+loop callbacks, not visible paint time or normal-sized on-screen interaction.
+
+The 10,000-entry preview workload is comparable to the earlier M2-E4 run. Times
+are milliseconds; the 300 ms debounce is included in Edit to submit. Service
+time is measured separately. The count-token expression reused ten cached
+physical-directory observations in the earlier and current runs.
+
+| Expression | Edit to submit, before → after | Edit to first row, before → after | Render, before → after | Total, before → after | Max heartbeat, before → after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `<Name>` | 868.93 → 576.97 | 1,205.93 → 925.23 | 819.25 → 262.46 | 2,025.18 → 1,187.68 | 216.41 → 198.89 |
+| `<Name>_<IncNr>` | 888.32 → 582.77 | 1,278.23 → 970.09 | 825.80 → 294.58 | 2,104.03 → 1,264.67 | 287.35 → 211.11 |
+| `<SubDirName>_<IncNrDir>` | 971.42 → 593.78 | 1,414.60 → 1,004.73 | 872.50 → 260.23 | 2,287.11 → 1,264.95 | 208.84 → 288.69 |
+| `<NumFiles>_<NumDirs>_<Name>` | 919.50 → 582.74 | 1,380.96 → 996.50 | 1,076.51 → 254.90 | 2,457.47 → 1,251.40 | 107.75 → 103.45 |
+
+Total preview time fell in these runs, but the maximum heartbeat gap did not
+improve for every expression; the SubDirName/IncNrDir run observed 288.69 ms.
+Large-list stalls remain and these measurements are not visual or CI thresholds.
+
+A separate 50,000-entry in-memory collection run used a current `<Name>`
+preview before sort, movement and removal. Earlier M2-E5 baseline values and
+the final local run were:
+
+| Operation | Before ms / max heartbeat ms | After ms / max heartbeat ms |
+| --- | ---: | ---: |
+| Sort 50,000 entries | 3,829 / 411 | 2,614 / 243 |
+| Move 10 rows to top | 3,142 / 267 | 1,771 / 205 |
+| Remove 10% of rows | 2,867 / 221 | 1,643 / 249 |
+| Clear 45,000 rows | 123 / 122 | 111 / 111 |
+
+The earlier and final collection runs used the same collection scale and action
+sizes, but preview state varied; treat these operation deltas as directional.
+
+The final run did not uniformly improve event-loop gaps: removing 10% of rows
+was about 43% faster overall but its maximum heartbeat gap rose to 249 ms. A
+separate selection-summary update for ten selected rows measured 22 ms. At
+50,000 rows, an uninstrumented process used about 197.30 MiB working set and
+peak working set, versus a 40.59 MiB empty-window working set. The earlier
+baseline was about 193.45 MiB working set and 196.4 MiB peak; the added indexes
+therefore cost roughly 4 MiB at this size. No 100,000-row run was performed.
+
+### Progressive import and cancellation
+
+The retained manual fixture contains 12,000 empty `.txt` files in ten immediate
+subdirectories at
+`C:\Users\marlo\AppData\Local\Temp\TidyFiles-M2-E5-acceptance-7vdc3ru1`.
+It is isolated from the repository and user collections; it was not modified by
+the application. Use it only with Add Folder or the read-only import benchmark.
+Do not move, rename, or delete its contents while reviewing the application.
+
+On the final import run, all 12,000 entries were accepted. The first 32 rows
+were visible after 74 ms while traversal was still active. The producer used
+one worker, a 128-record queue with peak occupancy 128, and result batches of
+64; the Tk consumer processes at most 32 results per tick within its existing
+approximately 8 ms budget. Measured producer traversal was 17.81 s, queue drain
+to order preparation 0.18 s, immutable-order preparation 0.30 s, and final
+Treeview application about 3.89 s. Total controller time was 22.23 s. The
+heartbeat median was 16.24 ms and maximum 335.50 ms. Queue backpressure remains
+intentional; full queue occupancy did not prompt extra workers.
+
+A focused cancel-and-retry run canceled after 64 new entries were accepted and
+65 rows were visible including the earlier sentinel. Rollback returned to one
+row and restored its selection; cancel-to-idle was 169.56 ms, including
+rollback, and the session-reported cancellation latency was 47.77 ms. A later
+one-file import completed successfully in 167.38 ms. Synthetic source contents
+were unchanged. The automated controller suite also covers incomplete-warning
+persistence, rollback order and selection, and a subsequent import. A GUI worker
+test closes the application during active discovery and checks that rollback
+finishes before shutdown without Tk callback errors. A separate preview worker
+test closes while metadata evaluation is stalled. These controlled checks do
+not establish immediate cancellation during a blocked operating-system call.
+
+### GUI, safety and readiness review
+
+Automated tests cover the prior M2-E3 regressions for multi-row drag, resized
+filename columns across refresh/tab/restart, and one Columns dialog; they also
+cover selection, failed/canceled drops, sorting and preference persistence,
+geometry clamping, preview invalidation, forced metadata refresh, stale result
+rejection, and session-only filename expressions. Geometry and preference tests
+are scripted checks. Physical multi-monitor and DPI checks, minimum-size
+usability, visible scrolling, and visual Light/Dark comparison were not
+performed. The current local task did not establish interactive Windows
+acceptance; a native UI automation channel was unavailable in the recorded
+environment. Single-instance tests cover orderly release/reacquisition and
+independent competing processes; a second GUI launch after shutdown was not
+manually exercised.
+
+The safety review found no M2 processing operation enabled. Import, cancellation,
+collection ordering/removal, preview evaluation and directory-count refresh
+remain non-destructive; synthetic source content was preserved. Open File
+remains an explicit action guarded by a filename-extension denylist, which
+cannot identify every executable or launchable file type. That limitation
+requires review before any future launch-related workflow.
+
+M2 exposes ordered collection snapshots, stable entry IDs, original/current
+source paths, per-file import-root context, filesystem identity observations,
+folder-root records, incomplete-import diagnostics, revision tracking, current
+evaluation results, structured file diagnostics, forced count refresh,
+candidate comparison, and collection-change notifications. M3 still needs
+unified destination planning, batch collision prevention, protection of
+unrelated destinations, case-only rename and cycle handling, source/destination
+identity revalidation, Single Folder semantics, execution authorization,
+transaction and recovery behavior, and applicable cleanup safeguards. Counter
+remains deferred. A valid preview is not an executable plan. The older
+`/planning/` package predates DD-074 through DD-085; it remains unchanged and
+does not replace the current tracked architecture and progress records.
+
+Owner review of M2-E5, an authorized Git publication step, and Windows CI remain
+outstanding. No changes to `/planning/` or `/legacy/`, dependency installation,
+staging, commit, or push were performed.
+
+### M2-E5 verification
+
+On Windows 11 Home build 26300 with Python 3.13.17, the focused application,
+collection, discovery, import, filename, instance, and preference suites passed
+398 tests. The isolated filename-preview worker passed 5 tests and the isolated
+collection-controls worker passed 9 tests. The full repository suite passed
+413 tests with no skips. Ruff, `compileall -q src tests`, and `git diff --check`
+passed locally. No Windows CI run or actual interactive GUI acceptance is
+claimed; the changes remain uncommitted for owner review.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 

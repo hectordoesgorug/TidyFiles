@@ -308,10 +308,11 @@ requests. Consumers can invalidate cached metadata or submit a forced refresh;
 these operations invalidate prior evaluation currency. A cache hit and an
 identity check do not prove that directory contents stayed unchanged. The
 result request ID, collection ID/revision, expression and settings must all
-match current inputs. The GUI consumer must pass its current expression and
-settings to `current_result()`; it returns no result for a changed collection,
-an active import, a superseded request, or changed expression or settings. A
-candidate comparison reports raw candidate changes separately from
+match current inputs. `current_result()` checks a supplied snapshot and
+optional expression and settings. The GUI uses the service's revision-based
+currency check with `WorkingCollection.revision`, avoiding a full snapshot copy
+for row rendering and control-state updates; M2 has no adjustable evaluation
+settings. A candidate comparison reports raw candidate changes separately from
 validated filename changes, so an invalid name is never promoted to a valid
 preview candidate.
 
@@ -329,16 +330,22 @@ the completed current result is restored on return without an unnecessary
 evaluation. Duplicate Finder and Repacker do not receive fabricated analysis
 or output results.
 
-The preview status column distinguishes Pending, Evaluating, Ready, Unchanged,
-Invalid format, Invalid filename, Metadata unavailable, and Stale. Unchanged
-uses exact filename equality, including case. Parser errors highlight the
-format field, show one inline diagnostic, and mark all rows Invalid format with
-neutral backgrounds. File-specific token, metadata, and validation errors
+The preview status column distinguishes Pending, Evaluating, Valid preview,
+Unchanged, Invalid format, Invalid filename, Metadata unavailable, and Stale.
+Unchanged uses exact filename equality, including case. Parser errors highlight
+the format field, show one inline diagnostic, and mark all rows Invalid format
+with neutral backgrounds. File-specific token, metadata, and validation errors
 highlight only affected rows and are available through the row Details action.
 Any error invalidates the complete rename batch; valid rows may remain visible
 for review. The reference dialog is read-only and single-instance. Refresh
 Preview invalidates cached directory observations and forces fresh acquisition
-for count tokens. No filesystem watcher is used.
+for count tokens. Its help text explains that it recalculates the existing
+collection without rescanning folders. No filesystem watcher is used.
+
+Collection presentation keeps a position index by stable entry ID and updates
+only changed row-number, preview, status, and tag cells. Preview filename and
+problem-row IDs avoid repeated full-row reads when clearing results. Identical
+selection restoration and already-applied preview clearing are skipped.
 
 The common status and progress area reports evaluation stages only when import
 work is idle. Processing controls remain disabled. A valid preview does not

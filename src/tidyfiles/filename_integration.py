@@ -986,6 +986,27 @@ class FilenameEvaluationService:
     ) -> bool:
         return self.current_result(snapshot, expression=expression, settings=settings) == result
 
+    def is_current_revision(
+        self,
+        result: FilenameEvaluationResult,
+        *,
+        collection_id: UUID,
+        revision: int,
+        expression: str | None = None,
+    ) -> bool:
+        """Check a result against the latest request without copying a collection snapshot."""
+        with self._condition:
+            latest = self._latest_result
+            latest_request_id = self._latest_request_id
+        return bool(
+            latest == result
+            and result.request_id == latest_request_id
+            and result.collection_id == collection_id
+            and result.collection_revision == revision
+            and (expression is None or result.expression == expression)
+            and result.state in {EvaluationState.VALID, EvaluationState.INVALID}
+        )
+
     def invalidate_metadata(self, directory_path: str | os.PathLike[str] | None = None) -> None:
         self.metadata_cache.invalidate(directory_path)
         pending: _Job | None = None

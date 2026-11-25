@@ -206,6 +206,10 @@ class WorkingCollection:
         return self._collection_id
 
     @property
+    def revision(self) -> int:
+        return self._revision
+
+    @property
     def ordering_mode(self) -> OrderingMode:
         return self._ordering_mode
 

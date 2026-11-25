@@ -197,6 +197,7 @@ class _MainWindow:
         self.settings_window: ctk.CTkToplevel | None = None
         self._entries_by_id: dict[UUID, CollectionEntry] = {}
         self._display_order: list[UUID] = []
+        self._display_positions: dict[UUID, int] = {}
         self._known_size_bytes = 0
         self._unknown_size_count = 0
         self._import_issue_sessions: tuple[Any, ...] = ()
@@ -210,6 +211,7 @@ class _MainWindow:
         self._collection_render_order: tuple[UUID, ...] = ()
         self._collection_render_selection: tuple[UUID, ...] = ()
         self._collection_render_offset = 0
+        self._collection_render_previous_positions: dict[UUID, int] = {}
         self._collection_render_notify = False
         self._drag_press: tuple[str, int, int, int] | None = None
         self._drag_original_selection: tuple[UUID, ...] = ()
@@ -235,6 +237,9 @@ class _MainWindow:
         self._preview_clear_schedule = False
         self._preview_clear_status = "Pending"
         self._preview_clear_baseline = True
+        self._preview_clear_applied: tuple[str, bool] | None = None
+        self._preview_filename_ids: set[UUID] = set()
+        self._preview_problem_ids: set[UUID] = set()
         self._preview_render_result: FilenameEvaluationResult | None = None
         self._preview_render_offset = 0
         self._preview_render_generation = 0
@@ -375,6 +380,18 @@ class _MainWindow:
             formats, text="Refresh Preview", width=112, command=self.refresh_filename_preview
         )
         self.refresh_preview_button.grid(row=0, column=4, padx=(6, 0))
+        self.refresh_preview_help = ctk.CTkLabel(
+            formats,
+            text=(
+                "Recalculates filenames and required directory counts. "
+                "Does not rescan folders or change the collection."
+            ),
+            anchor="w",
+            font=ctk.CTkFont(size=10),
+        )
+        self.refresh_preview_help.grid(
+            row=1, column=0, columnspan=5, padx=4, pady=(0, 2), sticky="w"
+        )
         self._format_border_normal = self.format_field.cget("border_color")
         self.format_diagnostic = ctk.CTkLabel(
             panel, text="", anchor="w", text_color=("#B42318", "#FF8D85")
@@ -756,7 +773,7 @@ class _MainWindow:
             return
         self._set_format_diagnostic(None)
         self._invalidate_filename_preview(schedule=True)
-        if not self.rename_format.get() and self.collection.snapshot().entries:
+        if not self.rename_format.get() and self._entries_by_id:
             self.format_diagnostic.configure(text="A rename format is required.")
             self.format_diagnostic.grid()
         self._update_control_states()
@@ -765,7 +782,7 @@ class _MainWindow:
         if self._closing:
             return
         self._invalidate_filename_preview(schedule=True)
-        if not self.rename_format.get() and not self.collection.snapshot().entries:
+        if not self.rename_format.get() and not self._entries_by_id:
             self._set_format_diagnostic(None)
 
     def _set_format_diagnostic(self, diagnostic: Any | None) -> None:
@@ -805,7 +822,6 @@ class _MainWindow:
         self._preview_generation += 1
         self._cancel_preview_after("_preview_debounce_after")
         self._cancel_preview_after("_preview_render_after")
-        self._cancel_preview_after("_preview_clear_after")
         if self._preview_service is not None:
             self._preview_service.cancel(self._preview_request_id)
             if invalidate_metadata:
@@ -824,11 +840,12 @@ class _MainWindow:
 
         expression = self.rename_format.get()
         busy = self._import_is_busy() or self._collection_operation_pending
+        has_entries = bool(self._entries_by_id)
         should_schedule = (
             schedule
             and self.active_mode == "Bulk Rename"
             and bool(expression)
-            and bool(self.collection.snapshot().entries)
+            and has_entries
             and not busy
         )
         status = "Pending" if should_schedule else None
@@ -838,12 +855,11 @@ class _MainWindow:
             self.active_mode == "Bulk Rename"
             and expression
             and not busy
-            and self.collection.snapshot().entries
+            and has_entries
         ):
             self.status.configure(text="Filename preview pending")
         elif self.active_mode == "Bulk Rename" and not expression:
-            entries = self.collection.snapshot().entries
-            if entries and not busy:
+            if has_entries and not busy:
                 self.format_diagnostic.configure(text="A rename format is required.")
                 self.format_diagnostic.grid()
 
@@ -862,10 +878,25 @@ class _MainWindow:
         status: str | None,
         baseline: bool,
     ) -> None:
+        target_status = status or "Imported"
+        same_target = (
+            self._preview_clear_status == target_status
+            and self._preview_clear_baseline == baseline
+        )
+        if self._preview_clear_after is not None and same_target:
+            self._preview_clear_generation = generation
+            self._preview_clear_schedule = schedule
+            return
+        if self._preview_clear_after is not None:
+            self._cancel_preview_after("_preview_clear_after")
         self._preview_clear_generation = generation
         self._preview_clear_schedule = schedule
-        self._preview_clear_status = status or "Imported"
+        self._preview_clear_status = target_status
         self._preview_clear_baseline = baseline
+        clear_key = (target_status, baseline)
+        if self._preview_clear_applied == clear_key:
+            self._finish_preview_clear(generation)
+            return
         self._preview_clear_ids = tuple(self.tree.get_children(""))
         self._preview_clear_offset = 0
         if self._preview_clear_ids:
@@ -889,23 +920,21 @@ class _MainWindow:
             entry = self._entries_by_id.get(entry_id)
             if entry is None:
                 continue
-            values = list(self.tree.item(item_id, "values"))
-            filename_index = _COLUMN_INDEX["new_filename"]
-            status_index = _COLUMN_INDEX["status"]
+            if entry_id in self._preview_filename_ids:
+                self.tree.set(item_id, "new_filename", "")
+                self._preview_filename_ids.discard(entry_id)
+            current_status = self.tree.set(item_id, "status")
             baseline_status = (
-                values[status_index] if self._import_is_busy() else "Imported"
+                current_status if self._import_is_busy() else "Imported"
             )
             target_status = (
                 baseline_status if self._preview_clear_baseline else self._preview_clear_status
             )
-            if (
-                values[filename_index]
-                or values[status_index] != target_status
-                or tuple(self.tree.item(item_id, "tags")) != ("normal",)
-            ):
-                values[filename_index] = ""
-                values[status_index] = target_status
-                self.tree.item(item_id, values=tuple(values), tags=("normal",))
+            if current_status != target_status:
+                self.tree.set(item_id, "status", target_status)
+            if entry_id in self._preview_problem_ids:
+                self.tree.item(item_id, tags=("normal",))
+                self._preview_problem_ids.discard(entry_id)
         self._preview_clear_offset = end
         if end < len(self._preview_clear_ids):
             self._preview_clear_after = self.root.after(1, self._clear_preview_chunk)
@@ -916,6 +945,10 @@ class _MainWindow:
         self._preview_clear_after = None
         if self._closing or generation != self._preview_generation:
             return
+        self._preview_clear_applied = (
+            self._preview_clear_status,
+            self._preview_clear_baseline,
+        )
         if self._preview_clear_schedule:
             self._preview_debounce_after = self.root.after(
                 300, self._submit_filename_preview
@@ -975,7 +1008,6 @@ class _MainWindow:
 
     def _preview_result_is_current(self, result: FilenameEvaluationResult) -> bool:
         service = self._preview_service
-        snapshot = self.collection.snapshot()
         return bool(
             service is not None
             and not self._closing
@@ -984,7 +1016,12 @@ class _MainWindow:
             and self.active_mode == "Bulk Rename"
             and result.request_id == self._preview_request_id
             and result.expression == self.rename_format.get()
-            and service.is_current(result, snapshot, expression=self.rename_format.get())
+            and service.is_current_revision(
+                result,
+                collection_id=self.collection.collection_id,
+                revision=self.collection.revision,
+                expression=self.rename_format.get(),
+            )
         )
 
     def _poll_filename_preview(self) -> None:
@@ -1038,8 +1075,14 @@ class _MainWindow:
                     if self.active_mode == "Bulk Rename":
                         if self._preview_result_is_current(result):
                             self._start_preview_render(result)
-                    elif self._preview_service is not None and self._preview_service.is_current(
-                        result, self.collection.snapshot(), expression=self.rename_format.get()
+                    elif (
+                        self._preview_service is not None
+                        and self._preview_service.is_current_revision(
+                            result,
+                            collection_id=self.collection.collection_id,
+                            revision=self.collection.revision,
+                            expression=self.rename_format.get(),
+                        )
                     ):
                         self._preview_result = result
                         self._index_preview_diagnostics(result)
@@ -1049,6 +1092,7 @@ class _MainWindow:
         self._preview_after = self.root.after(20, self._poll_filename_preview)
 
     def _start_preview_render(self, result: FilenameEvaluationResult) -> None:
+        self._preview_clear_applied = None
         self._preview_render_result = result
         self._preview_render_offset = 0
         self._preview_render_generation = self._preview_generation
@@ -1100,13 +1144,21 @@ class _MainWindow:
         item_id = str(entry_id)
         if not self.tree.exists(item_id):
             return
-        row = self.tree.item(item_id)
-        values = list(row["values"])
-        values[_COLUMN_INDEX["new_filename"]] = filename
-        values[_COLUMN_INDEX["status"]] = status
-        tags = ("problem" if problem else "normal",)
-        if tuple(values) != tuple(row["values"]) or tuple(row["tags"]) != tags:
-            self.tree.item(item_id, values=tuple(values), tags=tags)
+        if filename:
+            self._preview_filename_ids.add(entry_id)
+        else:
+            self._preview_filename_ids.discard(entry_id)
+        if self.tree.set(item_id, "new_filename") != filename:
+            self.tree.set(item_id, "new_filename", filename)
+        if self.tree.set(item_id, "status") != status:
+            self.tree.set(item_id, "status", status)
+        was_problem = entry_id in self._preview_problem_ids
+        if problem != was_problem:
+            self.tree.item(item_id, tags=("problem" if problem else "normal",))
+        if problem:
+            self._preview_problem_ids.add(entry_id)
+        elif entry_id in self._preview_problem_ids:
+            self._preview_problem_ids.discard(entry_id)
 
     def _render_preview_chunk(self) -> None:
         self._preview_render_after = None
@@ -1142,7 +1194,11 @@ class _MainWindow:
                 self._preview_row_values(entry_id, "", "Invalid filename", problem=True)
             elif item.is_valid:
                 filename = item.validated_filename or ""
-                status = "Unchanged" if filename == item.entry.original_filename else "Ready"
+                status = (
+                    "Unchanged"
+                    if filename == item.entry.original_filename
+                    else "Valid preview"
+                )
                 self._preview_row_values(entry_id, filename, status, problem=False)
             else:
                 self._preview_row_values(entry_id, "", "Invalid format", problem=True)
@@ -1175,9 +1231,10 @@ class _MainWindow:
         if self._preview_render_after is not None:
             self._cancel_preview_after("_preview_render_after")
             if self._preview_render_result is not None and self._preview_service is not None:
-                if self._preview_service.is_current(
+                if self._preview_service.is_current_revision(
                     self._preview_render_result,
-                    self.collection.snapshot(),
+                    collection_id=self.collection.collection_id,
+                    revision=self.collection.revision,
                     expression=self.rename_format.get(),
                 ):
                     self._preview_result = self._preview_render_result
@@ -1196,10 +1253,10 @@ class _MainWindow:
             self._preview_result
         ):
             self._start_preview_render(self._preview_result)
-        elif self.rename_format.get() and self.collection.snapshot().entries:
+        elif self.rename_format.get() and self._entries_by_id:
             if self._preview_future is None:
                 self._invalidate_filename_preview(schedule=True)
-        elif not self.collection.snapshot().entries:
+        elif not self._entries_by_id:
             self._set_format_diagnostic(None)
         else:
             self.format_diagnostic.configure(text="A rename format is required.")
@@ -1294,12 +1351,16 @@ class _MainWindow:
         entries = snapshot.entries
         self._entries_by_id.clear()
         self._display_order.clear()
+        self._display_positions.clear()
+        self._preview_filename_ids.clear()
+        self._preview_problem_ids.clear()
         self._known_size_bytes = 0
         self._unknown_size_count = 0
         for index, entry in enumerate(entries, start=1):
             item_id = str(entry.entry_id)
             self._entries_by_id[entry.entry_id] = entry
             self._display_order.append(entry.entry_id)
+            self._display_positions[entry.entry_id] = index - 1
             self._account_size(entry, 1)
             self.tree.insert(
                 "",
@@ -1308,6 +1369,7 @@ class _MainWindow:
                 values=self._entry_values(index, entry),
                 tags=("normal",),
             )
+        self._preview_clear_applied = ("Imported", True)
         surviving = [str(entry.entry_id) for entry in entries if str(entry.entry_id) in selected]
         if surviving:
             self.tree.selection_set(surviving)
@@ -1372,12 +1434,23 @@ class _MainWindow:
         )
         self._update_control_states()
 
+    def _set_display_order(self, order: tuple[UUID, ...] | list[UUID]) -> None:
+        self._display_order = list(order)
+        self._display_positions = {
+            entry_id: position for position, entry_id in enumerate(self._display_order)
+        }
+
     def _selected_entry_ids(self) -> tuple[UUID, ...]:
         try:
             selected = {UUID(item) for item in self.tree.selection()}
         except ValueError:
             return ()
-        return tuple(entry_id for entry_id in self._display_order if entry_id in selected)
+        return tuple(
+            sorted(
+                (entry_id for entry_id in selected if entry_id in self._display_positions),
+                key=self._display_positions.__getitem__,
+            )
+        )
 
     def _update_control_states(self) -> None:
         if not hasattr(self, "controls"):
@@ -1404,13 +1477,16 @@ class _MainWindow:
 
         self.controls["add_files"].configure(state="normal")
         self.controls["add_folder"].configure(state="normal")
-        snapshot = self.collection.snapshot()
+        has_entries = bool(self._entries_by_id)
         selected = self._selected_entry_ids()
         selected_set = set(selected)
         self.controls["remove"].configure(
             state="normal" if selected else "disabled"
         )
-        clearable = bool(snapshot.entries or snapshot.import_sessions or snapshot.folder_roots)
+        clearable = has_entries
+        if not clearable:
+            snapshot = self.collection.snapshot()
+            clearable = bool(snapshot.import_sessions or snapshot.folder_roots)
         self.controls["clear_all"].configure(
             state="normal" if clearable else "disabled"
         )
@@ -1419,14 +1495,11 @@ class _MainWindow:
         self.refresh_preview_button.configure(
             state=(
                 "normal"
-                if snapshot.entries and self.rename_format.get()
+                if has_entries and self.rename_format.get()
                 else "disabled"
             )
         )
-        positions_by_id = {
-            entry_id: position for position, entry_id in enumerate(self._display_order)
-        }
-        positions = [positions_by_id[entry_id] for entry_id in selected]
+        positions = [self._display_positions[entry_id] for entry_id in selected]
         can_move = bool(positions)
         movement = {
             "move_top": can_move and min(positions) > 0 if positions else False,
@@ -1449,8 +1522,7 @@ class _MainWindow:
             button.configure(state="normal" if movement[key] else "disabled")
 
     def _notify_collection_changed(self) -> None:
-        revision = self.collection.snapshot().revision
-        self.root.collection_revision = revision  # type: ignore[attr-defined]
+        self.root.collection_revision = self.collection.revision  # type: ignore[attr-defined]
         self.root.event_generate("<<TidyFilesCollectionChanged>>", when="tail")
 
     def _account_size(self, entry: CollectionEntry, direction: int) -> None:
@@ -1592,7 +1664,17 @@ class _MainWindow:
         self._collection_render_selection = selection
         self._collection_render_offset = 0
         self._collection_render_notify = notify
-        self._display_order = list(order)
+        previous_positions = self._display_positions
+        first_changed = 0
+        common_limit = min(len(self._display_order), len(order))
+        while (
+            first_changed < common_limit
+            and self._display_order[first_changed] == order[first_changed]
+        ):
+            first_changed += 1
+        self._collection_render_previous_positions = previous_positions
+        self._set_display_order(order)
+        self._collection_render_offset = first_changed
         try:
             self.tree.set_children("", *(str(entry_id) for entry_id in order))
         except Exception as error:
@@ -1622,8 +1704,8 @@ class _MainWindow:
         try:
             for index in range(start, end):
                 entry_id = order[index]
-                entry = self._entries_by_id[entry_id]
-                self.tree.item(str(entry_id), values=self._entry_values(index + 1, entry))
+                if self._collection_render_previous_positions.get(entry_id) != index:
+                    self.tree.set(str(entry_id), "row_number", str(index + 1))
         except Exception as error:
             self._collection_operation_pending = False
             try:
@@ -1647,8 +1729,10 @@ class _MainWindow:
             for entry_id in self._collection_render_selection
             if self.tree.exists(str(entry_id))
         ]
-        self.tree.selection_set(surviving)
+        if set(surviving) != set(self.tree.selection()):
+            self.tree.selection_set(surviving)
         notify = self._collection_render_notify
+        self._collection_render_previous_positions = {}
         self._collection_operation_pending = False
         self._update_summary()
         self._update_control_states()
@@ -1740,6 +1824,10 @@ class _MainWindow:
         self._known_size_bytes = 0
         self._unknown_size_count = 0
         self._last_import_report = None
+        self._display_positions.clear()
+        self._preview_filename_ids.clear()
+        self._preview_problem_ids.clear()
+        self._preview_clear_applied = ("Imported", True)
         self._update_import_warnings(())
         self._update_summary()
         self._update_control_states()
@@ -1871,6 +1959,7 @@ class _MainWindow:
             )
             self._entries_by_id[entry.entry_id] = entry
             self._display_order.append(entry.entry_id)
+            self._display_positions[entry.entry_id] = len(self._display_order) - 1
             self._account_size(entry, 1)
         self._update_summary()
 
@@ -1879,27 +1968,35 @@ class _MainWindow:
     ) -> None:
         if start == 0:
             self.tree.set_children("", *(str(entry_id) for entry_id in order))
-            self._display_order = list(order)
+            self._collection_render_previous_positions = self._display_positions
+            self._set_display_order(order)
         for position in range(start, end):
             entry_id = order[position]
             entry = self._entries_by_id.get(entry_id)
             if entry is None:
                 raise RuntimeError(f"Collection row is missing for entry {entry_id}")
             item_id = str(entry_id)
-            self.tree.item(
-                item_id,
-                values=self._entry_values(
-                    position + 1,
-                    entry,
-                    status="Imported" if finalized else "Scanning",
-                ),
-            )
+            if self._collection_render_previous_positions.get(entry_id) != position:
+                self.tree.set(item_id, "row_number", str(position + 1))
+            if entry_id in self._preview_filename_ids:
+                self.tree.set(item_id, "new_filename", "")
+                self._preview_filename_ids.discard(entry_id)
+            status = "Imported" if finalized else "Scanning"
+            if self.tree.set(item_id, "status") != status:
+                self.tree.set(item_id, "status", status)
+            if entry_id in self._preview_problem_ids:
+                self.tree.item(item_id, tags=("normal",))
+                self._preview_problem_ids.discard(entry_id)
+        if end == len(order):
+            self._collection_render_previous_positions = {}
 
     def _remove_rows_chunk(self, entry_ids: tuple[UUID, ...]) -> None:
         for entry_id in entry_ids:
             item_id = str(entry_id)
             if self.tree.exists(item_id):
                 self.tree.delete(item_id)
+            self._preview_filename_ids.discard(entry_id)
+            self._preview_problem_ids.discard(entry_id)
 
     def _complete_view_rollback(
         self,
@@ -1911,13 +2008,20 @@ class _MainWindow:
             if entry is not None:
                 self._account_size(entry, -1)
         self._display_order = list(previous_view[0])
+        self._display_positions = {
+            entry_id: position for position, entry_id in enumerate(self._display_order)
+        }
         selection = [
             str(entry_id)
             for entry_id in previous_view[1]
             if self.tree.exists(str(entry_id))
         ]
-        if selection:
-            self.tree.selection_set(selection)
+        current_selection = set(self.tree.selection())
+        if set(selection) != current_selection:
+            if selection:
+                self.tree.selection_set(selection)
+            elif current_selection:
+                self.tree.selection_remove(*current_selection)
         self._update_summary()
 
     def _on_import_finished(self, report: DiscoveryReport) -> None:

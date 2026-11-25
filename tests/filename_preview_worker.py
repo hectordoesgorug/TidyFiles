@@ -5,6 +5,7 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -128,6 +129,7 @@ def test_controls_live_results_invalidation_and_tab_state(runtime, tmp_path: Pat
     assert app.insert_token_button.cget("state") == "normal"
     assert app.format_reference_button.cget("state") == "normal"
     assert app.process_button.cget("state") == "disabled"
+    assert "Does not rescan" in app.refresh_preview_help.cget("text")
     assert app._preview_service._latest_request_id is None
 
     for _category, tokens in TOKEN_GROUPS:
@@ -188,15 +190,28 @@ def test_controls_live_results_invalidation_and_tab_state(runtime, tmp_path: Pat
         app._on_preset_selected(preset)
         _wait_preview(root, app)
         assert all(
-            app.tree.item(item_id, "values")[4] in {"Ready", "Unchanged"}
+            app.tree.item(item_id, "values")[4] in {"Valid preview", "Unchanged"}
             for item_id in app.tree.get_children("")
         )
     submitted.clear()
     first_id, first = _row(app, "One.txt")
     _second_id, second = _row(app, "Two.txt")
-    assert first[2] == "One 01.txt" and first[4] == "Ready"
-    assert second[2] == "Two 02.txt" and second[4] == "Ready"
+    assert first[2] == "One 01.txt" and first[4] == "Valid preview"
+    assert second[2] == "Two 02.txt" and second[4] == "Valid preview"
     assert app.tree.selection() == ()
+    assert app._preview_filename_ids == {UUID(first_id), UUID(_second_id)}
+    assert app._preview_problem_ids == set()
+
+    snapshot = app.collection.snapshot
+    app.collection.snapshot = lambda: (_ for _ in ()).throw(
+        AssertionError("preview currency must not copy the collection")
+    )
+    try:
+        assert app._preview_result is not None
+        assert app._preview_result_is_current(app._preview_result)
+        app._update_control_states()
+    finally:
+        app.collection.snapshot = snapshot
 
     app.tree.selection_set(first_id)
     root.update()
@@ -206,13 +221,26 @@ def test_controls_live_results_invalidation_and_tab_state(runtime, tmp_path: Pat
 
     app.tree.column("new_filename", width=317)
     entry.delete(0, "end")
+    root.update()
+    get_children = app.tree.get_children
+    clear_scans = []
+
+    def count_get_children(*args, **kwargs):
+        clear_scans.append(1)
+        return get_children(*args, **kwargs)
+
+    app.tree.get_children = count_get_children
     for character in "<Name>_<IncNr>":
         entry.insert("end", character)
         root.update()
+    app.tree.get_children = get_children
+    assert len(clear_scans) == 1
     assert all(
         app.tree.item(item_id, "values")[2] == ""
         for item_id in app.tree.get_children("")
     )
+    assert app._preview_filename_ids == set()
+    assert app._preview_problem_ids == set()
     _wait_preview(root, app)
     assert app.tree.selection() == (first_id,)
     assert int(app.tree.column("new_filename", "width")) == 317
@@ -270,7 +298,7 @@ def test_parse_file_and_validation_errors_recover(runtime, tmp_path: Path) -> No
     _wait_preview(root, app, errors=True)
     ocean_id, ocean = _row(app, "The Blue Ocean.txt")
     mountain_id, mountain = _row(app, "Mountain.txt")
-    assert ocean[2] == "Ocean.txt" and ocean[4] == "Ready"
+    assert ocean[2] == "Ocean.txt" and ocean[4] == "Valid preview"
     assert mountain[2] == "" and mountain[4] == "Invalid format"
     assert app.tree.item(ocean_id, "tags") == ("normal",)
     assert app.tree.item(mountain_id, "tags") == ("problem",)
@@ -368,6 +396,16 @@ def test_collection_order_metadata_refresh_and_source_safety(runtime, tmp_path: 
     app.refresh_filename_preview()
     _wait_preview(root, app)
     assert _row(app, "file1.txt")[1][2] == "6_file1.txt"
+    assert app._preview_result is not None
+    assert app._preview_result.directory_enumerations == 1
+
+    imported_after_cache = source / "imported_after_cache.txt"
+    imported_after_cache.write_text("new count", encoding="utf-8")
+    contents[imported_after_cache] = imported_after_cache.read_bytes()
+    app.import_controller.start_files((str(imported_after_cache),))
+    _wait_import(root, app)
+    _wait_preview(root, app)
+    assert _row(app, "imported_after_cache.txt")[1][2] == "7_imported_after_cache.txt"
     assert app._preview_result is not None
     assert app._preview_result.directory_enumerations == 1
 

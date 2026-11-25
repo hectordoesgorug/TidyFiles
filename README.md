@@ -31,6 +31,12 @@ change its position, or remove it from the list. Common executable and script
 filename extensions are disabled in Open File; opening other files uses their
 Windows association and remains an explicit user action.
 
+Bulk Rename labels individually valid filename results **Valid preview**; it
+does not check destination collisions, source identity or execution readiness.
+Refresh Preview recalculates names for the existing collection and refreshes
+required directory counts without rescanning folders or changing collection
+membership.
+
 ## Run locally
 
 Use Python 3.13 x64 on Windows 11:
