@@ -66,6 +66,8 @@ not implemented.
 | `src/tidyfiles/modifying_jobs.py` | Exclusive job reservation and preparation, modification, cancellation, and closure state. |
 | `src/tidyfiles/rename_executor.py` | Authorized scope binding, sequential dependency execution, journal checkpoints, and verified results. |
 | `src/tidyfiles/windows_rename.py` | Handle-relative, non-overwriting Windows rename and creation-time preservation. |
+| `src/tidyfiles/managed_trash.py` | Explicit Trash scope, centralized batch naming, transfer sequencing, and verified results. |
+| `src/tidyfiles/windows_trash.py` | Handle-relative batch creation, exclusive cross-volume copy, metadata and content checks, and guarded source removal. |
 | `src/tidyfiles/filesystem_paths.py` | Shared Windows system path and clutter-name exclusions. |
 
 The GUI imports selected files and recursively selected folders by reading
@@ -88,10 +90,10 @@ results in the collection. It reports progress counters without a percentage,
 and does not materialize a folder's candidate paths before traversal. Discovery
 excludes the three named clutter files case-insensitively, `$RECYCLE.BIN`,
 `System Volume Information`, nonregular entries, and observed reparse points.
-Other app-managed locations are supplied by their actual paths through the
-`managed_paths` argument; no such Trash, staging, or recovery paths are
-currently defined by storage configuration. Ordinary hidden and dot-prefixed
-files remain eligible. Metadata includes size, timestamps, attributes, and
+Discovery and native planning exclude the application directory's managed
+Trash. Callers supply additional managed locations through the
+`managed_paths` argument. Ordinary hidden and dot-prefixed files remain
+eligible. Metadata includes size, timestamps, attributes, and
 filesystem identity when available; Windows directory-entry identity is
 re-read without following links when the initial entry data lacks a file ID.
 Coverage errors produce an incomplete import while retaining discovered
@@ -513,6 +515,36 @@ The standalone service returns results without changing the working collection.
 It reports correlated progress without calling Tk. M3-G supplies confirmation,
 GUI scheduling, and completion updates. M3-F consumes retained journal
 evidence for startup notification, overlap protection, and staging inspection.
+
+## Standalone managed Trash
+
+`TrashExecutor` accepts an explicitly authorized `TrashScope` containing
+ordered entry IDs, exact source paths, and current Windows observations.
+Callers determine eligibility. The service rechecks sources, reserves the
+shared job slot, prepares the batch and its destinations, and persists a
+registered `OperationType.TRASH` journal before touching any source.
+
+The application directory contains the sole Trash root. It uses the
+executable directory when frozen and the checkout root in development.
+Each batch uses a UTC timestamp and unique identifier. Allocation preserves
+original basenames when available and generates names for collisions or
+path-length limits. Native creation and rename reject occupied destinations.
+
+Same-volume transfers reuse the bound Windows rename. Cross-volume
+transfers copy through guarded handles and compare the streams byte for
+byte in bounded chunks. The journal records the verified destination
+identity and SHA-256 before handle-bound source removal. It records the
+verified result afterward. Copy evidence uses an operation-specific
+extension to the version 1 record. Rename evidence continues to require
+the original object identity.
+
+The service stops at the first failure and returns per-entry paths,
+outcomes, and the transaction ID. Journals retire only after verification
+of the complete scope. M3-F must account for retained Trash copies and
+unknown partials during recovery and cleanup. M3-G handles background
+invocation and collection updates. M4 supplies duplicate and Purge
+eligibility and authorization. The desktop processing controls remain
+disabled.
 
 ## Tests and CI
 

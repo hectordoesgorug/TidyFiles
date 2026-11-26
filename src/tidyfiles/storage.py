@@ -7,6 +7,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -49,6 +50,12 @@ def application_directory(
         ).is_dir():
             return parent
     return None
+
+
+@lru_cache(maxsize=1)
+def managed_trash_path() -> Path | None:
+    directory = application_directory()
+    return directory / "trash" if directory is not None else None
 
 
 def _probe_writable(directory: Path) -> bool:

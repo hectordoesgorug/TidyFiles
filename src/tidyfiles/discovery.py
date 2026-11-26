@@ -25,6 +25,7 @@ from tidyfiles.collection import (
     normalize_windows_path,
 )
 from tidyfiles.filesystem_paths import CLUTTER_FILENAMES, is_protected_system_path
+from tidyfiles.storage import managed_trash_path
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _WAKE = object()
@@ -95,7 +96,7 @@ class _Record:
 
 
 class FilesystemDiscovery:
-    """Creates one bounded import task at a time; managed paths are explicit."""
+    """Creates one bounded import task at a time and excludes managed locations."""
 
     def __init__(
         self,
@@ -108,9 +109,10 @@ class FilesystemDiscovery:
         if queue_capacity < 1 or batch_size < 1:
             raise ValueError("queue_capacity and batch_size must be positive")
         self.collection = collection
+        trash = managed_trash_path()
         self.managed_paths = tuple(
             normalize_windows_path(os.path.abspath(os.fspath(path)))
-            for path in managed_paths
+            for path in (*managed_paths, *((trash,) if trash is not None else ()))
         )
         self.queue_capacity = queue_capacity
         self.batch_size = batch_size

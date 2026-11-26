@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from tidyfiles.execution_preflight import PreflightResult
 
 SCHEMA_VERSION = 1
+TRASH_COPY_BEFORE_REMOVE = "before_source_removal"
+TRASH_COPY_REMOVED = "trashed_copy"
 
 
 class OperationType(StrEnum):
@@ -49,6 +51,7 @@ class EntryOutcome(StrEnum):
 class VerifiedOutcome(StrEnum):
     DESTINATION = "destination_verified"
     ORIGINAL = "original_verified_safe"
+    TRASH_COPY = "trash_copy_verified"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +61,7 @@ class EntryVerification:
     path: str
     observation: PathObservation
     resolved_artifact_paths: tuple[str, ...] = ()
+    content_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,17 +275,23 @@ def _observation(value: object) -> PathObservation:
 def _verification_json(verification: EntryVerification | None) -> dict | None:
     if verification is None:
         return None
-    return {
+    data = {
         "entry_id": str(verification.entry_id),
         "outcome": verification.outcome.value,
         "path": verification.path,
         "observation": _observation_json(verification.observation),
         "resolved_artifact_paths": list(verification.resolved_artifact_paths),
     }
+    if verification.content_sha256 is not None:
+        data["content_sha256"] = verification.content_sha256
+    return data
 
 
 def _verification(value: object) -> EntryVerification:
-    data = _fields(value, "entry_id", "outcome", "path", "observation", "resolved_artifact_paths")
+    keys = ("entry_id", "outcome", "path", "observation", "resolved_artifact_paths")
+    if isinstance(value, dict) and "content_sha256" in value:
+        keys += ("content_sha256",)
+    data = _fields(value, *keys)
     paths = data["resolved_artifact_paths"]
     if not isinstance(paths, list):
         raise ValueError("Expected a list of resolved artifact paths")
@@ -291,6 +301,7 @@ def _verification(value: object) -> EntryVerification:
         _path(data["path"]),
         _observation(data["observation"]),
         tuple(_path(path) for path in paths),
+        _text(data["content_sha256"]) if "content_sha256" in data else None,
     )
 
 
@@ -407,15 +418,26 @@ def _record_from_entries(data: dict, entries: tuple[TransactionEntry, ...]) -> T
             and record.state is not TransactionState.RECOVERY_REQUIRED
         ):
             raise ValueError("Entry recovery requirement must also block the transaction")
-        if (entry.verification is not None) != terminal:
+        copying = (
+            record.operation is OperationType.TRASH
+            and record.state in (TransactionState.IN_PROGRESS, TransactionState.RECOVERY_REQUIRED)
+            and entry.stage in (TRASH_COPY_BEFORE_REMOVE, TRASH_COPY_REMOVED)
+        )
+        if (entry.verification is not None) != (terminal or copying):
             raise ValueError("Finalization evidence does not match transaction state")
         if entry.verification is not None:
             validate_verification(entry, entry.verification, record.operation)
             expected = (
-                EntryOutcome.FAILED
-                if entry.verification.outcome is VerifiedOutcome.ORIGINAL
-                else EntryOutcome.SUCCEEDED
+                EntryOutcome.PENDING
+                if copying and entry.stage == TRASH_COPY_BEFORE_REMOVE
+                else (
+                    EntryOutcome.FAILED
+                    if entry.verification.outcome is VerifiedOutcome.ORIGINAL
+                    else EntryOutcome.SUCCEEDED
+                )
             )
+            if copying and entry.verification.outcome is not VerifiedOutcome.TRASH_COPY:
+                raise ValueError("The Trash copy checkpoint requires verified copy evidence")
             if entry.outcome is not expected:
                 raise ValueError("Entry outcome contradicts its verification")
     if terminal and (
@@ -490,9 +512,13 @@ def validate_verification(
         raise ValueError("Verification must cover the intended entry and all recorded artifacts")
     baseline = entry.source_observation if original else entry.destination_observation
     expected_name = ntpath.basename(expected)
-    if original or entry.source_path == entry.destination_path or (
-        entry.destination_observation == entry.source_observation
-        and ntpath.basename(entry.source_path) == ntpath.basename(entry.destination_path)
+    if (
+        original
+        or entry.source_path == entry.destination_path
+        or (
+            entry.destination_observation == entry.source_observation
+            and ntpath.basename(entry.source_path) == ntpath.basename(entry.destination_path)
+        )
     ):
         expected_name = entry.source_observation.actual_name
     if observed.actual_name != expected_name or (
@@ -504,11 +530,27 @@ def validate_verification(
         )
     ):
         raise ValueError("Verified directory entry does not match the intended location")
-    if original or operation is OperationType.RENAME:
+    cross_copy = evidence.outcome is VerifiedOutcome.TRASH_COPY
+    if cross_copy:
+        if (
+            operation is not OperationType.TRASH
+            or baseline is None
+            or observed.volume_guid == entry.source_observation.volume_guid
+            or not re.fullmatch(r"[0-9a-f]{64}", evidence.content_sha256 or "")
+        ):
+            raise ValueError("Expected verified cross-volume Trash content evidence")
+    elif evidence.content_sha256 is not None:
+        raise ValueError("Content evidence is only valid for a cross-volume Trash copy")
+    elif (
+        operation is OperationType.TRASH
+        and observed.volume_guid != entry.source_observation.volume_guid
+    ):
+        raise ValueError("Same-volume Trash verification requires the original volume")
+    if original or operation in (OperationType.RENAME, OperationType.TRASH):
         source, verified = entry.source_observation.object_metadata, observed.object_metadata
         assert source is not None and verified is not None
         if (
-            source.identity != verified.identity
+            (not cross_copy and source.identity != verified.identity)
             or source.size_bytes != verified.size_bytes
             or source.modified_time_ns != verified.modified_time_ns
             or source.created_time_ns != verified.created_time_ns

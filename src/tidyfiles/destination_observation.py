@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from tidyfiles.collection import FileSystemIdentitySnapshot, normalize_windows_path
+from tidyfiles.storage import managed_trash_path
 
 # shortcut: ordinary Win32 paths only, extend when preflight can verify long-path support.
 _MAX_WIN32_PATH = 259
@@ -129,10 +130,15 @@ class WindowsPathObserver:
     """One plan's literal path probes with call-local ancestor and volume observations."""
 
     def __init__(
-        self, managed_paths: tuple[str, ...] = (), *, capture_identity: bool = False
+        self,
+        managed_paths: tuple[str, ...] = (),
+        *,
+        capture_identity: bool = False,
+        allow_managed_trash: bool = False,
     ) -> None:
         self._capture_identity = capture_identity
-        self._managed_paths = managed_paths
+        trash = None if allow_managed_trash else managed_trash_path()
+        self._managed_paths = (*managed_paths, str(trash)) if trash is not None else managed_paths
         self._managed_keys: tuple[tuple[str, str], ...] | None = None
         self._volumes: dict[str, _Volume | PathObservation] = {}
         self._parents: dict[str, str | PathObservation] = {}

@@ -27,8 +27,9 @@ M2-E5 improves large-table updates, clarifies preview status and refresh
 behavior, and adds lifecycle regression coverage. M2 is complete. M3-A adds a
 standalone read-only destination planner. M3-B adds read-only preflight for
 reviewed plans. M3-C adds journals, recovery discovery, and exclusive job
-coordination. M3-D adds a standalone Windows rename executor. Desktop
-processing controls remain disabled.
+coordination. M3-D adds a standalone Windows rename executor, and M3-E adds
+standalone managed Trash transfers. Desktop processing controls remain
+disabled.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -44,11 +45,12 @@ processing controls remain disabled.
 | M2-E3 | Complete | Shared sorting controls and preference persistence, manual ordering and drag-and-drop, selection shortcuts, row context actions, non-destructive removal and clearing, and collection-change notifications. |
 | M2-E4 | Complete | Session-only live filename-format controls, token insertion and reference, background ordered previews, structured diagnostics, metadata refresh, and stale-result protection. |
 | M2-E5 | Complete | Targeted large-table optimization, preview guidance, and lifecycle coverage. Owner manual acceptance passed 21/21. |
-| M3 | In progress | Destination planning, preflight, journals, and standalone rename execution are implemented. Desktop processing, Trash, and startup recovery workflows remain planned. |
+| M3 | In progress | Destination planning, preflight, journals, standalone rename execution, and managed Trash transfers are implemented. Desktop processing and startup recovery workflows remain planned. |
 | M3-A | Complete | Standalone destination planning, collision and dependency classification, and read-only collision-only subset replanning. |
 | M3-B | Complete | Review-time identity capture and cancellable read-only execution preflight. |
 | M3-C | Complete | Durable journals, persistent recovery locator, recovery discovery, and modifying-job coordination. |
 | M3-D | Complete | Standalone, journaled, handle-relative rename and same-volume Single Folder execution. |
+| M3-E | Implemented | Standalone recoverable deletion, guarded cross-volume copying, and managed Trash discovery exclusions. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
@@ -683,9 +685,9 @@ restores the original creation time if NTFS name tunneling changes it.
 
 The executor covers the rename-specific parts of DD-009, DD-037 through
 DD-038, DD-040 through DD-043, DD-063, DD-065, DD-074 through DD-076, and
-DD-086. Repacker execution belongs to M3-E, recovery workflows and overlap
-protection to M3-F, and confirmation, activation and collection updates to
-M3-G. See [Architecture](ARCHITECTURE.md#standalone-rename-execution) and
+DD-086. Repacker execution remains planned. Recovery workflows and overlap
+protection belong to M3-F, and confirmation, activation and collection
+updates to M3-G. See [Architecture](ARCHITECTURE.md#standalone-rename-execution) and
 [File Safety](FILE_SAFETY.md#rename-execution-safety).
 
 Native Windows fixtures verified independent roots on two physical volumes.
@@ -746,6 +748,39 @@ journal and executor tests passed all 78 cases. The full suite passed 568
 tests with zero failures and skips. Ruff, compileall, and both Git whitespace
 checks passed. The timing results cover independent local renames and do not
 measure power-loss behavior or other storage layouts.
+
+The M3-D2 commit `040b7b4fb8e454051713ac6bc104690a2f5dc580` was pushed to
+`main`. [Windows CI run #31](https://github.com/hectordoesgorug/TidyFiles/actions/runs/45722683231)
+passed for that commit.
+
+## M3-E — Managed Trash
+
+The standalone Trash service accepts an explicitly authorized set of
+sources with current Windows identity evidence. It allocates unique
+timestamped batches under the sole portable Trash root and preserves
+original basenames when possible. Discovery and native processing exclude
+that managed path.
+
+Same-volume transfers preserve the original object through guarded native
+rename. Cross-volume transfers check capacity, exclusively create and
+synchronize the copy, then verify contents and required metadata. A
+registered `TRASH` journal records the copy identity and digest before
+handle-bound source removal. The first failure stops the batch. Recovery
+discovery preserves unresolved copy evidence, and terminal journals retire
+only after the complete scope is verified.
+
+This implements the transfer portions of DD-004, DD-005, DD-013, DD-014,
+DD-037–038, DD-041–043, DD-074, and DD-086. Explorer provides manual
+retrieval. Startup recovery and Trash cleanup, desktop activation, and
+duplicate and Purge eligibility remain separate work.
+
+Local Windows verification used Python 3.13.17 and two distinct NTFS
+volumes for native cross-volume tests. The 24 Trash cases and the combined
+135-case Trash, journal, rename, and discovery run passed. The full suite
+passed 592 tests with zero failures and skips. Ruff, compileall, and both
+Git whitespace checks passed. Fault injection covered space, copy, source
+removal, and journal publication failures. Physical power-loss behavior
+and other filesystem types remain unverified.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 

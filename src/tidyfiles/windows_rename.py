@@ -100,7 +100,13 @@ def _native_calls():
 
 
 def _open_relative(
-    parent: int, name: str, access: int, share: int, *, directory: bool = False
+    parent: int,
+    name: str,
+    access: int,
+    share: int,
+    *,
+    directory: bool = False,
+    create: bool = False,
 ) -> tuple[int | None, int]:
     open_file, _, _ = _native_calls()
     contents = ctypes.create_unicode_buffer(name)
@@ -123,7 +129,7 @@ def _open_relative(
         None,
         0,
         share,
-        1,  # SYNCHRONIZE | FILE_OPEN
+        2 if create else 1,  # FILE_CREATE | FILE_OPEN
         0x20 | (0x01 if directory else 0x40),
         None,
         0,
@@ -232,14 +238,7 @@ class BoundRename:
         self._expected = expected_source
 
     def check(self) -> None:
-        expected = self._expected
-        assert expected.actual_parent is not None and expected.actual_name is not None
-        if _handle_metadata(
-            self._observer, self._source
-        ) != expected.object_metadata or _handle_name(self._observer, self._source) != ntpath.join(
-            expected.actual_parent, expected.actual_name
-        ):
-            raise OSError("The open source no longer matches the verified entry")
+        _check_open_source(self._observer, self._source, self._expected)
         occupant, status = _open_relative(self._target, self._name, _FILE_READ_ATTRIBUTES, 0x07)
         if occupant is not None:
             self._observer._close(occupant)
@@ -297,6 +296,16 @@ class BoundRename:
         )
         if status != 0:
             _raise_status(status)
+
+
+def _check_open_source(
+    observer: WindowsPathObserver, handle: int, expected: PathObservation
+) -> None:
+    assert expected.actual_parent is not None and expected.actual_name is not None
+    if _handle_metadata(observer, handle) != expected.object_metadata or _handle_name(
+        observer, handle
+    ) != ntpath.join(expected.actual_parent, expected.actual_name):
+        raise OSError("The open source no longer matches the verified entry")
 
 
 @contextmanager

@@ -19,8 +19,10 @@ from uuid import UUID
 from tidyfiles.collection import normalize_windows_path
 from tidyfiles.storage import application_directory
 from tidyfiles.transaction_record import (
+    TRASH_COPY_REMOVED,
     EntryOutcome,
     EntryVerification,
+    OperationType,
     TransactionEntry,
     TransactionRecord,
     TransactionState,
@@ -486,6 +488,7 @@ class JournalSession:
                     or row.destination_observation != old.destination_observation
                     or (old.staging_path is not None and row.staging_path != old.staging_path)
                     or (old.temporary_path is not None and row.temporary_path != old.temporary_path)
+                    or (old.verification is not None and row.verification != old.verification)
                 ):
                     raise ValueError("Checkpoint changes the scope or discards a recorded artifact")
                 rows.append(row)
@@ -526,6 +529,10 @@ class JournalSession:
             original_verified = False
             for row, item in zip(self._record.entries, evidence, strict=True):
                 validate_verification(row, item, self._record.operation)
+                if self._record.operation is OperationType.TRASH and (
+                    row.verification is not None or item.outcome is VerifiedOutcome.TRASH_COPY
+                ) and (row.stage != TRASH_COPY_REMOVED or row.verification != item):
+                    raise ValueError("Trash finalization requires the completed copy checkpoint")
                 original = item.outcome is VerifiedOutcome.ORIGINAL
                 original_verified |= original
                 rows.append(

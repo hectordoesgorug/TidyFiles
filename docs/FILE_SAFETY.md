@@ -39,9 +39,9 @@ operation.
   and `desktop.ini` case-insensitively, `$RECYCLE.BIN`, `System Volume
   Information`, nonregular entries, and observed symlinks, junctions, and other
   reparse points. The three clutter files and protected directories are not
-  deleted. Ordinary hidden and dot-prefixed files remain eligible. Actual
-  application-managed Trash, staging, and recovery paths must be supplied to
-  the discovery service explicitly; storage currently defines no such paths.
+  deleted. Ordinary hidden and dot-prefixed files remain eligible. Discovery
+  excludes the application's actual managed Trash path. Other managed
+  paths, including staging and recovery locations, are supplied by callers.
   The GUI displays accepted rows progressively and reports discovery progress,
   intentional exclusions, and errors separately. Discovery reads metadata but
   not file contents, and retains incomplete-scan diagnostics with successfully
@@ -243,6 +243,40 @@ verification. Permission and sharing failures block a move when it cannot
 be safely established. A power loss can occur between the move and its
 after-move record.
 
+## Managed Trash transfers
+
+Recoverable deletion uses `trash/` beside the executable or at the
+development checkout root. Every operation creates a unique timestamped
+batch. The service reserves the shared modifying-job slot and checks the
+authorized source paths, Trash destinations, and available space for copies.
+An unavailable or unsuitable Trash location blocks the operation. Ordinary
+user directories named `trash` remain eligible for discovery.
+
+Same-volume transfers preserve the original object through the existing
+guarded, non-replacing rename. Cross-volume transfers use exclusively
+created files. They preserve creation and last-write times, supported
+Windows attributes, ownership, group, and discretionary access rules, and
+verify that the integrity label matches. Unsupported attributes, alternate
+data streams, extended attributes, or unverifiable metadata block the copy
+or source removal. Access times and privileged audit rules are outside
+cross-volume fidelity checks.
+
+The cross-volume copy is synchronized and then compared byte for byte with
+the locked source in bounded chunks. Before removing the source, the
+service records the verified destination identity, digest, and intended
+source removal in the transaction journal. A fresh path and handle check
+precedes Windows handle-bound removal of the selected directory entry.
+Cross-volume transfers are non-atomic. [File streams](https://learn.microsoft.com/en-us/windows/win32/fileio/file-streams)
+[File disposition](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex)
+
+The first failure stops the batch. Completed Trash files and untouched
+originals are preserved. An incomplete or unverified copy may remain at
+its recorded destination. If source removal or a later checkpoint fails,
+the surviving copy and journal remain available for inspection. Empty
+batch directories may remain after preparation failures. Verified terminal
+journals retire without removing completed Trash files. Users can retrieve
+them in Explorer.
+
 ## Planned safety components
 
 The following are not implemented:
@@ -252,8 +286,7 @@ The following are not implemented:
 - Startup recovery notification, staging inspection and overlap enforcement.
 - Safe original retention and verified installation during repacking.
 - Duplicate verification before any deletion action.
-- Central application Trash, Trash capacity/error handling, and explicit cleanup
-  behavior.
+- Verified manual and automatic cleanup of managed Trash.
 - Operator inspection and recovery of interrupted transactions.
 
 Future filesystem work must independently validate a complete destination plan,
