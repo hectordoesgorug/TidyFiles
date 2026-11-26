@@ -9,9 +9,13 @@ import pytest
 from tidyfiles.config import (
     ConfigError,
     default_config,
+    get_auto_clean_enabled,
+    get_auto_clear_trash_on_exit,
     get_sorting_preferences,
     load_config,
     save_config,
+    set_auto_clean_enabled,
+    set_auto_clear_trash_on_exit,
     set_sorting_preferences,
 )
 from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
@@ -26,6 +30,36 @@ def test_missing_file_returns_defaults_with_cleanup_disabled(tmp_path: Path) -> 
     assert config["global_settings"]["sort_criterion"] == "file_type_name"
     assert config["global_settings"]["sort_direction"] == "ascending"
     assert get_sorting_preferences(config) == SortPreferences()
+    assert get_auto_clean_enabled(config) is False
+    assert get_auto_clear_trash_on_exit(config) is False
+
+
+def test_cleanup_settings_round_trip_independently(tmp_path: Path) -> None:
+    config = default_config()
+    set_auto_clean_enabled(config, True)
+    set_auto_clear_trash_on_exit(config, False)
+
+    path = tmp_path / "config.json"
+    save_config(path, config)
+    loaded = load_config(path)
+
+    assert get_auto_clean_enabled(loaded) is True
+    assert get_auto_clear_trash_on_exit(loaded) is False
+    set_auto_clean_enabled(loaded, False)
+    set_auto_clear_trash_on_exit(loaded, True)
+    assert get_auto_clean_enabled(loaded) is False
+    assert get_auto_clear_trash_on_exit(loaded) is True
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", []])
+def test_cleanup_settings_reject_non_booleans(value) -> None:
+    config = default_config()
+    config["global_settings"]["auto_clean"] = value
+    with pytest.raises(ConfigError, match="Cleanup settings must be booleans"):
+        save_config(Path("unused.json"), config)
+
+    with pytest.raises(TypeError, match="enabled must be a boolean"):
+        set_auto_clear_trash_on_exit(default_config(), value)
 
 
 @pytest.mark.parametrize(

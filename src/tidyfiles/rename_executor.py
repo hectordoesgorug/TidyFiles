@@ -30,6 +30,7 @@ from tidyfiles.destination_planning import (
 from tidyfiles.execution_preflight import PreflightResult, PreflightState
 from tidyfiles.filename_integration import EvaluationState
 from tidyfiles.modifying_jobs import ModifyingJobCoordinator
+from tidyfiles.recovery import RecoveryGuard
 from tidyfiles.transaction_journal import JournalSession, JournalStore
 from tidyfiles.transaction_record import (
     EntryOutcome,
@@ -235,6 +236,7 @@ class RenameExecutor:
             run.revalidate(lambda: self._cancelled(job.job_id))
             if self._cancelled(job.job_id):
                 return RenameResult(RenameState.CANCELLED, None, not_processed)
+            self._check_recovery_scope(plan)
             if current_preflight() is not preflight:
                 return RenameResult(
                     RenameState.REJECTED, None, not_processed, "Preflight superseded"
@@ -251,6 +253,7 @@ class RenameExecutor:
                     "Preflight superseded",
                 )
             self.coordinator.begin_modification(job.job_id, journal)
+            self._check_recovery_scope(plan, ignore_transaction_id=journal.record.transaction_id)
             return run.execute(journal, lambda: current_preflight() is preflight)
         except Exception as error:
             identifier = journal.record.transaction_id if journal is not None else None
@@ -267,6 +270,23 @@ class RenameExecutor:
             if journal is not None and journal.can_modify:
                 _retain(journal, "Rename stopped before verification")
             self.coordinator.finish(job.job_id)
+
+    def _check_recovery_scope(self, plan: DestinationPlan, *, ignore_transaction_id=None) -> None:
+        paths = tuple(
+            path
+            for row in plan.entries
+            for path in (row.source_path, row.destination_path)
+            if path is not None
+        )
+        observations = tuple(
+            observation
+            for row in plan.entries
+            for observation in (row.source_observation, row.destination_observation)
+            if observation is not None
+        )
+        RecoveryGuard(self.journals).check(
+            paths, observations, ignore_transaction_id=ignore_transaction_id
+        )
 
     def _cancelled(self, job_id: UUID) -> bool:
         current = self.coordinator.current

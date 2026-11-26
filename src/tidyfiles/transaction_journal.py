@@ -14,9 +14,11 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from threading import RLock
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from tidyfiles.collection import normalize_windows_path
+from tidyfiles.destination_observation import PathOccupancy, WindowsPathObserver
 from tidyfiles.storage import application_directory
 from tidyfiles.transaction_record import (
     TRASH_COPY_REMOVED,
@@ -37,6 +39,9 @@ _LOCK = RLock()
 _INDEX_VERSION = 1
 _TERMINAL = {TransactionState.FINALIZED, TransactionState.FAILED_SAFE}
 _REPARSE = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+if TYPE_CHECKING:
+    from tidyfiles.recovery import RecoveryInspection
 
 
 class JournalError(OSError):
@@ -382,6 +387,12 @@ class JournalStore:
                 transactions, tuple(sorted(issues, key=lambda item: item.path))
             )
 
+    def inspect_recovery(self) -> RecoveryInspection:
+        """Report recorded recovery expectations alongside current path observations."""
+        from tidyfiles.recovery import RecoveryInspector
+
+        return RecoveryInspector(self).inspect()
+
 
 def _inspect_record(path: Path, identifier: UUID) -> RecoveryLocation:
     try:
@@ -527,8 +538,14 @@ class JournalSession:
                 raise ValueError("Verification must cover the complete ordered transaction scope")
             rows = []
             original_verified = False
+            observer = WindowsPathObserver(self._store.managed_paths, capture_identity=True)
             for row, item in zip(self._record.entries, evidence, strict=True):
                 validate_verification(row, item, self._record.operation)
+                if any(
+                    observer(path).occupancy is not PathOccupancy.VACANT
+                    for path in item.resolved_artifact_paths
+                ):
+                    raise ValueError("Temporary artifacts must be absent before finalization")
                 if self._record.operation is OperationType.TRASH and (
                     row.verification is not None or item.outcome is VerifiedOutcome.TRASH_COPY
                 ) and (row.stage != TRASH_COPY_REMOVED or row.verification != item):

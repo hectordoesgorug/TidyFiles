@@ -39,6 +39,7 @@ _ERROR_FILE_NOT_FOUND = 2
 class PathOccupancy(StrEnum):
     VACANT = "vacant"
     FILE = "file"
+    DIRECTORY = "directory"
     UNSAFE = "unsafe"
     UNVERIFIABLE = "unverifiable"
 
@@ -236,6 +237,59 @@ class WindowsPathObserver:
             volume.key,
             read_only_volume=bool(volume.flags & _FILE_READ_ONLY_VOLUME),
             preserves_case=bool(volume.flags & _FILE_CASE_PRESERVED_NAMES),
+            actual_parent=parent,
+            volume_guid=volume.guid,
+            parent_identity=parent_identity,
+            object_metadata=metadata,
+        )
+
+    def observe_directory(self, path: str) -> PathObservation:
+        """Capture a directory's own identity for guarded empty-directory cleanup."""
+        if os.name != "nt":
+            return _unverifiable("windows_observer_unavailable")
+        literal = literal_windows_path(path)
+        if literal is None:
+            return _unverifiable("unsupported_path")
+        try:
+            if len(literal.encode("utf-16-le")) // 2 > _MAX_WIN32_PATH:
+                return _unverifiable("unsupported_long_path")
+        except UnicodeEncodeError:
+            return _unverifiable("invalid_path_unicode")
+        drive, _ = ntpath.splitdrive(literal)
+        volume = self._volume(drive)
+        if isinstance(volume, PathObservation):
+            return volume
+        managed = self._check_managed_paths(volume, ntpath.splitdrive(literal)[1])
+        if managed is not None:
+            return managed
+        found = self._find(literal)
+        if isinstance(found, PathObservation):
+            return found
+        attributes, name = found
+        if attributes & _UNSAFE_ATTRIBUTES:
+            return PathObservation(PathOccupancy.UNSAFE, reason="directory_or_unsafe_entry")
+        if not attributes & stat.FILE_ATTRIBUTE_DIRECTORY:
+            return PathObservation(PathOccupancy.UNSAFE, reason="not_a_directory")
+        if len(name.encode("utf-16-le")) // 2 > volume.component_limit:
+            return PathObservation(PathOccupancy.UNSAFE, reason="volume_component_limit")
+        parent_path = ntpath.dirname(literal)
+        parent = self._parent(parent_path, volume)
+        if isinstance(parent, PathObservation):
+            return parent
+        metadata = self._inspect_handle(literal, directory=True, check_case=False)
+        if isinstance(metadata, PathObservation):
+            return metadata
+        if metadata is None:
+            return _unverifiable("directory_identity_unavailable")
+        parent_identity = self._directory_ids.get(parent_path)
+        if parent_identity is None and parent_path != literal:
+            return _unverifiable("directory_parent_identity_unavailable")
+        if parent_identity is not None and metadata.identity.volume_id != parent_identity.volume_id:
+            return _unverifiable("directory_volume_changed")
+        return PathObservation(
+            PathOccupancy.DIRECTORY,
+            name,
+            volume.key,
             actual_parent=parent,
             volume_guid=volume.guid,
             parent_identity=parent_identity,

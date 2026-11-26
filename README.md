@@ -41,11 +41,14 @@ The Python service API includes read-only destination planning and preflight
 for finalized batches. Preflight refreshes filename evaluation and checks
 reviewed paths, filesystem identities, collisions, and rename dependencies.
 The service API also provides transaction journals and read-only recovery
-discovery. Controlled callers can use the standalone Windows rename executor
-with an authorized scope and current preflight, or the managed Trash service
-with explicitly authorized source paths and current identity evidence.
-Completed Trash files can be retrieved in Explorer. The desktop processing
-controls are disabled.
+inspection with overlap guards for rename and Trash operations. Controlled
+callers can use the standalone Windows rename executor with an authorized
+scope and current preflight, or the managed Trash service with explicitly
+authorized source paths and current identity evidence. Cleanup services are
+available to controlled callers, but Trash clearing preserves files without
+per-file ownership evidence. Completed Trash files can be retrieved in
+Explorer. Duplicate analysis and repacking are not implemented, and the
+desktop processing controls remain disabled.
 
 ## Run locally
 

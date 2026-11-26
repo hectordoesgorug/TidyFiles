@@ -390,6 +390,15 @@ def test_c09_relocation_and_multiple_discovery_paths(locations, tmp_path):
         RecoveryStatus.UNRESOLVED: moved_journals / session.path.name,
         RecoveryStatus.MISSING: session.path,
     }
+    inspection = relocated.inspect_recovery()
+    assert not inspection.has_incomplete_discovery()
+    (recovered,) = inspection.transactions
+    assert recovered.journal_status is RecoveryStatus.UNRESOLVED
+    assert recovered.entries[0].source_path == session.record.entries[0].source_path
+    assert {item.status for item in recovered.journal_locations} == {
+        RecoveryStatus.UNRESOLVED,
+        RecoveryStatus.MISSING,
+    }
     assert _index(relocated) == {str(session.record.transaction_id): str(session.path)}
 
 
@@ -428,6 +437,9 @@ def test_c11_c12_unavailable_and_damaged_journals_are_preserved(
     content = session.path.read_bytes() if session.path.exists() else None
     found = _found(store)
     assert found.status is status and found.record is None
+    inspection = store.inspect_recovery()
+    assert inspection.has_incomplete_discovery()
+    assert inspection.transactions[0].journal_status is status
     assert store.locator_path.read_bytes() == before
     assert (session.path.read_bytes() if session.path.exists() else None) == content
 
@@ -501,6 +513,14 @@ def test_c13_recovery_discovery_never_recovers_or_removes_any_file(locations, tm
     assert location.status is RecoveryStatus.UNRESOLVED
     assert location.record.entries[0].stage == "before_install"
     assert location.record.entries[0].staging_path == str(stage)
+    inspection = new_instance.inspect_recovery()
+    assert not inspection.has_incomplete_discovery()
+    (transaction,) = inspection.transactions
+    row_inspection = transaction.entries[0]
+    assert row_inspection.recorded_stage == "before_install"
+    paths = {item.role: item for item in row_inspection.paths}
+    assert {"source", "intended_destination", "staging"} <= paths.keys()
+    assert paths["staging"].current.occupancy is PathOccupancy.FILE
     assert {path: path.read_bytes() for path in expected} == expected
     assert not (tmp_path / "absent-portable").exists()
 
@@ -517,6 +537,7 @@ def test_c14_verified_finalization_retires_only_owned_records(locations, tmp_pat
     stage.write_text("independently verified redundant artifact", encoding="utf-8")
     row = replace(session.record.entries[0], staging_path=str(stage), stage="applied")
     session.checkpoint(row)
+    stage.unlink()
     result = session.finalize(_evidence(row, outcome, artifacts=(str(stage),)))
     expected = (
         TransactionState.FAILED_SAFE
@@ -528,7 +549,7 @@ def test_c14_verified_finalization_retires_only_owned_records(locations, tmp_pat
     assert not session.can_modify
     coordinator.finish(job.job_id)
     assert not coordinator.busy
-    assert stage.is_file()
+    assert not stage.exists()
     assert _index(store) == {str(second.record.transaction_id): str(second.path)}
     assert _found(store).record == second.record
 

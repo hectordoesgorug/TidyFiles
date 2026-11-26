@@ -22,6 +22,7 @@ from tidyfiles.destination_observation import (
 )
 from tidyfiles.destination_planning import DestinationOptions, planning_observer
 from tidyfiles.modifying_jobs import ModifyingJobCoordinator
+from tidyfiles.recovery import RecoveryGuard
 from tidyfiles.rename_executor import _expected_file, _parents_match, _retain
 from tidyfiles.storage import managed_trash_path
 from tidyfiles.transaction_journal import JournalSession, JournalStore
@@ -138,6 +139,10 @@ class TrashExecutor:
                 raise OSError("The application directory is unavailable for managed Trash")
             run = _TrashRun(self.journals.managed_paths)
             run.check_scope(scope)
+            RecoveryGuard(self.journals).check(
+                tuple(item.path for item in scope.sources),
+                tuple(item.observation for item in scope.sources),
+            )
             name = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid4().hex}"
             with create_batch(root, name) as batch:
                 entries = run.destinations(batch, scope)
@@ -149,6 +154,17 @@ class TrashExecutor:
                 identifier = record.transaction_id
                 journal = self.journals.prepare(record)
                 self.coordinator.begin_modification(job.job_id, journal)
+                RecoveryGuard(self.journals).check(
+                    tuple(item.path for item in scope.sources)
+                    + tuple(entry.destination_path for entry in entries),
+                    tuple(item.observation for item in scope.sources)
+                    + tuple(
+                        entry.destination_observation
+                        for entry in entries
+                        if entry.destination_observation is not None
+                    ),
+                    ignore_transaction_id=journal.record.transaction_id,
+                )
                 return run.execute(journal)
         except Exception as error:
             detail = str(error)

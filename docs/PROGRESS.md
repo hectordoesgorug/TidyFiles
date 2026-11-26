@@ -27,9 +27,10 @@ M2-E5 improves large-table updates, clarifies preview status and refresh
 behavior, and adds lifecycle regression coverage. M2 is complete. M3-A adds a
 standalone read-only destination planner. M3-B adds read-only preflight for
 reviewed plans. M3-C adds journals, recovery discovery, and exclusive job
-coordination. M3-D adds a standalone Windows rename executor, and M3-E adds
-standalone managed Trash transfers. Desktop processing controls remain
-disabled.
+coordination. M3-D adds a standalone Windows rename executor, M3-E adds
+standalone managed Trash transfers, and M3-F adds read-only recovery inspection,
+overlap protection, and guarded cleanup services. Desktop processing controls
+remain disabled.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -45,12 +46,13 @@ disabled.
 | M2-E3 | Complete | Shared sorting controls and preference persistence, manual ordering and drag-and-drop, selection shortcuts, row context actions, non-destructive removal and clearing, and collection-change notifications. |
 | M2-E4 | Complete | Session-only live filename-format controls, token insertion and reference, background ordered previews, structured diagnostics, metadata refresh, and stale-result protection. |
 | M2-E5 | Complete | Targeted large-table optimization, preview guidance, and lifecycle coverage. Owner manual acceptance passed 21/21. |
-| M3 | In progress | Destination planning, preflight, journals, standalone rename execution, and managed Trash transfers are implemented. Desktop processing and startup recovery workflows remain planned. |
+| M3 | In progress | Destination planning, preflight, journals, standalone rename and Trash services, recovery inspection, overlap protection, and cleanup services are implemented. Desktop integration remains planned. |
 | M3-A | Complete | Standalone destination planning, collision and dependency classification, and read-only collision-only subset replanning. |
 | M3-B | Complete | Review-time identity capture and cancellable read-only execution preflight. |
 | M3-C | Complete | Durable journals, persistent recovery locator, recovery discovery, and modifying-job coordination. |
 | M3-D | Complete | Standalone, journaled, handle-relative rename and same-volume Single Folder execution. |
-| M3-E | Implemented | Standalone recoverable deletion, guarded cross-volume copying, and managed Trash discovery exclusions. |
+| M3-E | Complete | Standalone recoverable deletion, guarded cross-volume copying, and managed Trash discovery exclusions. |
+| M3-F | Implemented | Read-only recovery observations, overlap guards, temporary artifact cleanup, Auto-clean, and conservative Trash-clear inspection. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
@@ -781,6 +783,65 @@ passed 592 tests with zero failures and skips. Ruff, compileall, and both
 Git whitespace checks passed. Fault injection covered space, copy, source
 removal, and journal publication failures. Physical power-loss behavior
 and other filesystem types remain unverified.
+
+The M3-E implementation is commit
+`587c03a6340fba5db561d94c39cafcad7f0fa93b`, pushed to `main`. Windows CI
+run #32 passed for that checkpoint.
+
+## M3-F — Recovery and cleanup
+
+`JournalStore.inspect_recovery()` reports current no-follow observations
+alongside recorded transaction expectations. Cross-volume Trash copies are
+matched to their recorded copy identity rather than the original source.
+`RecoveryGuard` is used by rename and Trash preparation and execution; it blocks
+overlapping unresolved paths or identities while allowing unrelated paths when
+recovery discovery is complete.
+
+Temporary artifact cleanup accepts only a successful, journal-recorded
+temporary path with its creation-time identity retained by the active job.
+The native remover deletes one file or a verified empty directory by handle,
+without recursion. Journal finalization now checks that every recorded staging
+or temporary artifact path is actually absent before it retires the journal.
+It does not delete staged originals.
+
+Auto-clean requires the independent setting to be enabled, complete successful
+primary processing, no partial or unresolved entries, complete folder
+discovery, and explicit Add Folder roots from the active snapshot. It removes
+only case-insensitive exact matches for `Thumbs.db`, `.DS_Store`, and
+`desktop.ini`, plus empty descendant directories. It preserves roots, unrelated
+files, managed and protected system paths, links, and unresolved recovery
+dependencies. Callers must pass completed operation output paths; those paths
+remain protected even when they match the allowlist. Manual and automatic Trash
+clearing share a read-only inspection service. Since successful M3-E operations
+retire their journals and leave no per-file ownership evidence, existing batch
+contents are reported as unverifiable and remain in place. No manifest or
+batch-name deletion policy was introduced.
+
+The two cleanup settings remain independent and default off. Cleanup errors
+are returned separately from primary-operation results. No GUI activation,
+startup recovery dialog, Explorer action, or normal-exit cleanup wiring was
+added; those integrations remain for M3-G. The desktop processing controls
+remain disabled.
+
+M3-G must pass successful output paths with the pre-operation snapshot when it
+invokes Auto-clean. This prevents a newly renamed file such as `Thumbs.db` from
+being mistaken for pre-existing clutter.
+
+Focused M3-F verification on the Windows Python 3.13.17 environment ran
+`pytest tests/test_recovery.py tests/test_cleanup.py tests/test_config.py
+tests/test_transaction_journal.py tests/test_rename_executor.py
+tests/test_managed_trash.py -q`: 162 passed, zero skipped. The final complete
+suite reported 627 passed, zero skipped. One preceding full run had a transient
+timeout in the existing isolated Tk preview test (626 passed, 1 failed); that
+test passed when rerun alone, and the complete rerun passed. No assertions were
+changed. `ruff check .`, `compileall -q src tests`, `git diff --check`, and
+`git diff --cached --check` also passed. The sandboxed virtual-environment
+launcher initially could not access its configured base interpreter
+(`C:\Users\marlo\AppData\Local\Python\pythoncore-3.13-64\python.exe`; Access is
+denied). The same Python 3.13.17 environment ran the checks through the
+approved execution path; no dependencies or interpreters were installed or
+changed. These checks do not verify M3-G GUI integration or Trash deletion,
+which remains disabled without durable per-file ownership evidence.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 

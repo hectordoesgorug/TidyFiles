@@ -31,6 +31,7 @@ class OperationType(StrEnum):
     RENAME = "rename"
     REPACK = "repack"
     TRASH = "trash"
+    CLEANUP = "cleanup"
 
 
 class TransactionState(StrEnum):

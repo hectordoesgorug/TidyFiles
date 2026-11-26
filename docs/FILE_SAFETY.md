@@ -14,12 +14,12 @@ it does not verify destination collisions, source identity or execution
 readiness. The desktop rename, deduplication, repacking, and cleanup controls
 are disabled.
 
-The Auto-clean switch is disabled until its permanent-deletion disclosure and
-eligible-folder workflow are implemented. Its approved future deletion scope
-is limited to `Thumbs.db`, `.DS_Store`, `desktop.ini`, and empty eligible
-subdirectories. Counter is an off-by-default UI option only; no validation
-algorithm or post-processing action runs. Neither switch can start a filesystem
-operation.
+The Auto-clean switch remains disabled. Its service now requires complete
+primary-operation success, complete discovery, and explicit Add Folder roots
+from the active snapshot. It is limited to `Thumbs.db`, `.DS_Store`,
+`desktop.ini`, and empty descendant directories. The Counter is still an
+off-by-default UI option only; no counter analysis runs. Cleanup services are
+not invoked by the GUI, startup, or application shutdown.
 
 ## Implemented foundations
 
@@ -191,8 +191,10 @@ removes the terminal journal. If removal fails, it retains the journal and
 attempts to restore its locator entry while the locator remains unchanged.
 A cleanup failure is surfaced, with any remaining evidence preserved.
 Discovery can find a terminal journal
-left between those steps through a known journal directory. Source, staging,
-and temporary processing paths remain untouched by journal finalization.
+left between those steps through a known journal directory. Before finalizing,
+the session also observes every recorded staging and temporary path and requires
+confirmed vacancy. It does not delete those paths or retire a record when any
+artifact remains or is unverifiable.
 
 Directory and record checks refuse observed links and reparse points and
 recheck expected journal contents before cleanup. These are path-based
@@ -277,22 +279,62 @@ batch directories may remain after preparation failures. Verified terminal
 journals retire without removing completed Trash files. Users can retrieve
 them in Explorer.
 
+## Recovery inspection and cleanup
+
+`RecoveryInspector` reports each transaction's recorded paths and stages beside
+current no-follow observations. A retained cross-volume Trash copy is compared
+with the copy identity and digest recorded in its verification, not with the
+original source's filesystem identity. Inspection does not restore, move, or
+delete files. `RecoveryGuard` blocks rename and Trash operations that overlap
+unresolved paths or identities. Damaged, missing, or inaccessible discovery
+evidence blocks modifications when it prevents establishing an independent
+scope. Unrelated operations remain available when independence can be checked.
+
+`TemporaryArtifactCleaner` only accepts a successful journal entry's exact
+`temporary_path`, the creation-time identity captured by its owning job, and
+the active modifying job. It rejects source identities, protected system paths,
+and other recovery dependencies. It deletes one file or removes one verified
+empty directory through a handle, without recursion. The result reports
+deleted, skipped, and failed candidates separately from primary processing. A
+cleanup failure does not change the already reported primary result.
+
+Auto-clean is a separate, default-off setting. The service requires complete
+success with no partial or unresolved entries and a complete active snapshot.
+Only explicit Add Folder roots authorize it; Add Files does not. It removes
+case-insensitive exact matches for `Thumbs.db`, `.DS_Store`, and `desktop.ini`,
+then removes empty descendant directories deepest first. It preserves imported
+roots, unrelated files, links, managed and protected system paths, and recovery
+dependencies. It revalidates file and directory identities before handle-bound
+nonrecursive deletion, and reports cleanup failures separately. Callers provide
+the successful operation's output paths; matching outputs are preserved even
+when their names match the cleanup allowlist.
+
+Manual Clear Trash requires explicit authorization; Auto-Clear Trash is an
+independent default-off setting intended only for normal exit while idle. Both
+use the same read-only ownership inspection. Successful M3-E transactions retire
+their journals, so existing batches have no durable per-file ownership proof.
+The service therefore reports their contents as unverifiable and preserves
+them. It does not infer ownership from a batch name or add a manifest. GUI
+confirmation, startup notification, Explorer actions, and normal-exit wiring
+remain unimplemented.
+
 ## Planned safety components
 
 The following are not implemented:
 
 - GUI confirmation of authorized rename scopes and collision-only subsets.
 - Protected staging for other processing workflows.
-- Startup recovery notification, staging inspection and overlap enforcement.
+- Startup recovery notification, Explorer actions, and recovery UI.
 - Safe original retention and verified installation during repacking.
 - Duplicate verification before any deletion action.
 - Verified manual and automatic cleanup of managed Trash.
-- Operator inspection and recovery of interrupted transactions.
+- Operator-directed resolution of interrupted transactions.
 
 Future filesystem work must independently validate a complete destination plan,
 revalidate before mutation, avoid unauthorized overwrites and deletion, and use
 temporary isolated fixtures for destructive-operation tests. Logs must not be
-used as the sole recovery record. No file operation should run automatically.
+used as the sole recovery record. No automatic recovery is performed. The
+default-off cleanup settings have no startup or shutdown wiring yet.
 
 Path-based discovery and count-acquisition checks do not provide a handle-based
 defense against an external process replacing a directory with a reparse point

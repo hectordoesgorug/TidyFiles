@@ -31,6 +31,8 @@ from tidyfiles.transaction_record import (
     TRASH_COPY_BEFORE_REMOVE,
     TRASH_COPY_REMOVED,
     OperationType,
+    TransactionEntry,
+    TransactionRecord,
     TransactionState,
     VerifiedOutcome,
     validate_verification,
@@ -163,6 +165,29 @@ def test_e02_native_cross_volume_verifies_before_removing_source(
     assert target == Path(proof.path) and not source.exists()
     assert target.read_bytes() == content and _times(target) == times
     _retired(store, coordinator)
+
+
+def test_recovery_overlap_blocks_trash_before_creating_a_batch(runtime, tmp_path):
+    app, store, coordinator, executor = runtime
+    source = _file(tmp_path)
+    scope = _scope(source)
+    row = TransactionEntry(
+        uuid4(),
+        str(source),
+        str(source.parent / "planned-destination.txt"),
+        scope.sources[0].observation,
+    )
+    journal = store.prepare(TransactionRecord.prepared(OperationType.RENAME, (row,)))
+    journal.start()
+    journal.checkpoint(recovery_required="simulated recovery dependency")
+
+    result = executor.execute(authorized=scope)
+
+    assert result.state is TrashState.FAILED_SAFE
+    assert "overlap" in (result.detail or "")
+    assert source.read_bytes() == b"original contents"
+    assert not (app / "trash").exists()
+    assert not coordinator.busy
 
 
 def test_e03_e04_basename_collisions_and_new_batches(runtime, tmp_path):

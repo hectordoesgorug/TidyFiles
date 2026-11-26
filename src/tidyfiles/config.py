@@ -43,6 +43,11 @@ def _validate_config(config: Any) -> dict[str, Any]:
         raise ConfigError(f"Unsupported configuration schema version: {version}.")
     if not isinstance(config.get("global_settings"), dict):
         raise ConfigError("Configuration global_settings must be an object.")
+    if any(
+        key in config["global_settings"] and type(config["global_settings"][key]) is not bool
+        for key in ("auto_clean", "auto_clear_trash_on_exit")
+    ):
+        raise ConfigError("Cleanup settings must be booleans.")
     profiles = config.get("profiles")
     if not isinstance(profiles, dict):
         raise ConfigError("Configuration profiles must be an object.")
@@ -97,6 +102,43 @@ def set_sorting_preferences(
         raise ConfigError("Configuration global_settings must be an object.")
     settings["sort_criterion"] = preferences.criterion.value
     settings["sort_direction"] = preferences.direction.value
+
+
+def get_auto_clean_enabled(config: dict[str, Any]) -> bool:
+    """Return the permanent post-processing cleanup setting, defaulting off."""
+    return _get_cleanup_setting(config, "auto_clean")
+
+
+def set_auto_clean_enabled(config: dict[str, Any], enabled: bool) -> None:
+    _set_cleanup_setting(config, "auto_clean", enabled)
+
+
+def get_auto_clear_trash_on_exit(config: dict[str, Any]) -> bool:
+    """Return the independent normal-exit Trash cleanup setting, defaulting off."""
+    return _get_cleanup_setting(config, "auto_clear_trash_on_exit")
+
+
+def set_auto_clear_trash_on_exit(config: dict[str, Any], enabled: bool) -> None:
+    _set_cleanup_setting(config, "auto_clear_trash_on_exit", enabled)
+
+
+def _get_cleanup_setting(config: dict[str, Any], key: str) -> bool:
+    settings = config.get("global_settings")
+    if not isinstance(settings, dict):
+        raise ConfigError("Configuration global_settings must be an object.")
+    value = settings.get(key, False)
+    if type(value) is not bool:
+        raise ConfigError(f"Configuration {key} must be a boolean.")
+    return value
+
+
+def _set_cleanup_setting(config: dict[str, Any], key: str, enabled: bool) -> None:
+    if type(enabled) is not bool:
+        raise TypeError("enabled must be a boolean")
+    settings = config.get("global_settings")
+    if not isinstance(settings, dict):
+        raise ConfigError("Configuration global_settings must be an object.")
+    settings[key] = enabled
 
 
 def load_config(path: Path | str) -> dict[str, Any]:

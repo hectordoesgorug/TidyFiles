@@ -44,7 +44,7 @@ not implemented.
 | `src/tidyfiles/startup.py` | Mutex-first startup, storage/config/log initialization, error reporting, GUI launch, and orderly guard cleanup. |
 | `src/tidyfiles/instance.py` | Windows named-mutex acquisition, active-owner rejection, abandoned-mutex recovery, and handle cleanup. |
 | `src/tidyfiles/storage.py` | Writable application-directory selection and `%LOCALAPPDATA%\TidyFiles` fallback for ordinary application data. |
-| `src/tidyfiles/config.py` | Schema-v1 defaults, validation, loading, and atomic saving, including backward-compatible sort preferences. Invalid sort values use defaults without rewriting the file during load; other invalid configuration remains an error. |
+| `src/tidyfiles/config.py` | Schema-v1 defaults, validation, loading, and atomic saving, including independent, default-off Auto-clean and Auto-Clear Trash settings. Invalid sort values use defaults without rewriting the file during load; other invalid configuration remains an error. |
 | `src/tidyfiles/logging_setup.py` | Rotating log setup with a 5 MB active file, three backups, and a no-op fallback when file logging cannot be opened. |
 | `src/tidyfiles/app.py` | CustomTkinter main window, three mode panels, one shared collection-backed Treeview, collection controls, debounced filename previews and diagnostics, column customization, appearance, and window geometry preferences. |
 | `src/tidyfiles/import_controller.py` | One active discovery session, Tk-thread result consumption, bounded incremental rendering, asynchronous final-order preparation, cancellation rollback, and shutdown coordination. |
@@ -63,6 +63,9 @@ not implemented.
 | `src/tidyfiles/preflight_service.py` | A bounded preflight worker with replacement, cancellation, progress, and current-result tracking. |
 | `src/tidyfiles/transaction_record.py` | Versioned transaction records, Windows identity encoding, and finalization evidence validation. |
 | `src/tidyfiles/transaction_journal.py` | Pinned journal sessions, atomic persistence, the independent recovery locator, and read-only discovery. |
+| `src/tidyfiles/recovery.py` | Read-only current recovery observations and path/identity overlap protection for modifying services. |
+| `src/tidyfiles/cleanup.py` | Snapshot-scoped Auto-clean, temporary artifact cleanup, and conservative managed Trash inspection. |
+| `src/tidyfiles/windows_cleanup.py` | Identity-bound Windows deletion of a single file or a verified empty directory. |
 | `src/tidyfiles/modifying_jobs.py` | Exclusive job reservation and preparation, modification, cancellation, and closure state. |
 | `src/tidyfiles/rename_executor.py` | Authorized scope binding, sequential dependency execution, journal checkpoints, and verified results. |
 | `src/tidyfiles/windows_rename.py` | Handle-relative, non-overwriting Windows rename and creation-time preservation. |
@@ -482,8 +485,17 @@ transitions that persist data belong off the Tk thread.
 Recovery discovery inspects the current portable directory, fallback
 directory, and locator paths. It groups locations by transaction ID and
 reports unresolved, cleanup-pending, missing, inaccessible, and damaged
-evidence. Startup notification, overlap enforcement, and staging inspection
-will consume this report in M3-F.
+evidence. `JournalStore.inspect_recovery()` adds recorded source, destination,
+staging, temporary, and verified Trash-copy paths with current no-follow
+observations. Cross-volume Trash copies are compared with their recorded copy
+identity, not the original source identity. Inspection never restores or removes
+files.
+
+`RecoveryGuard` compares proposed operation paths and observed identities with
+unresolved transaction dependencies. Rename and Trash call it before preparing
+and again after entering the modifying phase. Incomplete recovery discovery
+blocks modification when independence cannot be established; unrelated paths
+remain available when the evidence is complete.
 
 ## Standalone rename execution
 
@@ -513,8 +525,8 @@ per-entry outcomes, observed locations, and the transaction ID.
 
 The standalone service returns results without changing the working collection.
 It reports correlated progress without calling Tk. M3-G supplies confirmation,
-GUI scheduling, and completion updates. M3-F consumes retained journal
-evidence for startup notification, overlap protection, and staging inspection.
+GUI scheduling, and completion updates. The M3-F recovery guard protects paths
+and identities needed by unresolved transactions.
 
 ## Standalone managed Trash
 
@@ -540,11 +552,50 @@ the original object identity.
 
 The service stops at the first failure and returns per-entry paths,
 outcomes, and the transaction ID. Journals retire only after verification
-of the complete scope. M3-F must account for retained Trash copies and
-unknown partials during recovery and cleanup. M3-G handles background
-invocation and collection updates. M4 supplies duplicate and Purge
-eligibility and authorization. The desktop processing controls remain
-disabled.
+of the complete scope. Recovery inspection distinguishes retained cross-volume
+copy identity from source identity. M3-F Trash inspection preserves content
+whose per-file ownership cannot be established after successful journals are
+retired. M3-G handles background invocation and collection updates. M4 supplies
+duplicate and Purge eligibility and authorization. The desktop processing
+controls remain disabled.
+
+## Recovery and cleanup services
+
+`RecoveryInspector` combines journal discovery with current no-follow
+observations while preserving recorded expectations. It is read-only and does
+not show a startup dialog or launch Explorer. `RecoveryGuard` protects
+unresolved source, destination, staging, temporary, Trash-copy, and filesystem
+identity dependencies at the rename and Trash boundaries.
+
+`TemporaryArtifactCleaner` accepts only a successful entry's journal-recorded
+temporary path plus its creation-time identity observation from the active
+modifying job. It excludes source identities, checks other recovery
+dependencies and protected system paths, and removes a single file or verified
+empty directory through a handle. It never recursively removes directories. A
+cleanup failure is reported separately. Journal finalization independently
+verifies that every recorded staging or temporary path is vacant; it never
+deletes those paths. Staged rename originals remain protected and are moved,
+not deleted.
+
+`AutoCleanService` requires an enabled setting, complete successful primary
+processing, a finalized collection snapshot, no partial or unresolved entries,
+complete import discovery, and explicit Add Folder roots. It deletes only
+case-insensitive exact matches for `Thumbs.db`, `.DS_Store`, and `desktop.ini`,
+then attempts empty descendant directories deepest first. It preserves each
+imported root, managed/system paths, links, other contents, and recovery
+dependencies. Callers must provide successful operation output paths, which are
+preserved even when their names match the allowlist. Identity and parent
+relationships are rechecked before native, nonrecursive deletion. The service
+can run inside its owning job; independent requests reserve the cleanup job
+slot.
+
+`TrashClearService` reports managed Trash contents but currently finds no
+eligible files. Successful M3-E Trash journals are retired and leave no
+per-file ownership record, so a batch name cannot authorize permanent
+deletion. Unresolved, retained, linked, unknown, and unverifiable contents
+remain untouched. No Trash ownership manifest was added. Auto-clean and
+Auto-Clear Trash settings are separate and default off; startup and normal-exit
+wiring, confirmation UI, and cleanup controls remain deferred to M3-G.
 
 ## Tests and CI
 

@@ -29,7 +29,7 @@ from tidyfiles.filename_integration import EvaluationMode, EvaluationSettings, e
 from tidyfiles.modifying_jobs import ModifyingJobCoordinator, ModifyingJobError
 from tidyfiles.rename_executor import RenameExecutor, RenameOutcome, RenameScope, RenameState
 from tidyfiles.transaction_journal import JournalStore, RecoveryStatus
-from tidyfiles.transaction_record import OperationType, TransactionState
+from tidyfiles.transaction_record import OperationType, TransactionRecord, TransactionState
 from tidyfiles.windows_rename import BoundRename
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Native Windows rename tests")
@@ -372,6 +372,27 @@ def test_d15_unowned_staging_path_is_preserved(runtime, monkeypatch):
     assert done.state is RenameState.FAILED_SAFE, done
     assert _inventory(root) == before
     _assert_no_journals(store)
+
+
+def test_recovery_overlap_blocks_only_the_affected_rename(runtime):
+    root, store, coordinator, executor = runtime
+    blocked, independent = _files(root, "Blocked.txt", "Independent.txt")
+    interrupted = _preflight((blocked,), "Blocked recovered")
+    journal = store.prepare(TransactionRecord.from_rename_preflight(interrupted))
+    journal.start()
+    journal.checkpoint(recovery_required="simulated interrupted rename")
+    before = blocked.read_bytes()
+
+    denied = _execute(executor, _preflight((blocked,), "Blocked new"))
+    allowed = _execute(executor, _preflight((independent,), "Independent new"))
+
+    assert denied.state is RenameState.FAILED_SAFE
+    assert "overlap" in (denied.detail or "")
+    assert blocked.read_bytes() == before
+    assert allowed.state is RenameState.SUCCEEDED, allowed
+    assert (root / "Independent new.txt").read_bytes() == b"original Independent.txt"
+    assert store.discover().transactions[0].locations[0].status is RecoveryStatus.UNRESOLVED
+    assert not coordinator.busy
 
 
 def test_d16_windows_sharing_lock_preserves_source(runtime):
