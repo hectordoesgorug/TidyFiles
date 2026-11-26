@@ -8,7 +8,7 @@ from contextlib import ExitStack, contextmanager
 from ctypes import wintypes
 from dataclasses import replace
 from functools import lru_cache
-from typing import Iterator
+from typing import Iterator, Never
 
 from tidyfiles.destination_observation import (
     _FILE_CASE_SENSITIVE_INFO,
@@ -137,7 +137,7 @@ def _open_relative(
     return handle.value if status == 0 else None, status
 
 
-def _raise_status(status: int) -> None:
+def _raise_status(status: int) -> Never:
     _, _, error_code = _native_calls()
     raise ctypes.WinError(error_code(status))
 

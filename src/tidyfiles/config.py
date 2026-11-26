@@ -7,7 +7,7 @@ import os
 import tempfile
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, MutableMapping
+from typing import Any
 
 from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
 
@@ -57,19 +57,6 @@ def _validate_config(config: Any) -> dict[str, Any]:
     ):
         raise ConfigError("Each named profile must be an object with a string name.")
     return config
-
-
-def _normalize_sorting_settings(settings: MutableMapping[str, Any]) -> None:
-    try:
-        criterion = SortCriterion(settings.get("sort_criterion"))
-    except (TypeError, ValueError):
-        criterion = SortCriterion.FILE_TYPE_AND_NAME
-    try:
-        direction = SortDirection(settings.get("sort_direction"))
-    except (TypeError, ValueError):
-        direction = SortDirection.ASCENDING
-    settings["sort_criterion"] = criterion.value
-    settings["sort_direction"] = direction.value
 
 
 def get_sorting_preferences(config: dict[str, Any]) -> SortPreferences:
@@ -155,7 +142,7 @@ def load_config(path: Path | str) -> dict[str, Any]:
         loaded = _validate_config(json.loads(content))
     except json.JSONDecodeError as exc:
         raise ConfigError(f"Malformed configuration at {config_path}: {exc}") from exc
-    _normalize_sorting_settings(loaded["global_settings"])
+    set_sorting_preferences(loaded, get_sorting_preferences(loaded))
     return loaded
 
 
@@ -163,7 +150,7 @@ def save_config(path: Path | str, config: dict[str, Any]) -> None:
     """Validate and atomically replace a config file, surfacing every failure."""
     config_path = Path(path)
     normalized = _validate_config(deepcopy(config))
-    _normalize_sorting_settings(normalized["global_settings"])
+    set_sorting_preferences(normalized, get_sorting_preferences(normalized))
     if config_path.exists():
         load_config(config_path)
     try:

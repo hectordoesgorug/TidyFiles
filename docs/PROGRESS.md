@@ -2,9 +2,9 @@
 
 ## Current status
 
-The M0 foundation and minimal GUI shell are implemented. The application opens
-with an empty collection. M1 parser, evaluator, extension resolution, and pure filename validation are
-complete, including M1-D.12's DD-061 parser diagnostic correction. They remain
+M0 through M3 are complete. The application opens with an empty collection.
+The M1 parser, evaluator, extension resolution, and pure filename validation
+include M1-D.12's DD-061 parser diagnostic correction. They remain
 pure filename-engine components; M2-D and M2-E4 connect them to read-only
 evaluation and GUI previews. M3-G connects reviewed, journaled Bulk Rename and
 managed Trash cleanup to the desktop interface. Duplicate analysis and media
@@ -47,18 +47,18 @@ controls remain disabled.
 | M2-E3 | Complete | Shared sorting controls and preference persistence, manual ordering and drag-and-drop, selection shortcuts, row context actions, non-destructive removal and clearing, and collection-change notifications. |
 | M2-E4 | Complete | Session-only live filename-format controls, token insertion and reference, background ordered previews, structured diagnostics, metadata refresh, and stale-result protection. |
 | M2-E5 | Complete | Targeted large-table optimization, preview guidance, and lifecycle coverage. Owner manual acceptance passed 21/21. |
-| M3 | In progress | Destination planning, preflight, journals, standalone rename and Trash services, recovery inspection, overlap protection, cleanup, and Bulk Rename GUI integration are implemented. Milestone acceptance remains subject to review. |
+| M3 | Complete | Destination planning, preflight, journals, rename and Trash services, recovery inspection, overlap protection, cleanup, and Bulk Rename GUI integration. Manual Trash acceptance is deferred to M4. |
 | M3-A | Complete | Standalone destination planning, collision and dependency classification, and read-only collision-only subset replanning. |
 | M3-B | Complete | Review-time identity capture and cancellable read-only execution preflight. |
 | M3-C | Complete | Durable journals, persistent recovery locator, recovery discovery, and modifying-job coordination. |
 | M3-D | Complete | Standalone, journaled, handle-relative rename and same-volume Single Folder execution. |
 | M3-E | Complete | Standalone recoverable deletion, guarded cross-volume copying, and managed Trash discovery exclusions. |
-| M3-F | Implemented | Read-only recovery observations, overlap guards, temporary artifact cleanup, Auto-clean, and guarded managed Trash clearing (DD-087). |
-| M3-G | Implemented | Confirmed Bulk Rename execution, startup recovery notice, Auto-clean, manual Trash clearing, and normal-exit Auto-Clear Trash. |
+| M3-F | Complete | Read-only recovery observations, overlap guards, temporary artifact cleanup, Auto-clean, and guarded managed Trash clearing (DD-087). |
+| M3-G | Complete | Confirmed Bulk Rename execution, startup recovery notice, Auto-clean, manual Trash clearing, and normal-exit Auto-Clear Trash. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
-| M6.1 | Planned | Package restructuring and architectural cleanup after M6 and before M7; improve source organization and maintainability without changing established application behavior. |
+| M6.1 | Planned | Targeted maintainability review after M6 and before M7. Use implemented features and their dependencies to determine which changes are justified. |
 | M6.2 | Planned | Public documentation sanitization and repository audit after M6.1 and before M7; required before the first stable v1.0.0 release. |
 | M7 | Planned | End-to-end integration, packaging, release readiness, and coverage closure. |
 
@@ -973,48 +973,48 @@ completed status remains visible. On Windows Python 3.13.17, the isolated Tk
 preview worker passed three separate runs and the full suite passed 657 tests
 with zero skips. Ruff, compileall, and both Git whitespace checks passed.
 
-## M6.1 — Package Restructuring and Architectural Cleanup
+## Pre-M4 audit and corrections
 
-This planned maintenance checkpoint follows M6 (Complete GUI Integration) and
-must be completed before M7 (Packaging and Release). Its objective is to
-improve source-code organization and maintainability without changing
-established application behavior.
+The pre-M4 audit found that manual Trash clear could expand the confirmed scope,
+could not clear recognized empty batches, and that an import rollback rendering
+failure could leave the controller busy. Four GUI tests also relied on a
+transient preflight field. PRE-M4-B corrected these findings (C1–C4). On Windows
+with Python 3.13.17, the full suite passed 668 tests with zero failures or skips.
+The focused suite passed 28 tests, and the four revised GUI tests each passed
+two additional isolated runs. Ruff, compileall, and both Git whitespace checks
+passed. The owner confirmed publication of commit
+[`01f8fd372e34aa3095586c0aa300143bb78b3a07`](https://github.com/hectordoesgorug/TidyFiles/commit/01f8fd372e34aa3095586c0aa300143bb78b3a07)
+on `main` and successful Windows CI. Manual Trash acceptance is deferred until
+Deduplicate and Purge are operational in M4.
 
-The following package layout is illustrative and preliminary, not a binding
-implementation specification:
+PRE-M4-C corrected the native error helper's return type, accumulated Trash sizes
+after establishing metadata availability, and clarified import worker and
+preflight types (P1–P3). It removed redundant state, shared sort preference
+validation, updated current-state documentation, and corrected cancellation
+reporting during import-order preparation (C5–C8). Sorting now reuses each
+entry's natural filename and path keys within the sort (O2). The Pylance logs
+confirmed the workspace's Python 3.13.17 virtual environment. The live VS Code
+Problems panel was unavailable, so editor diagnostics remain unverified.
+Local Windows verification on Python 3.13.17 passed 187 focused tests and all
+671 tests in the full suite, with zero failures or skips. Ruff, compileall, and
+both Git whitespace checks passed.
 
-```text
-src/tidyfiles/
-├── __init__.py
-├── __main__.py
-├── app.py
-├── core/
-├── rename/
-├── deduplicator/
-├── repacker/
-├── filesystem/
-├── infrastructure/
-└── ui/
-```
+Recovery inspection per cleanup candidate (O1) and large Tk review and
+completion updates (O3) remain deferred. Revisit recovery inspection only with
+evidence that a shorter path preserves current recovery checks. Profile the Tk
+paths before changing rendering. Journal persistence remains under DD-086.
 
-The final hierarchy and module placement will be determined by inspecting the
-implemented feature modules and their dependency relationships after M6, when
-those boundaries are substantially established.
+## M6.1 — Targeted maintainability review
 
-The checkpoint will preserve established functionality; organize modules by
-functional responsibility; separate feature-specific logic from shared
-services; and maintain clear dependency boundaries without circular imports.
-It will update affected imports, tests, entry points, and resource paths; review
-package discovery and future packaging compatibility; preserve configuration
-and portable-storage behavior; and avoid unnecessary abstractions, dependencies,
-or algorithm rewrites. Verification will run the complete regression suite and
-Windows CI. Restructuring must be completed as a separate, independently
-verified commit before packaging begins.
+After M6 and before M7, review the implemented modules and dependency boundaries
+for concrete sources of duplication, coupling, or testing difficulty. Extract
+coherent responsibilities where they improve maintainability. Retain existing
+module boundaries where they work well.
 
-Until M6.1, ordinary feature development continues without comprehensive
-package restructuring. Feature-specific subpackages may be created earlier
-when implementation complexity justifies them; unrelated functionality should
-not be combined into existing modules solely to minimize the number of files.
+For approved changes, update affected imports, tests, entry points, and resource
+paths. Preserve configuration, portable storage, and established behavior.
+Record any changes in a separate commit verified by the complete regression
+suite and Windows CI before packaging.
 
 ## M6.2 — Public Documentation Sanitization and Repository Audit
 
@@ -1230,16 +1230,15 @@ is cooperative and has no bound while a filesystem call is blocked.
 M2-D integrates and preserves the applicable clauses of DD-007, DD-010,
 DD-020 through DD-026, DD-031, DD-048, DD-049, DD-051, DD-057, DD-060, DD-061,
 DD-065, DD-067, DD-069 through DD-075, DD-077 and DD-078. DD-076 destination
-selection remains for the future planner. M2-E1 provides the main-window shell
-and shared collection presentation; M2-E2 connects discovery and import, with
-incomplete-import warnings retained. Explicit acknowledgment before future
-processing remains pending. Remaining GUI integration includes collection
-management and preview evaluation. Duplicate analysis and destination
-collision checks remain assigned to their later milestones. Execution
-preflight and all filesystem mutations remain pending. M3 must force
-fresh required counts and independently revalidate sources, filesystem
-metadata, destination availability, target-volume constraints and collisions;
-metadata observations do not authorize execution.
+selection was assigned to the future planner at that checkpoint. M2-E1 provided
+the main-window shell and shared collection presentation. M2-E2 connected
+discovery and import and retained incomplete-import warnings. Collection
+management, preview evaluation, acknowledgment of incomplete imports, and
+execution preflight were pending at this checkpoint. The M3 preflight
+requirements included refreshing required counts and independently revalidating
+sources, filesystem metadata, destination availability, target-volume
+constraints, and collisions. Metadata observations alone do not authorize
+execution.
 
 ## Open questions and deferred decisions
 

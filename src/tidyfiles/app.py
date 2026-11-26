@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+from concurrent.futures import Future
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from tidyfiles.cleanup import (
 )
 from tidyfiles.collection import (
     CollectionEntry,
+    CollectionSnapshot,
     ImportSessionSnapshot,
     ImportSessionState,
     OrderingMode,
@@ -57,6 +59,7 @@ from tidyfiles.discovery import (
 from tidyfiles.execution_preflight import (
     PreflightProgress,
     PreflightRequest,
+    PreflightResult,
     PreflightStage,
     PreflightState,
     capture_review_plan,
@@ -249,22 +252,22 @@ class _MainWindow:
         self._exit_cleanup_done = False
         self._processing_phase = "idle"
         self._processing_done: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
-        self._processing_progress: queue.Queue[Any] = queue.Queue(maxsize=64)
+        self._processing_progress: queue.Queue[
+            PreflightProgress | RenameProgress | tuple[str, str, str]
+        ] = queue.Queue(maxsize=64)
         self._processing_after: str | None = None
         self._processing_cancel = threading.Event()
         self._processing_started_at: float | None = None
-        self._processing_snapshot: Any = None
+        self._processing_snapshot: CollectionSnapshot | None = None
         self._processing_options: DestinationOptions | None = None
         self._processing_acknowledged_import_ids: tuple[UUID, ...] = ()
         self._processing_plan: DestinationPlan | None = None
         self._processing_request: PreflightRequest | None = None
-        self._processing_future: Any = None
-        self._active_preflight_result: Any = None
+        self._active_preflight_result: PreflightResult | None = None
         self._processing_intended_ids: tuple[UUID, ...] = ()
         self._processing_partial = False
         self._plan_review_dialog: ctk.CTkToplevel | None = None
         self._processing_diagnostics_by_id: dict[UUID, str] = {}
-        self._maintenance_kind: str | None = None
         self._recovery_queue: queue.Queue[Any] = queue.Queue(maxsize=1)
         self._recovery_after: str | None = None
         self._recovery_dialog: ctk.CTkToplevel | None = None
@@ -757,7 +760,7 @@ class _MainWindow:
 
     def _on_mode_change(self) -> None:
         mode = self.tabs.get()
-        if self._processing_phase != "idle" or self._maintenance_kind is not None:
+        if self._processing_phase != "idle":
             self.tabs.set(self.active_mode)
             return
         if mode in self.mode_panels:
@@ -1592,7 +1595,8 @@ class _MainWindow:
         intended: tuple[UUID, ...],
         partial: bool,
     ) -> None:
-        if not self.collection.is_current(self._processing_snapshot):
+        snapshot = self._processing_snapshot
+        if snapshot is None or not self.collection.is_current(snapshot):
             self.cancel_current_work()
             messagebox.showwarning(
                 "Review expired", "The collection changed. Review the destinations again.",
@@ -1605,7 +1609,7 @@ class _MainWindow:
         options = self._processing_options
         assert options is not None and evaluation.expression is not None
         request = PreflightRequest(
-            snapshot=self._processing_snapshot,
+            snapshot=snapshot,
             reviewed_plan=plan,
             reviewed_evaluation=evaluation,
             current_evaluation_id=evaluation.request_id,
@@ -1621,16 +1625,16 @@ class _MainWindow:
         self._processing_intended_ids = intended
         self._processing_partial = partial
         self._processing_request = request
-        self._processing_future = self.preflight_service.submit(
+        future = self.preflight_service.submit(
             request, progress_callback=self._queue_processing_progress
         )
-        self._processing_future.add_done_callback(self._queue_preflight_result)
+        future.add_done_callback(self._queue_preflight_result)
         self._set_processing_phase(
             "preflight", "Rechecking sources and destinations…", cancellable=True
         )
         self._start_processing_poll()
 
-    def _queue_preflight_result(self, future: Any) -> None:
+    def _queue_preflight_result(self, future: Future[PreflightResult]) -> None:
         try:
             result = future.result()
         except Exception as error:
@@ -1638,7 +1642,9 @@ class _MainWindow:
         else:
             self._processing_done.put(("preflight", result))
 
-    def _queue_processing_progress(self, update: Any) -> None:
+    def _queue_processing_progress(
+        self, update: PreflightProgress | RenameProgress | tuple[str, str, str]
+    ) -> None:
         try:
             self._processing_progress.put_nowait(update)
         except queue.Full:
@@ -1694,7 +1700,9 @@ class _MainWindow:
         if self._processing_phase not in {"idle", "review"}:
             self._start_processing_poll()
 
-    def _show_processing_progress(self, update: Any) -> None:
+    def _show_processing_progress(
+        self, update: PreflightProgress | RenameProgress | tuple[str, str, str]
+    ) -> None:
         if isinstance(update, PreflightProgress):
             labels = {
                 PreflightStage.INPUT: "Preparing validation…",
@@ -1740,14 +1748,12 @@ class _MainWindow:
         elif isinstance(update, tuple) and update[0] == "stage":
             self._set_processing_phase(update[1], update[2])
 
-    def _handle_preflight_result(self, result: Any) -> None:
-        self._processing_future = None
+    def _handle_preflight_result(self, result: PreflightResult) -> None:
         self._active_preflight_result = None
         if self._close_pending:
             self._finish_processing("Preflight canceled before closing.")
             return
         if result.state is PreflightState.PASSED:
-            self._active_preflight_result = result
             self._start_rename_execution(result)
             return
         if result.state in {PreflightState.REVIEW_REQUIRED, PreflightState.COLLISION_BLOCKED}:
@@ -1767,14 +1773,15 @@ class _MainWindow:
             f"Rename was not started: {result.diagnostic.detail or result.diagnostic.code}."
         )
 
-    def _start_rename_execution(self, preflight: Any) -> None:
+    def _start_rename_execution(self, preflight: PreflightResult) -> None:
+        snapshot = self._processing_snapshot
+        assert snapshot is not None
         self._active_preflight_result = preflight
         self._set_processing_phase(
             "rename_preparing", "Preparing the journaled rename…", cancellable=True
         )
         self.progress.set(0)
         self._start_processing_poll()
-        snapshot = self._processing_snapshot
         partial = self._processing_partial
         auto_clean_enabled = self._processing_auto_clean_enabled
 
@@ -1844,7 +1851,9 @@ class _MainWindow:
             if item.outcome in {RenameOutcome.RENAMED, RenameOutcome.UNCHANGED}
         )
         excluded = set(self._processing_plan.excluded_entry_ids if self._processing_plan else ())
-        planned_ids = {entry.entry_id for entry in self._processing_snapshot.entries}
+        snapshot = self._processing_snapshot
+        assert snapshot is not None
+        planned_ids = {entry.entry_id for entry in snapshot.entries}
         excluded.update(planned_ids.difference(self._processing_intended_ids))
         for entry_id in excluded:
             self._processing_diagnostics_by_id[entry_id] = (
@@ -1957,8 +1966,6 @@ class _MainWindow:
             self._plan_review_dialog = None
         self._processing_phase = "idle"
         self._collection_operation_pending = False
-        self._maintenance_kind = None
-        self._processing_future = None
         self._processing_request = None
         self._active_preflight_result = None
         self._processing_plan = None
@@ -2026,7 +2033,6 @@ class _MainWindow:
     def clear_trash(self) -> None:
         if self._closing or self._collection_operation_pending or self.import_controller.busy:
             return
-        self._maintenance_kind = "trash_inspection"
         self._set_processing_phase("trash_inspecting", "Inspecting managed Trash…")
         self._start_processing_poll()
 
@@ -2078,7 +2084,6 @@ class _MainWindow:
         ):
             self._finish_processing("Trash clear canceled.")
             return
-        self._maintenance_kind = "trash_clear"
         self._set_processing_phase("trash_clearing", "Clearing eligible managed Trash…")
         self._start_processing_poll()
 
@@ -2308,7 +2313,6 @@ class _MainWindow:
             and not self._close_pending
             and self._processing_phase == "idle"
             and not self._collection_operation_pending
-            and self._maintenance_kind is None
             and not self._import_is_busy()
             and self.coordinator.current is None
         )
@@ -2638,7 +2642,6 @@ class _MainWindow:
             self.trash_clear_button.configure(state="disabled")
             if (
                 self._processing_phase != "idle"
-                or self._maintenance_kind is not None
                 or self._closing
                 or self._close_pending
             ):
@@ -3948,7 +3951,6 @@ class _MainWindow:
             self._exit_cleanup_done = True
             if get_auto_clear_trash_on_exit(self.config):
                 self._close_pending = True
-                self._maintenance_kind = "exit_trash_clear"
                 self._set_processing_phase(
                     "exit_trash_clear", "Auto-Clear Trash is running before normal exit…"
                 )
@@ -4019,7 +4021,6 @@ class _MainWindow:
 
     def _handle_exit_trash_clear(self, payload: Any) -> None:
         result, error = payload
-        self._maintenance_kind = None
         self._collection_operation_pending = False
         self._processing_phase = "idle"
         if error is not None or result is None:

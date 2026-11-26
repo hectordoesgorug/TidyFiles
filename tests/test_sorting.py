@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tidyfiles.sorting as sorting
 from tidyfiles.collection import FileMetadataSnapshot, ImportMode, WorkingCollection
 from tidyfiles.sorting import (
     SortCriterion,
@@ -22,6 +23,23 @@ def _collection(rows):
 
 def _names(collection):
     return [entry.original_filename for entry in collection.snapshot().entries]
+
+
+def test_each_sort_computes_natural_name_and_path_once_per_entry(monkeypatch) -> None:
+    path = r"C:\files\Image 10.jpg"
+    collection, _ = _collection([(path, None)])
+    entries = collection.snapshot().entries
+    calls = []
+
+    def record_key(value):
+        calls.append(value)
+        return natural_sort_key(value)
+
+    monkeypatch.setattr(sorting, "natural_sort_key", record_key)
+    for criterion in SortCriterion:
+        calls.clear()
+        assert sorting.sort_entries(entries, sorting.SortPreferences(criterion)) == entries
+        assert calls == ["Image 10.jpg", path]
 
 
 def test_default_sort_uses_legacy_category_order_and_natural_names() -> None:

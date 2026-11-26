@@ -260,6 +260,36 @@ def test_cancel_during_incremental_final_order_restores_previous_order_and_selec
     assert set(harness.rows) == {middle.entry_id}
 
 
+@pytest.mark.parametrize("shutdown", (False, True))
+def test_cancel_while_preparing_import_order_drains_discovery(
+    tmp_path: Path, shutdown: bool
+) -> None:
+    harness = _Harness()
+    controller = harness.controller
+    assert controller.start_files((_file(tmp_path / "prior.txt"),))
+    harness.pump_until(lambda: not controller.busy)
+    prior = harness.collection.snapshot().entries
+    harness.selection = (prior[0].entry_id,)
+    shutdown_calls = []
+    controller.on_shutdown = lambda: shutdown_calls.append(True)
+
+    assert controller.start_files((_file(tmp_path / "discarded.txt"),))
+    harness.pump_until(lambda: controller._phase == "preparing")
+    if shutdown:
+        assert not controller.request_shutdown()
+    else:
+        assert controller.cancel()
+    harness.pump_until(lambda: not controller.busy)
+
+    assert harness.reports[-1].state.value == "cancelled"
+    assert harness.reports[-1].diagnostics == ()
+    assert harness.errors == []
+    assert harness.collection.snapshot().entries == prior
+    assert not harness.collection.capabilities.is_importing
+    assert tuple(harness.order) == harness.selection == (prior[0].entry_id,)
+    assert shutdown_calls == ([True] if shutdown else [])
+
+
 def test_persistent_rollback_view_failure_rebuilds_collection_and_releases_controller(
     tmp_path: Path,
 ) -> None:

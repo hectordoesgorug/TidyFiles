@@ -27,11 +27,12 @@ well as pytest and Ruff.
 .\.venv\Scripts\python.exe -m tidyfiles
 ```
 
-The current shell displays the three operation tabs, an empty file table, and a
-status area. It does not import or process files. In a source checkout, the
-storage resolver prefers the repository directory for the log when writable;
-configuration and log files are ignored by Git. Close the window normally to
-release the single-instance guard.
+The window opens with an empty file table. Add Files and Add Folder populate
+the shared collection. Bulk Rename supports live previews, background preflight,
+and journaled execution, including Single Folder. Duplicate analysis and
+repacking are planned. In a source checkout, writable repository storage is
+preferred for the log. Git ignores configuration and log files. Close the
+window normally to release the single-instance guard.
 
 ## Local checks
 

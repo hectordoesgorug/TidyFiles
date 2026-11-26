@@ -86,32 +86,21 @@ def _category(extension: str) -> int:
     return 5
 
 
-def _name_path_key(entry: CollectionEntry) -> tuple[object, ...]:
-    name = entry.original_filename
-    path = entry.source_path
-    return (
-        natural_sort_key(name),
-        name.casefold(),
-        name,
-        natural_sort_key(path),
-        entry.normalized_path_key.casefold(),
-        path.casefold(),
-        path,
-    )
-
-
 def _primary_key(
-    entry: CollectionEntry, criterion: SortCriterion
+    entry: CollectionEntry,
+    criterion: SortCriterion,
+    natural_name: tuple[object, ...],
+    natural_path: tuple[object, ...],
 ) -> tuple[object, ...] | None:
     metadata = entry.metadata
     if criterion is SortCriterion.FILE_TYPE_AND_NAME:
-        return (_category(entry.source_extension), natural_sort_key(entry.original_filename))
+        return (_category(entry.source_extension), natural_name)
     if criterion is SortCriterion.NAME:
-        return (natural_sort_key(entry.original_filename),)
+        return (natural_name,)
     if criterion is SortCriterion.EXTENSION:
         return (entry.source_extension.casefold(),)
     if criterion is SortCriterion.PATH:
-        return (natural_sort_key(entry.source_path),)
+        return (natural_path,)
     if metadata is None:
         return None
     if criterion is SortCriterion.SIZE:
@@ -129,14 +118,27 @@ def sort_entries(
 ) -> tuple[CollectionEntry, ...]:
     """Sort known primary values in the selected direction, then append missing values."""
     known: list[tuple[CollectionEntry, tuple[object, ...]]] = []
-    missing: list[CollectionEntry] = []
+    missing: list[tuple[CollectionEntry, tuple[object, ...]]] = []
     for entry in entries:
-        key = _primary_key(entry, preferences.criterion)
-        if key is None:
-            missing.append(entry)
+        name = entry.original_filename
+        path = entry.source_path
+        natural_name = natural_sort_key(name)
+        natural_path = natural_sort_key(path)
+        tie_key = (
+            natural_name,
+            name.casefold(),
+            name,
+            natural_path,
+            entry.normalized_path_key.casefold(),
+            path.casefold(),
+            path,
+        )
+        primary = _primary_key(entry, preferences.criterion, natural_name, natural_path)
+        if primary is None:
+            missing.append((entry, tie_key))
         else:
-            known.append((entry, key))
+            known.append((entry, (primary, tie_key)))
     reverse = preferences.direction is SortDirection.DESCENDING
-    known.sort(key=lambda pair: (pair[1], _name_path_key(pair[0])), reverse=reverse)
-    missing.sort(key=_name_path_key)
-    return tuple(entry for entry, _ in known) + tuple(missing)
+    known.sort(key=lambda pair: pair[1], reverse=reverse)
+    missing.sort(key=lambda pair: pair[1])
+    return tuple(entry for entry, _ in known) + tuple(entry for entry, _ in missing)

@@ -77,11 +77,9 @@ class ImportController:
         self._prepared_order: PreparedImportOrder | None = None
         self._prepare_error: Exception | None = None
         self._prepare_done: threading.Event | None = None
-        self._prepare_thread: threading.Thread | None = None
         self._render_offset = 0
         self._remove_offset = 0
         self._order_was_changed = False
-        self._terminal_report: DiscoveryReport | None = None
         self._started_at: float | None = None
         self._order_started_at: float | None = None
         self._time_to_first_visible_seconds: float | None = None
@@ -142,11 +140,9 @@ class ImportController:
         self._prepared_order = None
         self._prepare_error = None
         self._prepare_done = None
-        self._prepare_thread = None
         self._render_offset = 0
         self._remove_offset = 0
         self._order_was_changed = False
-        self._terminal_report = None
         self._started_at = time.perf_counter()
         self._order_started_at = None
         self._time_to_first_visible_seconds = None
@@ -266,28 +262,26 @@ class ImportController:
 
     def _start_preparation(self) -> None:
         assert self.session is not None
+        session_id = self.session.session_id
+        done = threading.Event()
         self._phase = "preparing"
         self._order_started_at = time.perf_counter()
-        self._prepare_done = threading.Event()
+        self._prepare_done = done
         self.on_activity(self._phase, self.session)
 
         def prepare() -> None:
             try:
-                self._prepared_order = self.collection.prepare_import_order(
-                    self.session.session_id  # type: ignore[union-attr]
-                )
+                self._prepared_order = self.collection.prepare_import_order(session_id)
             except Exception as error:
                 self._prepare_error = error
             finally:
-                assert self._prepare_done is not None
-                self._prepare_done.set()
+                done.set()
 
-        self._prepare_thread = threading.Thread(
+        threading.Thread(
             target=prepare,
-            name=f"TidyFiles-order-{self.session.session_id}",
+            name=f"TidyFiles-order-{session_id}",
             daemon=True,
-        )
-        self._prepare_thread.start()
+        ).start()
 
     def _poll_preparation(self) -> None:
         assert self.session is not None and self._prepare_done is not None
@@ -304,8 +298,7 @@ class ImportController:
             self._fail_current(self._prepare_error)
             return
         if session.state is DiscoveryState.CANCELLING or self._shutdown_requested:
-            session.finish_deferred()
-            self._handle_terminal()
+            self._begin_restore()
             return
         assert self._prepared_order is not None
         self._phase = "rendering"
@@ -347,7 +340,6 @@ class ImportController:
             self._phase = "discovering"
             self.on_activity("cancelling", self.session)
             return
-        self._terminal_report = self.session.report
         self._phase = "restoring" if self._order_was_changed else "removing"
         self._render_offset = 0
         self._remove_offset = 0

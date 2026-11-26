@@ -498,6 +498,7 @@ class TrashClearService:
         assert root_observation.object_metadata is not None
         items = []
         files: list[_TrashCandidate] = []
+        eligible_size_bytes = 0
         directories: dict[str, _TrashCandidate] = {}
         recovery = self.journals.inspect_recovery()
         guard = RecoveryGuard(self.journals)
@@ -600,6 +601,7 @@ class TrashClearService:
                     items.append(CleanupItem(path, CleanupStatus.SKIPPED, reason))
                     continue
                 files.append(candidate)
+                eligible_size_bytes += observed.object_metadata.size_bytes
                 items.append(CleanupItem(path, CleanupStatus.ELIGIBLE))
 
         candidates = [*files, *directories.values()]
@@ -629,7 +631,7 @@ class TrashClearService:
         )
         return TrashInspectionSummary(
             len(files),
-            sum(item.observation.object_metadata.size_bytes for item in files),
+            eligible_size_bytes,
             tuple(items),
             _candidates=ordered,
             _root_observation=root_observation,

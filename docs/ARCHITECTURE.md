@@ -8,8 +8,9 @@ the existing GUI. The shared in-memory collection supports import finalization
 or rollback, sorting, manual ordering, selection, removal, and clearing. File
 discovery and filename evaluation run in background services while all Tk
 updates stay on the main thread. Separate read-only services plan destinations
-and revalidate reviewed plans. The standalone Windows rename executor is
-available to controlled callers.
+and revalidate reviewed plans. Bulk Rename invokes the Windows rename executor
+after preflight passes. The executor runs journaled ordinary rename and Single
+Folder operations outside Tk.
 
 ## Startup and shutdown
 
@@ -263,10 +264,10 @@ revision still matches. Treeview final-order updates use chunks of 96 rows.
 Cancellation restores only the active import's entries and folder-root record,
 preserving earlier entries, order, selection, and incomplete-import warnings.
 Incomplete and failed import diagnostics remain available in a consolidated
-details view after later successful imports. Closing during discovery requests
-cooperative cancellation and leaves the event loop active until rollback
-finishes; an operating-system filesystem call that has not returned can delay
-closure.
+details view after later successful imports. Closing during discovery or
+import-order preparation requests cooperative cancellation and leaves the event
+loop active until rollback finishes. An operating-system filesystem call that
+has not returned can delay closure.
 
 Add Files uses the native multi-file picker with an All Files option; Add Folder
 uses the native folder picker and always scans recursively. The existing
@@ -276,12 +277,11 @@ file contents are read. Import does not imply filename validation or processing
 readiness.
 
 Live filename preview, token insertion, and format help are implemented.
-Profiles and all processing actions remain deferred. Collection removal,
-clearing, sorting, and manual movement are functional while idle and disabled
-during conflicting work. The Columns dialog is functional. The rename field is
-session-only.
-Auto-clean stays disabled, and Counter is an off-by-default,
-session-only switch with no execution behavior. Resolution and length cells
+Profiles are planned. Collection removal, clearing, sorting, and manual movement
+are available while idle and disabled during conflicting work. The Columns
+dialog is functional. The rename field is session-only. Auto-clean is off by
+default and can run after a complete successful rename. Counter is a session-only
+switch, off by default, with no execution behavior. Resolution and length cells
 show “— (not probed)” for filename extensions that identify applicable media
 types and stay blank otherwise; no media probing is performed. The File type
 column is inferred from the filename extension using Python's MIME database;
@@ -660,18 +660,12 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 Duplicate verification and repacking are future components.
 
-## Deferred package restructuring
+## Deferred maintainability review
 
-M6.1 (Package Restructuring and Architectural Cleanup) is planned after M6 and
-before M7. It will improve source organization and maintainability while
-preserving established application behavior. A preliminary illustrative
-package layout and the checkpoint requirements are recorded in
-[`docs/PROGRESS.md`](PROGRESS.md). The example does not prescribe the final
-hierarchy: module placement will be decided after M6 by inspecting the
-implemented features and their dependencies. Until then, continue ordinary
-feature development and introduce feature-specific subpackages when complexity
-justifies them; do not undertake comprehensive restructuring early or combine
-unrelated functionality merely to reduce the number of modules.
+M6.1 is planned after M6 and before M7. It will review the implemented features
+and their dependencies, then make targeted changes where they reduce coupling
+or duplicated work. The review will preserve established behavior and may
+retain current module boundaries. [Milestone scope](PROGRESS.md#m61--targeted-maintainability-review)
 
 ## Deferred public documentation and repository audit
 
