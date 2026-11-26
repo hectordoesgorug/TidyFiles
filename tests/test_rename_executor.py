@@ -645,3 +645,43 @@ def test_representative_bulk_rename(runtime):
         f"{Path(name).stem} renamed.txt": data for name, data in before.items()
     }
     _assert_no_journals(store)
+
+
+def test_1200_file_rename_retries_transient_journal_access_denial(runtime, monkeypatch):
+    root, store, coordinator, executor = runtime
+    count = 1200
+    paths = _files(root, *(f"synthetic-{index:04d}.txt" for index in range(count)))
+    preflight = _preflight(paths, "renamed <IncNr>")
+    assert preflight.state is PreflightState.PASSED
+    publish = journal_module._publish
+    journal_publications = 0
+    injected = False
+
+    def intermittent_denial(source, target, *, overwrite):
+        nonlocal journal_publications, injected
+        if target.parent == store._portable:
+            journal_publications += 1
+            if journal_publications == 287:
+                record = json.loads(target.read_bytes())
+                assert sum(row["outcome"] == "succeeded" for row in record["entries"]) == 142
+                injected = True
+                error = PermissionError("injected WinError 5 at checkpoint publication")
+                error.winerror = 5
+                raise error
+        publish(source, target, overwrite=overwrite)
+
+    monkeypatch.setattr(journal_module, "_publish", intermittent_denial)
+    started = perf_counter()
+    result = _execute(executor, preflight)
+    elapsed = perf_counter() - started
+
+    print(f"Native executor, {count} files with one transient journal denial: {elapsed:.3f}s")
+    assert injected
+    assert journal_publications == 2404
+    assert result.state is RenameState.SUCCEEDED
+    assert sum(item.outcome is RenameOutcome.RENAMED for item in result.entries) == count
+    assert len(tuple(root.iterdir())) == count
+    assert sorted(path.read_bytes() for path in root.iterdir()) == sorted(
+        f"original synthetic-{index:04d}.txt".encode() for index in range(count)
+    )
+    _assert_no_journals(store)

@@ -911,6 +911,31 @@ Verification on Windows Python 3.13.17: the focused GUI workflow run passed 7
 tests, and the complete suite passed 640 tests with zero skips. Ruff, compileall,
 and both Git whitespace checks passed. The full suite took 199.32 seconds.
 
+### M3-G2 — Manual acceptance corrections
+
+The collection movement controls retain fixed grid columns during progressive
+updates. The Process button now uses theme-aware enabled and disabled colors,
+and its existing eligibility rules are unchanged. Processing status reports
+completed files and elapsed time, then estimates remaining time after enough
+measured progress. Failure dialogs report aggregate counts and the operation
+error without listing all unprocessed paths. Missing or empty managed Trash
+shows an empty-state message without creating the Trash directory. Settings
+continues to open after switching themes in the automated GUI regression test.
+
+Journal checkpoint publication retries Windows access-denied and sharing-
+violation errors up to twice, checking the previous durable journal between
+attempts. Persistent failures still stop modification and retain the last
+durable checkpoint. A synthetic 1,200-file Windows run injected one access-
+denied error after 142 successful entries and completed on retry.
+
+The retained interrupted-run journal was inspected read-only and left
+unchanged. It records 142 installed entries and 1,058 prepared entries without
+a persisted error detail. The user confirmed that the corresponding temporary
+source folder was deleted after the test. The precise filesystem sub-operation
+that returned the historical access-denied error could not be determined.
+Automated verification does not replace visible Light/Dark mode review or
+physical layout and DPI acceptance.
+
 ## M6.1 — Package Restructuring and Architectural Cleanup
 
 This planned maintenance checkpoint follows M6 (Complete GUI Integration) and

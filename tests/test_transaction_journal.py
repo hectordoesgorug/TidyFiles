@@ -302,6 +302,68 @@ def test_d2_08_09_10_failed_checkpoint_keeps_last_published_cache(
         session.checkpoint(changed)
 
 
+@pytest.mark.parametrize("winerror", [5, 32])
+def test_checkpoint_retries_transient_windows_publication_denial(
+    locations, tmp_path, monkeypatch, winerror
+):
+    _, _, store = locations
+    session = store.prepare(_record(tmp_path))
+    session.start()
+    prior_record = session.record
+    prior_payload = session.path.read_bytes()
+    publish = journal_module._publish
+    attempts = 0
+
+    def transient_failure(source, target, *, overwrite):
+        nonlocal attempts
+        attempts += 1
+        assert target == session.path
+        assert session.path.read_bytes() == prior_payload
+        if attempts == 1:
+            error = PermissionError("injected transient publication denial")
+            error.winerror = winerror
+            raise error
+        publish(source, target, overwrite=overwrite)
+
+    monkeypatch.setattr(journal_module, "_publish", transient_failure)
+    changed = replace(prior_record.entries[0], stage="before_rename")
+    updated = session.checkpoint(changed)
+
+    assert attempts == 2
+    assert updated.entries == (changed,)
+    assert session.can_modify
+    assert _found(store).record == updated
+
+
+def test_checkpoint_stops_after_bounded_windows_publication_denials(
+    locations, tmp_path, monkeypatch
+):
+    _, _, store = locations
+    session = store.prepare(_record(tmp_path))
+    session.start()
+    prior_record = session.record
+    prior_payload = session.path.read_bytes()
+    attempts = 0
+
+    def denied(_source, target, *, overwrite):
+        nonlocal attempts
+        attempts += 1
+        assert target == session.path and overwrite
+        assert session.path.read_bytes() == prior_payload
+        error = PermissionError("injected access denied")
+        error.winerror = 5
+        raise error
+
+    monkeypatch.setattr(journal_module, "_publish", denied)
+    with pytest.raises(JournalError, match="injected access denied"):
+        session.checkpoint(replace(prior_record.entries[0], stage="before_rename"))
+
+    assert attempts == 3
+    assert session.record == prior_record
+    assert session.path.read_bytes() == prior_payload
+    assert not session.can_modify
+
+
 @pytest.mark.parametrize("boundary", ["initial", "locator"])
 def test_c04_c08_failed_preparation_never_returns_a_modification_session(
     locations, tmp_path, monkeypatch, boundary

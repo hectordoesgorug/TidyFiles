@@ -37,6 +37,7 @@ junit.xml
 /tidyfiles.log
 /tidyfiles.log.*
 /trash/
+/journals
 
 # Local environment values and credentials
 .env

@@ -476,6 +476,9 @@ unchanged entries from the last successful publication. The session keeps the
 representations private. Changed entries use the same codec as full records,
 and every checkpoint verifies record-wide invariants. Preparation, state
 transitions, finalization, and loading from disk validate every entry.
+Checkpoint publication retries Windows access-denied and sharing-violation
+errors up to two times after the initial attempt, verifying the prior durable
+record before each retry. Persistent errors still fail the session closed.
 
 `ModifyingJobCoordinator` reserves one slot per application. Preparation
 can be cancelled. Entering modification requires a registered journal and
@@ -623,7 +626,10 @@ until filesystem changes finish. Successfully renamed and unchanged entries
 leave the working collection. Failed and excluded entries remain, with verified
 paths and diagnostics refreshed where available. Auto-clean receives the
 original snapshot and successful output paths and runs only after complete
-success.
+success. During modification, the status area reports completed files and
+elapsed time, then estimates remaining time from measured progress. Failure
+dialogs show the aggregate result and error instead of listing every unprocessed
+path.
 
 The GUI also connects read-only startup recovery inspection, confirmed manual
 Trash clearing, and the independent Auto-Clear Trash setting for normal exit.

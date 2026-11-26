@@ -581,6 +581,39 @@ def test_trash_clear_preserves_unresolved_recovery_file_and_containing_batch(run
     )
 
 
+def test_missing_managed_trash_inspection_does_not_create_its_directory(
+    runtime, tmp_path, monkeypatch
+):
+    _, coordinator, journals = runtime
+    missing = tmp_path / "not-created-trash"
+    monkeypatch.setattr(cleanup_module, "managed_trash_path", lambda: missing)
+
+    summary = TrashClearService(coordinator, journals).inspect()
+    result = TrashClearService(coordinator, journals).clear(manually_authorized=True)
+
+    assert summary.detail == "Managed Trash does not exist"
+    assert summary.eligible_count == 0
+    assert result.inspection.detail == "Managed Trash does not exist"
+    assert not missing.exists()
+
+
+def test_existing_empty_managed_trash_has_no_eligible_content(runtime, tmp_path, monkeypatch):
+    _, coordinator, journals = runtime
+    empty = tmp_path / "empty-trash"
+    empty.mkdir()
+    monkeypatch.setattr(cleanup_module, "managed_trash_path", lambda: empty)
+
+    service = TrashClearService(coordinator, journals)
+    summary = service.inspect()
+    result = service.clear(manually_authorized=True)
+
+    assert summary.detail is None
+    assert summary.eligible_count == 0
+    assert result.inspection.eligible_count == 0
+    assert result.cleanup.detail == "No eligible Trash items"
+    assert empty.is_dir() and tuple(empty.iterdir()) == ()
+
+
 def test_trash_clear_does_not_follow_junction_outside_managed_batch(runtime, tmp_path):
     app, coordinator, journals = runtime
     batch = app / "trash" / f"20261126T000000Z-{'c' * 32}"

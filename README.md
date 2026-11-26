@@ -44,7 +44,8 @@ Folder destinations. Collision-only partial processing and changed plans
 require review; filename-format errors block the full batch, and incomplete
 imports require acknowledgment. Preparation runs outside Tk and can be
 canceled. Active filesystem modification cannot be canceled, and normal
-application closure waits until it finishes.
+application closure waits until it finishes. Processing status reports completed
+files and elapsed time, with an estimated remaining time after enough progress.
 
 Startup displays unresolved transaction recovery details without restoring,
 moving, or deleting files. Clear Trash requires confirmation and is limited to

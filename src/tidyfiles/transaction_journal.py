@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import tempfile
+import time
 from ctypes import wintypes
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -465,7 +466,16 @@ class JournalSession:
             if self._record.state is updated.state is TransactionState.IN_PROGRESS:
                 previous = self._record, self._serialized_rows
             payload, rows = _record_payload(updated, previous=previous)
-            _atomic_write(self._path, payload, overwrite=True)
+            for attempt in range(3):
+                try:
+                    if attempt:
+                        self._check_persisted()
+                    _atomic_write(self._path, payload, overwrite=True)
+                    break
+                except OSError as error:
+                    if getattr(error, "winerror", None) not in {5, 32} or attempt == 2:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
         except Exception as error:
             self._failed = True
             raise JournalError(f"Cannot persist checkpoint at {self._path}: {error}") from error

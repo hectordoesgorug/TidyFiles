@@ -28,11 +28,18 @@ from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences, sor
 @pytest.fixture(scope="module")
 def app_runtime(tmp_path_factory):
     config_path = tmp_path_factory.mktemp("collection-controls") / "config.json"
-    root = create_main_window(load_config(config_path), config_path)
-    root.update()
-    runtime = {"root": root, "app": root.application, "config_path": config_path}
-    yield runtime
-    runtime["app"].close()
+    local = config_path.parent / "local"
+    local.mkdir()
+    from tidyfiles.transaction_journal import JournalStore
+
+    journals = JournalStore(app_dir=config_path.parent / "app", local_app_data=local)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+        root = create_main_window(load_config(config_path), config_path)
+        root.update()
+        runtime = {"root": root, "app": root.application, "config_path": config_path}
+        yield runtime
+        runtime["app"].close()
 
 
 def _wait_for_idle(root, app, timeout: float = 8) -> None:
@@ -218,11 +225,17 @@ import sys
 import threading
 import time
 from pathlib import Path
+import tidyfiles.app as app_module
 from tidyfiles.app import create_main_window
 from tidyfiles.config import load_config
 from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
+from tidyfiles.transaction_journal import JournalStore
 
 path = Path(sys.argv[1])
+local = path.parent / "local"
+local.mkdir(exist_ok=True)
+journals = JournalStore(app_dir=path.parent / "app", local_app_data=local)
+app_module.JournalStore = lambda: journals
 root = create_main_window(load_config(path), path)
 app = root.application
 try:
@@ -946,9 +959,15 @@ def test_native_column_resizing_persists_across_updates_tabs_and_restart(
     script = """
 from pathlib import Path
 import sys
+import tidyfiles.app as app_module
 from tidyfiles.app import create_main_window
 from tidyfiles.config import load_config
+from tidyfiles.transaction_journal import JournalStore
 path = Path(sys.argv[1])
+local = path.parent / 'local'
+local.mkdir(exist_ok=True)
+journals = JournalStore(app_dir=path.parent / 'app', local_app_data=local)
+app_module.JournalStore = lambda: journals
 root = create_main_window(load_config(path), path)
 app = root.application
 try:

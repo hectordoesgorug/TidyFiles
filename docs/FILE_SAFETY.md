@@ -187,7 +187,9 @@ In-progress checkpoints reuse validated representations of unchanged entries,
 validate changed entries and record-wide constraints, and publish a complete
 version 1 record. The session adopts the new representations only after
 successful publication. A failed write leaves the session at its last
-successful checkpoint and blocks further modification.
+successful checkpoint and blocks further modification. Windows access-denied
+and sharing-violation publication errors receive at most two bounded retries;
+each retry first verifies that the prior durable journal is unchanged.
 
 Finalization requires an independently verified outcome for every entry and
 resolution of each recorded staging or temporary recovery dependency. It

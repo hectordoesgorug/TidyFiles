@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import customtkinter as ctk
+import pytest
 
 import tidyfiles.app as app_module
 import tidyfiles.discovery as discovery_module
@@ -967,3 +968,282 @@ def test_modifying_phase_disables_conflicting_actions_and_blocks_cancel_and_clos
     finally:
         release_modification.set()
         _close_app(app, root)
+
+
+def test_movement_button_geometry_stays_stable_during_collection_updates(
+    tmp_path, monkeypatch
+) -> None:
+    if _run_gui_test_in_isolated_process(
+        "test_movement_button_geometry_stays_stable_during_collection_updates"
+    ):
+        return
+    from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
+    from tidyfiles.transaction_journal import JournalStore
+
+    root_folder = tmp_path / "scan"
+    root_folder.mkdir()
+    for index in range(120):
+        (root_folder / f"scan-{index:03d}.txt").touch()
+    (tmp_path / "local").mkdir()
+    journals = JournalStore(app_dir=tmp_path / "app", local_app_data=tmp_path / "local")
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    root = create_main_window(default_config(), tmp_path / "config.json")
+    app = root.application
+
+    def geometry():
+        root.update_idletasks()
+        return tuple(
+            (
+                key,
+                button.winfo_x(),
+                button.winfo_y(),
+                button.winfo_width(),
+                button.winfo_height(),
+            )
+            for key, button in app.movement_buttons.items()
+        )
+
+    try:
+        root.update()
+        expected = geometry()
+        observations = []
+        monkeypatch.setattr(
+            app_module.filedialog, "askdirectory", lambda **_options: str(root_folder)
+        )
+        app.add_folder()
+        while app.import_controller.busy:
+            root.update()
+            observations.append(geometry())
+            time.sleep(0.001)
+        observations.append(geometry())
+
+        app._start_sort(SortPreferences(SortCriterion.NAME, SortDirection.DESCENDING))
+        while app._collection_operation_pending:
+            root.update()
+            observations.append(geometry())
+            time.sleep(0.001)
+        observations.append(geometry())
+
+        app.rename_format.set("<Name> preview")
+        _wait_for(root, app._process_ready)
+        observations.append(geometry())
+        assert observations
+        assert all(item == expected for item in observations)
+    finally:
+        _close_app(app, root)
+
+
+def test_process_button_colors_follow_availability_in_both_themes(tmp_path, monkeypatch):
+    if _run_gui_test_in_isolated_process(
+        "test_process_button_colors_follow_availability_in_both_themes"
+    ):
+        return
+    from tidyfiles.transaction_journal import JournalStore
+
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"fixture")
+    (tmp_path / "local").mkdir()
+    journals = JournalStore(app_dir=tmp_path / "app", local_app_data=tmp_path / "local")
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    root = create_main_window(default_config(), tmp_path / "config.json")
+    app = root.application
+    try:
+        root.update()
+        _import_files(app, root, monkeypatch, source)
+        app.rename_format.set("<UnknownToken>")
+        _wait_for(
+            root,
+            lambda: app._preview_result is not None and not app._preview_result.is_valid,
+        )
+        for mode in ("Light", "Dark"):
+            app._set_appearance_mode(mode)
+            root.update()
+            assert app.process_button.cget("state") == "disabled"
+            assert app.process_button.cget("fg_color") == ("gray82", "#3A3A3A")
+
+        app.rename_format.set("<Name> ready")
+        _wait_for(root, app._process_ready)
+        active_color = app_module.ctk.ThemeManager.theme["CTkButton"]["fg_color"]
+        for mode in ("Light", "Dark"):
+            app._set_appearance_mode(mode)
+            root.update()
+            assert app.process_button.cget("state") == "normal"
+            assert app.process_button.cget("fg_color") == active_color
+    finally:
+        _close_app(app, root)
+
+
+def test_settings_opens_repeatedly_after_switching_light_and_dark(tmp_path, monkeypatch):
+    if _run_gui_test_in_isolated_process(
+        "test_settings_opens_repeatedly_after_switching_light_and_dark"
+    ):
+        return
+    from tidyfiles.transaction_journal import JournalStore
+
+    (tmp_path / "local").mkdir()
+    journals = JournalStore(app_dir=tmp_path / "app", local_app_data=tmp_path / "local")
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    root = create_main_window(default_config(), tmp_path / "config.json")
+    app = root.application
+    try:
+        root.update()
+        for mode in ("Light", "Dark", "Light", "Dark"):
+            app._set_appearance_mode(mode)
+            root.update()
+            app.settings_button.invoke()
+            root.update()
+            dialog = app.settings_window
+            assert dialog is not None and dialog.winfo_exists()
+            assert app.appearance_mode == mode
+            dialog.destroy()
+            root.update()
+    finally:
+        _close_app(app, root)
+
+
+def test_empty_managed_trash_states_show_message_without_clearing(tmp_path, monkeypatch):
+    if _run_gui_test_in_isolated_process(
+        "test_empty_managed_trash_states_show_message_without_clearing"
+    ):
+        return
+    from tidyfiles.transaction_journal import JournalStore
+
+    class TrashService:
+        def __init__(self):
+            self.clear_calls = 0
+            self.summaries = iter(
+                (
+                    SimpleNamespace(
+                        eligible_count=0,
+                        eligible_size_bytes=0,
+                        items=(),
+                        detail="Managed Trash does not exist",
+                    ),
+                    SimpleNamespace(
+                        eligible_count=0,
+                        eligible_size_bytes=0,
+                        items=(),
+                        detail=None,
+                    ),
+                )
+            )
+
+        def inspect(self):
+            return next(self.summaries)
+
+        def clear(self, **_options):
+            self.clear_calls += 1
+            raise AssertionError("An empty Trash must not call clear")
+
+    (tmp_path / "local").mkdir()
+    journals = JournalStore(app_dir=tmp_path / "app", local_app_data=tmp_path / "local")
+    service = TrashService()
+    messages = []
+    warnings = []
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    monkeypatch.setattr(app_module, "TrashClearService", lambda *_args: service)
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "showinfo",
+        lambda title, message, **_options: messages.append((title, message)),
+    )
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "showwarning",
+        lambda title, message, **_options: warnings.append((title, message)),
+    )
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "askyesno",
+        lambda *_args, **_options: pytest.fail(
+            "Empty Trash must not ask for deletion confirmation"
+        ),
+    )
+    root = create_main_window(default_config(), tmp_path / "config.json")
+    app = root.application
+    try:
+        root.update()
+        app.clear_trash()
+        _wait_for(root, lambda: app._processing_phase == "idle" and messages)
+        app.clear_trash()
+        _wait_for(root, lambda: app._processing_phase == "idle" and len(messages) == 2)
+        assert messages == [
+            ("Clear Trash", "Trash is empty."),
+            ("Clear Trash", "Trash is empty."),
+        ]
+        assert warnings == []
+        assert service.clear_calls == 0
+    finally:
+        _close_app(app, root)
+
+
+def test_rename_progress_shows_measured_elapsed_and_delays_eta(tmp_path, monkeypatch):
+    if _run_gui_test_in_isolated_process(
+        "test_rename_progress_shows_measured_elapsed_and_delays_eta"
+    ):
+        return
+    from tidyfiles.rename_executor import RenameProgress
+    from tidyfiles.transaction_journal import JournalStore
+
+    (tmp_path / "local").mkdir()
+    journals = JournalStore(app_dir=tmp_path / "app", local_app_data=tmp_path / "local")
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    root = create_main_window(default_config(), tmp_path / "config.json")
+    app = root.application
+    job_id = uuid4()
+    monkeypatch.setattr(
+        app,
+        "coordinator",
+        SimpleNamespace(current=SimpleNamespace(job_id=job_id, modifying=True)),
+    )
+    try:
+        root.update()
+        app._processing_started_at = None
+        app._show_processing_progress(RenameProgress(job_id, "before_rename", 5, 1200))
+        assert "Renaming files: 5/1200" in app.status.cget("text")
+        assert "Elapsed:" in app.status.cget("text")
+        assert "ETA:" not in app.status.cget("text")
+
+        app._processing_started_at = time.monotonic() - 25
+        app._show_processing_progress(RenameProgress(job_id, "before_rename", 350, 1200))
+        assert "Renaming files: 350/1200" in app.status.cget("text")
+        assert "Elapsed: 00:25" in app.status.cget("text")
+        assert "ETA: 01:01" in app.status.cget("text")
+        assert app.progress.get() == pytest.approx(350 / 1200)
+    finally:
+        app._set_processing_phase("idle", "Ready")
+        _close_app(app, root)
+
+
+def test_large_rename_failure_summary_aggregates_unprocessed_rows():
+    from tidyfiles.rename_executor import (
+        RenameEntryResult,
+        RenameOutcome,
+        RenameResult,
+        RenameState,
+    )
+
+    app = object.__new__(app_module._MainWindow)
+    app._processing_snapshot = SimpleNamespace(entries=())
+    app._processing_diagnostics_by_id = {}
+    error = "Cannot persist checkpoint: [WinError 5] Access is denied."
+    entries = tuple(
+        RenameEntryResult(uuid4(), RenameOutcome.RENAMED)
+        for _ in range(142)
+    ) + (
+        RenameEntryResult(uuid4(), RenameOutcome.FAILED_SAFE, detail=error),
+        *(
+            RenameEntryResult(uuid4(), RenameOutcome.NOT_PROCESSED)
+            for _ in range(1057)
+        ),
+    )
+    result = RenameResult(RenameState.RECOVERY_REQUIRED, uuid4(), entries, error)
+
+    summary = app._rename_result_summary(result, None, set())
+
+    assert "142 renamed" in summary
+    assert "1 failed safely" in summary
+    assert "1057 not processed" in summary
+    assert "[WinError 5] Access is denied" in summary
+    assert "synthetic-" not in summary
+    assert len(summary) < 300

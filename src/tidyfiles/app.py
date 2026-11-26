@@ -7,6 +7,7 @@ import os
 import queue
 import subprocess
 import threading
+import time
 import tkinter as tk
 from copy import deepcopy
 from datetime import datetime
@@ -205,6 +206,17 @@ def _file_type(filename: str) -> str:
     return media_type or "—"
 
 
+def _format_elapsed(seconds: float) -> str:
+    total = max(0, int(seconds))
+    minutes, seconds = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    return (
+        f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        if hours
+        else f"{minutes:02d}:{seconds:02d}"
+    )
+
+
 class _MainWindow:
     """Own the one application collection and its presentation widgets."""
 
@@ -239,6 +251,7 @@ class _MainWindow:
         self._processing_progress: queue.Queue[Any] = queue.Queue(maxsize=64)
         self._processing_after: str | None = None
         self._processing_cancel = threading.Event()
+        self._processing_started_at: float | None = None
         self._processing_snapshot: Any = None
         self._processing_options: DestinationOptions | None = None
         self._processing_acknowledged_import_ids: tuple[UUID, ...] = ()
@@ -653,7 +666,7 @@ class _MainWindow:
         row = ctk.CTkFrame(self.root, fg_color="transparent")
         row.grid(row=4, column=0, padx=16, pady=(0, 5), sticky="ew")
         for column in range(4):
-            row.grid_columnconfigure(column, weight=0)
+            row.grid_columnconfigure(column, minsize=102, weight=0)
         row.grid_columnconfigure(4, weight=1)
         self.movement_buttons: dict[str, ctk.CTkButton] = {}
         for column, (key, text) in enumerate(
@@ -1422,6 +1435,7 @@ class _MainWindow:
         self._processing_acknowledged_import_ids = incomplete_ids
         self._processing_auto_clean_enabled = bool(self.auto_clean_switch.get())
         self._processing_cancel.clear()
+        self._processing_started_at = None
         self._submit_destination_plan(evaluation)
 
     def _submit_destination_plan(
@@ -1673,6 +1687,8 @@ class _MainWindow:
             modifying = bool(job and job.job_id == update.job_id and job.modifying)
             if modifying:
                 self._set_processing_phase("rename_modifying", "Renaming files…")
+                if self._processing_started_at is None:
+                    self._processing_started_at = time.monotonic()
             else:
                 self._set_processing_phase(
                     "rename_preparing",
@@ -1681,13 +1697,17 @@ class _MainWindow:
                 )
             if update.total:
                 self.progress.set(update.completed / update.total)
-            label = "Renaming files" if modifying else "Preparing rename"
-            if update.entry_id is not None:
-                entry = self._entries_by_id.get(update.entry_id)
-                index = self._display_positions.get(update.entry_id, -1) + 1
-                label += f" · {index}/{len(self._display_order)}"
-                if entry is not None:
-                    label += f" · {entry.original_filename}"
+            label = "Preparing rename"
+            if modifying:
+                started = self._processing_started_at or time.monotonic()
+                elapsed = max(0.0, time.monotonic() - started)
+                label = (
+                    f"Renaming files: {update.completed}/{update.total} · "
+                    f"Elapsed: {_format_elapsed(elapsed)}"
+                )
+                if update.completed >= 10 and elapsed >= 2 and update.total > update.completed:
+                    remaining = elapsed * (update.total - update.completed) / update.completed
+                    label += f" · ETA: {_format_elapsed(remaining + 0.5)}"
             self.status.configure(text=label)
         elif isinstance(update, tuple) and update[0] == "stage":
             self._set_processing_phase(update[1], update[2])
@@ -1868,22 +1888,22 @@ class _MainWindow:
             f"{counts[RenameOutcome.RECOVERY_REQUIRED]} need recovery, "
             f"{counts[RenameOutcome.NOT_PROCESSED] + len(excluded)} not processed."
         )
-        problems = [
-            item for item in result.entries
-            if item.outcome not in {RenameOutcome.RENAMED, RenameOutcome.UNCHANGED}
-        ]
         lines = [result.detail] if result.detail else []
-        lines.extend(
-            f"{item.outcome.value}: {item.actual_path or item.entry_id}"
-            + (f" — {item.detail}" if item.detail else "")
-            for item in problems[:12]
-        )
-        lines.extend(
-            f"Excluded: {entry.source_path} — "
-            f"{self._processing_diagnostics_by_id.get(entry.entry_id, 'not processed')}"
-            for entry in self._processing_snapshot.entries
-            if entry.entry_id in excluded
-        )
+        if not lines:
+            diagnostic = next(
+                (
+                    item.detail
+                    for item in result.entries
+                    if item.outcome
+                    in {RenameOutcome.FAILED_SAFE, RenameOutcome.RECOVERY_REQUIRED}
+                    and item.detail
+                ),
+                None,
+            )
+            if diagnostic:
+                lines.append(diagnostic)
+        if excluded:
+            lines.append(f"{len(excluded)} file(s) were excluded from the confirmed subset.")
         if cleanup is not None:
             if cleanup.detail:
                 lines.append(f"Auto-clean: {cleanup.detail}")
@@ -1916,6 +1936,7 @@ class _MainWindow:
         self._processing_plan = None
         self._processing_options = None
         self._processing_snapshot = None
+        self._processing_started_at = None
         self.progress.set(0)
         self.cancel_button.grid_remove()
         self.status.configure(text=message)
@@ -2003,14 +2024,18 @@ class _MainWindow:
             self._finish_processing(message)
             messagebox.showwarning("Clear Trash", message, parent=self.root)
             return
+        if summary.detail == "Managed Trash does not exist":
+            self._finish_processing("Trash is empty.")
+            messagebox.showinfo("Clear Trash", "Trash is empty.", parent=self.root)
+            return
         if summary.detail:
             self._finish_processing(summary.detail)
             messagebox.showwarning("Clear Trash unavailable", summary.detail, parent=self.root)
             return
         if not summary.eligible_count:
-            message = "No eligible files were found in recognized managed Trash batches."
+            message = "Trash is empty."
             if summary.items:
-                message += " Unknown, linked, or recovery-dependent entries were preserved."
+                message += " Unsafe or recovery-dependent entries were preserved."
             self._finish_processing(message)
             messagebox.showinfo("Clear Trash", message, parent=self.root)
             return
@@ -2423,7 +2448,7 @@ class _MainWindow:
             for button in self.movement_buttons.values():
                 button.configure(state="disabled")
             self.refresh_preview_button.configure(state="disabled")
-            self.process_button.configure(state="disabled")
+            self._configure_process_button(False)
             self.trash_clear_button.configure(state="disabled")
             if (
                 self._processing_phase != "idle"
@@ -2463,9 +2488,7 @@ class _MainWindow:
                 else "disabled"
             )
         )
-        self.process_button.configure(
-            state="normal" if self._process_ready() else "disabled"
-        )
+        self._configure_process_button(self._process_ready())
         self.trash_clear_button.configure(state="normal")
         self.settings_button.configure(state="normal")
         self.format_field.configure(state="normal")
@@ -2494,6 +2517,20 @@ class _MainWindow:
         }
         for key, button in self.movement_buttons.items():
             button.configure(state="normal" if movement[key] else "disabled")
+
+    def _configure_process_button(self, enabled: bool) -> None:
+        theme = ctk.ThemeManager.theme["CTkButton"]
+        disabled_color = ("gray82", "#3A3A3A")
+        disabled_text = ("gray45", "gray65")
+        self.process_button.configure(
+            state="normal" if enabled else "disabled",
+            fg_color=theme["fg_color"] if enabled else disabled_color,
+            hover_color=theme["hover_color"] if enabled else disabled_color,
+            text_color=theme["text_color"] if enabled else disabled_text,
+            text_color_disabled=(
+                theme["text_color_disabled"] if enabled else disabled_text
+            ),
+        )
 
     def _process_ready(self) -> bool:
         result = self._preview_result
