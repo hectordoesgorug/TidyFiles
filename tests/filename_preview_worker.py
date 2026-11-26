@@ -14,6 +14,7 @@ from tidyfiles.app import _FORMAT_PRESETS, create_main_window
 from tidyfiles.config import default_config
 from tidyfiles.filename_evaluator import FileEvaluationContext, evaluate_batch
 from tidyfiles.filename_format import TokenKind, parse_format
+from tidyfiles.filename_integration import EvaluationProgress, EvaluationStage
 from tidyfiles.format_reference import (
     FORMAT_REFERENCE,
     TOKEN_GROUPS,
@@ -365,6 +366,14 @@ def test_collection_order_metadata_refresh_and_source_safety(runtime, tmp_path: 
     app.rename_format.set("Photo <IncNr>")
     _import_files(root, app, tuple(paths))
     _wait_preview(root, app)
+    assert app._preview_result is not None
+    app._preview_progress.put(
+        EvaluationProgress(
+            app._preview_result.request_id, EvaluationStage.EVALUATING, 1, 1
+        )
+    )
+    _pump_until(root, lambda: app._preview_progress.empty())
+    assert app.status.cget("text").startswith("Preview complete")
     ids_by_name = {name: _row(app, name)[0] for name in ("file1.txt", "file2.txt", "file10.txt")}
     assert _row(app, "file1.txt")[1][2] == "Photo 01.txt"
     assert _row(app, "file10.txt")[1][2] == "Photo 03.txt"

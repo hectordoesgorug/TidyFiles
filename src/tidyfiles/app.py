@@ -1186,8 +1186,16 @@ class _MainWindow:
             ):
                 continue
             latest_update = update
+        request_has_result = (
+            self._preview_render_result is not None
+            and self._preview_render_result.request_id == request_id
+        ) or (
+            self._preview_result is not None
+            and self._preview_result.request_id == request_id
+        )
         if (
             latest_update is not None
+            and not request_has_result
             and not self._collection_operation_pending
             and self.active_mode == "Bulk Rename"
         ):

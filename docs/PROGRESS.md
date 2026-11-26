@@ -962,6 +962,17 @@ focused Settings, exit-cleanup, and manual empty-Trash regressions passed 4
 tests; the full suite passed 657 tests with zero skips. Ruff, compileall, and
 both Git whitespace checks passed. Tests used isolated temporary fixtures.
 
+### M3-G5 — Preview completion status race
+
+The intermittent timeout was caused by a late queued progress update replacing
+the completed preview status after its current result and rows had already been
+rendered. Metadata refresh and evaluation had completed; the request was not
+stuck. The GUI now ignores progress updates for a request once its result is
+rendering or rendered. A regression injects a late update and verifies that the
+completed status remains visible. On Windows Python 3.13.17, the isolated Tk
+preview worker passed three separate runs and the full suite passed 657 tests
+with zero skips. Ruff, compileall, and both Git whitespace checks passed.
+
 ## M6.1 — Package Restructuring and Architectural Cleanup
 
 This planned maintenance checkpoint follows M6 (Complete GUI Integration) and
