@@ -53,7 +53,8 @@ removes selected recovery information without changing affected files. Clear
 Trash requires confirmation and is limited to recognized managed batches.
 Auto-clean and Auto-Clear Trash are separate,
 default-off settings. Auto-clean runs only after complete rename success from
-explicit Add Folder roots; Auto-Clear Trash runs only after normal exit.
+explicit Add Folder roots; Auto-Clear Trash runs only after normal exit and
+warns only if it encounters errors or leaves content behind.
 Duplicate analysis and media repacking are not implemented, and their controls
 remain disabled.
 

@@ -22,6 +22,7 @@ from tidyfiles.cleanup import (
     AutoCleanRequest,
     AutoCleanService,
     CleanupResult,
+    CleanupStatus,
     TrashClearService,
 )
 from tidyfiles.collection import (
@@ -274,6 +275,8 @@ class _MainWindow:
         self._appearance_after: str | None = None
         self._resize_started = False
         self.settings_window: ctk.CTkToplevel | None = None
+        self.appearance_choice: tk.StringVar | None = None
+        self.auto_clear_trash_switch: ctk.CTkSwitch | None = None
         self._entries_by_id: dict[UUID, CollectionEntry] = {}
         self._display_order: list[UUID] = []
         self._display_positions: dict[UUID, int] = {}
@@ -797,7 +800,10 @@ class _MainWindow:
             self.auto_clean_switch.select() if previous else self.auto_clean_switch.deselect()
 
     def _on_auto_clear_trash_changed(self) -> None:
-        enabled = bool(self.auto_clear_trash_switch.get())
+        switch = self.auto_clear_trash_switch
+        if switch is None or not self._settings_trash_switch_exists():
+            return
+        enabled = bool(switch.get())
         previous = get_auto_clear_trash_on_exit(self.config)
         if enabled and not previous and not messagebox.askyesno(
             "Enable Auto-Clear Trash?",
@@ -806,16 +812,16 @@ class _MainWindow:
             "content are preserved. Enable this setting?",
             parent=self.settings_window or self.root,
         ):
-            self.auto_clear_trash_switch.deselect()
+            switch.deselect()
             return
         set_auto_clear_trash_on_exit(self.config, enabled)
         self._save_preferences()
         if self.config_path is not None and self._last_save_error is not None:
             set_auto_clear_trash_on_exit(self.config, previous)
             if previous:
-                self.auto_clear_trash_switch.select()
+                switch.select()
             else:
-                self.auto_clear_trash_switch.deselect()
+                switch.deselect()
 
     def _show_insert_token_menu(self) -> None:
         menu = self._build_insert_token_menu()
@@ -2611,7 +2617,7 @@ class _MainWindow:
                 self.format_field.configure(state="disabled")
                 self.single_folder_switch.configure(state="disabled")
                 self.auto_clean_switch.configure(state="disabled")
-                if hasattr(self, "auto_clear_trash_switch"):
+                if self._settings_trash_switch_exists():
                     self.auto_clear_trash_switch.configure(state="disabled")
             return
 
@@ -2645,7 +2651,7 @@ class _MainWindow:
         self.format_field.configure(state="normal")
         self.single_folder_switch.configure(state="normal")
         self.auto_clean_switch.configure(state="normal")
-        if hasattr(self, "auto_clear_trash_switch"):
+        if self._settings_trash_switch_exists():
             self.auto_clear_trash_switch.configure(state="normal")
         positions = [self._display_positions[entry_id] for entry_id in selected]
         can_move = bool(positions)
@@ -3689,6 +3695,11 @@ class _MainWindow:
             return
         dialog = ctk.CTkToplevel(self.root)
         self.settings_window = dialog
+        dialog.bind(
+            "<Destroy>",
+            lambda event, window=dialog: self._on_settings_window_destroy(event, window),
+            add="+",
+        )
         dialog.title("Settings")
         dialog.geometry("470x350")
         dialog.resizable(False, False)
@@ -3732,6 +3743,24 @@ class _MainWindow:
         )
         self._show_settings_window(dialog)
 
+    def _on_settings_window_destroy(
+        self, event: tk.Event[Any], dialog: ctk.CTkToplevel
+    ) -> None:
+        if event.widget is dialog and self.settings_window is dialog:
+            self.settings_window = None
+            self.appearance_choice = None
+            self.auto_clear_trash_switch = None
+
+    def _settings_trash_switch_exists(self) -> bool:
+        dialog = self.settings_window
+        switch = self.auto_clear_trash_switch
+        return bool(
+            dialog is not None
+            and switch is not None
+            and dialog.winfo_exists()
+            and switch.winfo_exists()
+        )
+
     def _show_settings_window(self, dialog: ctk.CTkToplevel) -> bool:
         if self.settings_window is not dialog:
             return False
@@ -3773,7 +3802,8 @@ class _MainWindow:
             self.appearance_mode = previous
             ctk.set_appearance_mode(previous)
             self.settings["appearance_mode"] = previous
-            self.appearance_choice.set(previous)
+            if self.appearance_choice is not None:
+                self.appearance_choice.set(previous)
             self._apply_table_appearance()
             if previous == "System":
                 self._schedule_system_appearance_check()
@@ -3960,20 +3990,30 @@ class _MainWindow:
                 str(error or "Trash clear did not return a result."),
                 parent=self.root,
             )
-        elif result.cleanup.failures or result.cleanup.detail not in {
-            None,
-            "No eligible Trash items",
-        }:
-            details = result.cleanup.detail or "Some Trash entries could not be deleted."
-            failed = "\n".join(
-                f"{item.path}: {item.reason or 'deletion failed'}"
-                for item in result.cleanup.failures[:12]
+        else:
+            leftovers = tuple(
+                item
+                for item in (*result.inspection.items, *result.cleanup.items)
+                if item.status in {CleanupStatus.SKIPPED, CleanupStatus.FAILED}
             )
-            messagebox.showwarning(
-                "Auto-Clear Trash results",
-                details + (f"\n\n{failed}" if failed else ""),
-                parent=self.root,
-            )
+            empty_states = {
+                None,
+                "No eligible Trash items",
+                "Managed Trash does not exist",
+            }
+            if result.cleanup.detail not in empty_states or leftovers:
+                details = result.cleanup.detail
+                if details in empty_states:
+                    details = "Some Trash contents could not be cleared."
+                failed = "\n".join(
+                    f"{item.path}: {item.reason or 'not cleared'}"
+                    for item in leftovers[:12]
+                )
+                messagebox.showwarning(
+                    "Auto-Clear Trash results",
+                    details + (f"\n\n{failed}" if failed else ""),
+                    parent=self.root,
+                )
         self._update_control_states()
         self._finish_close()
 

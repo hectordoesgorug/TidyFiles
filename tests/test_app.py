@@ -813,7 +813,10 @@ def test_auto_clear_trash_runs_only_during_enabled_normal_exit(tmp_path, monkeyp
         def clear(self, **options):
             self.clear_calls.append(options)
             return SimpleNamespace(
-                cleanup=SimpleNamespace(deleted_paths=(), failures=(), detail=None)
+                inspection=SimpleNamespace(items=()),
+                cleanup=SimpleNamespace(
+                    deleted_paths=(), failures=(), items=(), detail=None
+                ),
             )
 
     (tmp_path / "local").mkdir()
@@ -833,6 +836,116 @@ def test_auto_clear_trash_runs_only_during_enabled_normal_exit(tmp_path, monkeyp
     assert service.clear_calls == [
         {"auto_clear_enabled": True, "normal_exit": True}
     ]
+
+
+def test_auto_clear_trash_exit_silently_handles_empty_and_cleared_trash(
+    tmp_path, monkeypatch
+) -> None:
+    if _run_gui_test_in_isolated_process(
+        "test_auto_clear_trash_exit_silently_handles_empty_and_cleared_trash"
+    ):
+        return
+    if os.name != "nt":
+        pytest.skip("Managed Trash filesystem checks require Windows")
+
+    import tidyfiles.cleanup as cleanup_module
+    from tidyfiles.transaction_journal import JournalStore
+
+    warnings = []
+    confirmations = []
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "showwarning",
+        lambda title, message, **_options: warnings.append((title, message)),
+    )
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "askyesno",
+        lambda *_args, **_options: confirmations.append(True) or True,
+    )
+    remove_file = cleanup_module.remove_file
+
+    def fail_remove_file(*_args):
+        raise PermissionError("fixture deletion failure")
+
+    for index, case in enumerate(
+        ("absent", "empty", "populated", "failed", "leftover", "disabled")
+    ):
+        fixture = tmp_path / case
+        local_app_data = fixture / "local"
+        local_app_data.mkdir(parents=True)
+        trash_path = fixture / "managed-trash"
+        if case != "absent":
+            trash_path.mkdir()
+        batch = trash_path / f"20261126T000000Z-{index:032x}"
+        if case in {"populated", "failed", "disabled"}:
+            batch.mkdir()
+            (batch / "photo.txt").write_text("fixture contents", encoding="utf-8")
+        elif case == "leftover":
+            (trash_path / "unrecognized.txt").write_text(
+                "preserve", encoding="utf-8"
+            )
+
+        monkeypatch.setattr(
+            cleanup_module, "managed_trash_path", lambda path=trash_path: path
+        )
+        monkeypatch.setattr(
+            cleanup_module,
+            "remove_file",
+            fail_remove_file if case == "failed" else remove_file,
+        )
+        journals = JournalStore(
+            app_dir=fixture / "app", local_app_data=local_app_data
+        )
+        monkeypatch.setattr(
+            app_module, "JournalStore", lambda store=journals: store
+        )
+        root = create_main_window(default_config(), fixture / "config.json")
+        app = root.application
+        try:
+            root.update()
+            if case != "disabled":
+                app.open_settings()
+                root.update()
+                dialog = app.settings_window
+                assert dialog is not None
+                app.auto_clear_trash_switch.toggle()
+                assert app.config["global_settings"]["auto_clear_trash_on_exit"]
+                dialog.destroy()
+                root.update()
+                assert app.settings_window is None
+                assert app.appearance_choice is None
+                assert app.auto_clear_trash_switch is None
+
+            app.close()
+            _wait_for(root, lambda: app._closing)
+
+            if case == "absent":
+                assert not trash_path.exists()
+            elif case == "empty":
+                assert list(trash_path.iterdir()) == []
+            elif case == "populated":
+                assert list(trash_path.iterdir()) == []
+            elif case == "failed":
+                assert (batch / "photo.txt").read_text(encoding="utf-8") == (
+                    "fixture contents"
+                )
+            elif case == "leftover":
+                assert (trash_path / "unrecognized.txt").read_text(
+                    encoding="utf-8"
+                ) == "preserve"
+            elif case == "disabled":
+                assert (batch / "photo.txt").read_text(encoding="utf-8") == (
+                    "fixture contents"
+                )
+        finally:
+            _close_app(app, root)
+
+    assert len(confirmations) == 5
+    assert len(warnings) == 2
+    assert all(title == "Auto-Clear Trash results" for title, _message in warnings)
+    assert "fixture deletion failure" in warnings[0][1]
+    assert "unrecognized.txt" in warnings[1][1]
 
 
 def test_startup_recovery_notice_shows_paths_stages_and_explorer_location(
@@ -1184,6 +1297,7 @@ def test_settings_opens_repeatedly_after_switching_light_and_dark(tmp_path, monk
     app = root.application
     try:
         root.update()
+        previous_dialog = None
         for mode, next_mode in (("Light", "Dark"), ("Dark", "Light")):
             app._set_appearance_mode(mode)
             root.update()
@@ -1193,6 +1307,7 @@ def test_settings_opens_repeatedly_after_switching_light_and_dark(tmp_path, monk
             root.update()
             dialog = app.settings_window
             assert dialog is not None and dialog.state() == "normal"
+            assert dialog is not previous_dialog
             assert app.appearance_mode == mode
             app._set_appearance_mode(next_mode)
             time.sleep(0.03)
@@ -1210,6 +1325,10 @@ def test_settings_opens_repeatedly_after_switching_light_and_dark(tmp_path, monk
             assert app.appearance_mode == next_mode
             dialog.destroy()
             root.update()
+            assert app.settings_window is None
+            assert app.appearance_choice is None
+            assert app.auto_clear_trash_switch is None
+            previous_dialog = dialog
     finally:
         _close_app(app, root)
 

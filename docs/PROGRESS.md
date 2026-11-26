@@ -950,6 +950,18 @@ passed 7 tests; the complete suite passed 656 tests with zero skips. Ruff,
 compileall, and both Git whitespace checks passed. The retained journal's size,
 timestamp, and SHA-256 matched their pre-test values.
 
+### M3-G4 — Settings widget lifecycle and Auto-Clear exit behavior
+
+Settings widget references are cleared when their dialog is destroyed, and
+processing controls update the Auto-Clear switch only while it exists. Auto-
+Clear Trash silently handles a missing or empty Trash directory and successful
+clearing; it warns when an error occurs or protected, skipped, or failed content
+remains. Normal exit does not create a Trash directory. Manual Clear Trash
+continues to show its empty-state message. On Windows Python 3.13.17, the
+focused Settings, exit-cleanup, and manual empty-Trash regressions passed 4
+tests; the full suite passed 657 tests with zero skips. Ruff, compileall, and
+both Git whitespace checks passed. Tests used isolated temporary fixtures.
+
 ## M6.1 — Package Restructuring and Architectural Cleanup
 
 This planned maintenance checkpoint follows M6 (Complete GUI Integration) and

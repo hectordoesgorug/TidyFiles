@@ -23,8 +23,11 @@ disclosure. It runs only after complete rename success, uses the original
 collection snapshot, and preserves operation outputs. It is limited to
 `Thumbs.db`, `.DS_Store`, `desktop.ini`, and empty descendant directories.
 Auto-Clear Trash is a separate default-off setting that runs only on normal
-exit. Startup recovery inspection is read-only and does not restore, move, or
-delete files. The Counter remains a UI option only; no counter analysis runs.
+exit. Missing or empty Trash and successful clearing produce no exit dialog;
+actual errors and preserved or undeleted contents produce a warning. Exit
+clearing does not create the Trash directory. Startup recovery inspection is
+read-only and does not restore, move, or delete files. The Counter remains a
+UI option only; no counter analysis runs.
 
 ## Implemented foundations
 
@@ -329,10 +332,12 @@ files individually, then removes empty directories deepest first. It preserves
 unrecognized root content, unresolved recovery dependencies, links, and
 inaccessible or failed entries. Manual Clear Trash requires explicit
 authorization; Auto-Clear Trash is an independent default-off setting intended
-only for normal exit while idle. Both use the same inspection and deletion
-safeguards. No ownership manifest was added. The GUI provides manual
-confirmation, startup recovery notification, Explorer access to recorded
-locations, and normal-exit invocation.
+only for normal exit while idle. Missing or empty Trash and successful exit
+clearing are silent; errors and remaining protected or undeleted entries are
+reported. Exit clearing does not create the Trash directory. Both use the same
+inspection and deletion safeguards. No ownership manifest was added. The GUI
+provides manual confirmation, startup recovery notification, Explorer access to
+recorded locations, and normal-exit invocation.
 
 ## Planned safety components
 

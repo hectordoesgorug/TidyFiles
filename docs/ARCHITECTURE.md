@@ -609,8 +609,10 @@ empty, deepest first. Unresolved recovery paths, links, failed or unverifiable
 entries, and unrecognized content directly under Trash are preserved. Manual
 clearing requires explicit authorization. The GUI requests confirmation before
 manual clearing. Auto-Clear Trash remains a separate, default-off setting and
-runs only on normal exit while the coordinator is idle. No ownership manifest
-was added.
+runs only on normal exit while the coordinator is idle. Missing or empty Trash
+and successful clearing are silent; errors or preserved and undeleted entries
+produce a warning. Exit clearing does not create the Trash directory. No
+ownership manifest was added.
 
 ## GUI rename integration
 
