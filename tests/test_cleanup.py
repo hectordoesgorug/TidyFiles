@@ -65,9 +65,8 @@ def _snapshot(*roots: Path, incomplete: bool = False):
 
 
 def _request(snapshot, **updates):
-    values = dict(snapshot=snapshot, enabled=True, primary_succeeded=True)
-    values.update(updates)
-    return AutoCleanRequest(**values)
+    request = AutoCleanRequest(snapshot=snapshot, enabled=True, primary_succeeded=True)
+    return replace(request, **updates)
 
 
 def test_auto_clean_removes_allowlist_and_empty_descendants_only(runtime, tmp_path, monkeypatch):
@@ -325,8 +324,10 @@ def test_auto_clean_runs_inside_its_owning_job(runtime, tmp_path):
 
     assert str(clutter) in result.deleted_paths
     assert not clutter.exists()
-    assert coordinator.current.job_id == job.job_id
-    assert coordinator.current.modifying
+    current = coordinator.current
+    assert current is not None
+    assert current.job_id == job.job_id
+    assert current.modifying
     journal.checkpoint(recovery_required="test completed post-processing")
     coordinator.finish(job.job_id)
 

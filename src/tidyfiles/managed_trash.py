@@ -220,7 +220,11 @@ class _TrashRun:
 
     def destinations(self, batch: Path, scope: TrashScope) -> tuple[TransactionEntry, ...]:
         observe = self.target_observer()
-        names = {path_key(item.observation.actual_name) for item in scope.sources}
+        names = set()
+        for item in scope.sources:
+            original = item.observation.actual_name
+            assert original is not None
+            names.add(path_key(original))
         used = set()
         entries = []
         required_bytes = 0

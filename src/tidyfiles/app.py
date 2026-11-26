@@ -140,7 +140,7 @@ def _disabled_button(master: Any, **options: Any) -> ctk.CTkButton:
     )
 
 
-def _style_file_table(root: ctk.CTk) -> None:
+def _style_file_table(root: _ApplicationRoot) -> None:
     dark = ctk.get_appearance_mode() == "Dark"
     background = "#242424" if dark else "#FFFFFF"
     header_background = "#333333" if dark else "#E7E7E7"
@@ -179,7 +179,7 @@ def _style_file_table(root: ctk.CTk) -> None:
     )
 
     # A later evaluator can apply this tag while keeping a textual row status.
-    root._tidyfiles_row_colors = (background, error_background)  # type: ignore[attr-defined]
+    root._tidyfiles_row_colors = (background, error_background)
 
 
 def format_size(size_bytes: int) -> str:
@@ -219,6 +219,14 @@ def _format_elapsed(seconds: float) -> str:
         if hours
         else f"{minutes:02d}:{seconds:02d}"
     )
+
+
+class _ApplicationRoot(ctk.CTk):
+    application: _MainWindow
+    working_collection: WorkingCollection
+    collection_revision: int
+    active_mode: str
+    _tidyfiles_row_colors: tuple[str, str]
 
 
 class _MainWindow:
@@ -337,10 +345,10 @@ class _MainWindow:
         self._preview_details_textbox: ctk.CTkTextbox | None = None
         self._context_entry_id: UUID | None = None
 
-        self.root = ctk.CTk()
-        self.root.application = self  # type: ignore[attr-defined]
-        self.root.working_collection = self.collection  # type: ignore[attr-defined]
-        self.root.collection_revision = self.collection.snapshot().revision  # type: ignore[attr-defined]
+        self.root = _ApplicationRoot()
+        self.root.application = self
+        self.root.working_collection = self.collection
+        self.root.collection_revision = self.collection.snapshot().revision
         self._configure_root()
         self._build_widgets()
         self._apply_mode(_DEFAULT_MODE)
@@ -443,7 +451,7 @@ class _MainWindow:
         self.format_field = ctk.CTkComboBox(
             formats,
             variable=self.rename_format,
-            values=_FORMAT_PRESETS,
+            values=list(_FORMAT_PRESETS),
             state="normal",
             height=30,
             command=self._on_preset_selected,
@@ -567,7 +575,7 @@ class _MainWindow:
         self.sort_dropdown = ctk.CTkOptionMenu(
             toolbar,
             variable=self.sort_choice,
-            values=tuple(_SORT_CRITERIA),
+            values=list(_SORT_CRITERIA),
             width=154,
             command=self._on_sort_criterion,
             fg_color=("gray82", "#3A3A3A"),
@@ -620,7 +628,7 @@ class _MainWindow:
                 stretch=False,
                 anchor="w",
             )
-        background, error_background = self.root._tidyfiles_row_colors  # type: ignore[attr-defined]
+        background, error_background = self.root._tidyfiles_row_colors
         self.tree.tag_configure("normal", background=background)
         self.tree.tag_configure("problem", background=error_background)
         self.tree.tag_configure(
@@ -649,6 +657,12 @@ class _MainWindow:
     def _build_collection_context_menu(self) -> None:
         self.context_menu = tk.Menu(self.root, tearoff=False)
         self._context_menu_indices: dict[str, int] = {}
+
+        def remember_index(key: str) -> None:
+            index = self.context_menu.index("end")
+            assert index is not None
+            self._context_menu_indices[key] = index
+
         for key, label, command in (
             ("open_file", "Open File", self.open_selected_file),
             ("open_folder", "Open Containing Folder", self.open_containing_folder),
@@ -656,12 +670,12 @@ class _MainWindow:
             ("copy_path", "Copy Full Path", self.copy_selected_paths),
         ):
             self.context_menu.add_command(label=label, command=command)
-            self._context_menu_indices[key] = int(self.context_menu.index("end"))
+            remember_index(key)
         self.context_menu.add_separator()
         self.context_menu.add_command(
             label="Preview Details", command=self.open_preview_details, state="disabled"
         )
-        self._context_menu_indices["preview_details"] = int(self.context_menu.index("end"))
+        remember_index("preview_details")
         self.context_menu.add_separator()
         for key, label, command in (
             ("remove", "Remove from List", self.remove_selected),
@@ -671,7 +685,7 @@ class _MainWindow:
             ("move_bottom", "Move to Bottom", lambda: self._move_selected("move_bottom")),
         ):
             self.context_menu.add_command(label=label, command=command)
-            self._context_menu_indices[key] = int(self.context_menu.index("end"))
+            remember_index(key)
 
     def _build_collection_footer(self) -> None:
         row = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -738,7 +752,7 @@ class _MainWindow:
 
     def _apply_mode(self, mode: str) -> None:
         self.active_mode = mode
-        self.root.active_mode = mode  # type: ignore[attr-defined]
+        self.root.active_mode = mode
         preferences = self.column_preferences[mode]
         self.tree.configure(displaycolumns=preferences.visible)
         for identifier in MODE_COLUMNS[mode]:
@@ -805,8 +819,8 @@ class _MainWindow:
             self.auto_clean_switch.select() if previous else self.auto_clean_switch.deselect()
 
     def _on_auto_clear_trash_changed(self) -> None:
-        switch = self.auto_clear_trash_switch
-        if switch is None or not self._settings_trash_switch_exists():
+        switch = self._live_trash_switch()
+        if switch is None:
             return
         enabled = bool(switch.get())
         previous = get_auto_clear_trash_on_exit(self.config)
@@ -1665,9 +1679,8 @@ class _MainWindow:
         try:
             kind, payload = self._processing_done.get_nowait()
         except queue.Empty:
-            kind = ""
-            payload = None
-        if kind:
+            pass
+        else:
             if kind == "plan":
                 plan, evaluation, notice, error = payload
                 if self._processing_cancel.is_set():
@@ -2413,7 +2426,9 @@ class _MainWindow:
             subprocess.Popen(["explorer.exe", "/select,", str(target)])
         except OSError as error:
             messagebox.showerror(
-                "Could not open File Explorer", str(error), parent=self._recovery_dialog
+                "Could not open File Explorer",
+                str(error),
+                parent=self._recovery_dialog or self.root,
             )
 
     def open_preview_details(self, entry_id: UUID | None = None) -> None:
@@ -2649,8 +2664,8 @@ class _MainWindow:
                 self.format_field.configure(state="disabled")
                 self.single_folder_switch.configure(state="disabled")
                 self.auto_clean_switch.configure(state="disabled")
-                if self._settings_trash_switch_exists():
-                    self.auto_clear_trash_switch.configure(state="disabled")
+                if (switch := self._live_trash_switch()) is not None:
+                    switch.configure(state="disabled")
             return
 
         self.controls["add_files"].configure(state="normal")
@@ -2683,8 +2698,8 @@ class _MainWindow:
         self.format_field.configure(state="normal")
         self.single_folder_switch.configure(state="normal")
         self.auto_clean_switch.configure(state="normal")
-        if self._settings_trash_switch_exists():
-            self.auto_clear_trash_switch.configure(state="normal")
+        if (switch := self._live_trash_switch()) is not None:
+            switch.configure(state="normal")
         positions = [self._display_positions[entry_id] for entry_id in selected]
         can_move = bool(positions)
         movement = {
@@ -2736,7 +2751,7 @@ class _MainWindow:
         )
 
     def _notify_collection_changed(self) -> None:
-        self.root.collection_revision = self.collection.revision  # type: ignore[attr-defined]
+        self.root.collection_revision = self.collection.revision
         self.root.event_generate("<<TidyFilesCollectionChanged>>", when="tail")
 
     def _account_size(self, entry: CollectionEntry, direction: int) -> None:
@@ -2772,7 +2787,8 @@ class _MainWindow:
         ):
             return
         self._collection_operation_pending = True
-        self._sort_done = threading.Event()
+        done = threading.Event()
+        self._sort_done = done
         self._sort_result = None
         self._sort_error = None
         self.status.configure(text=f"Sorting by {_SORT_LABELS[preferences.criterion]}…")
@@ -2784,7 +2800,7 @@ class _MainWindow:
             except Exception as error:
                 self._sort_error = error
             finally:
-                self._sort_done.set()
+                done.set()
 
         try:
             threading.Thread(target=prepare, name="TidyFiles-sort", daemon=True).start()
@@ -3754,7 +3770,7 @@ class _MainWindow:
         choice = ctk.CTkOptionMenu(
             content,
             variable=theme,
-            values=("System", "Light", "Dark"),
+            values=["System", "Light", "Dark"],
             command=self._set_appearance_mode,
         )
         self.appearance_choice = theme
@@ -3792,15 +3808,17 @@ class _MainWindow:
             self.appearance_choice = None
             self.auto_clear_trash_switch = None
 
-    def _settings_trash_switch_exists(self) -> bool:
+    def _live_trash_switch(self) -> ctk.CTkSwitch | None:
         dialog = self.settings_window
         switch = self.auto_clear_trash_switch
-        return bool(
+        if (
             dialog is not None
             and switch is not None
             and dialog.winfo_exists()
             and switch.winfo_exists()
-        )
+        ):
+            return switch
+        return None
 
     def _show_settings_window(self, dialog: ctk.CTkToplevel) -> bool:
         if self.settings_window is not dialog:
@@ -3854,7 +3872,7 @@ class _MainWindow:
 
     def _apply_table_appearance(self) -> None:
         _style_file_table(self.root)
-        background, error_background = self.root._tidyfiles_row_colors  # type: ignore[attr-defined]
+        background, error_background = self.root._tidyfiles_row_colors
         self.tree.tag_configure("normal", background=background)
         self.tree.tag_configure("problem", background=error_background)
         self.tree.tag_configure(
@@ -4060,6 +4078,6 @@ class _MainWindow:
 def create_main_window(
     config: dict[str, Any] | None = None,
     config_path: Path | str | None = None,
-) -> ctk.CTk:
+) -> _ApplicationRoot:
     """Create the GUI and its one shared, initially empty working collection."""
     return _MainWindow(config, config_path).root

@@ -999,6 +999,19 @@ Local Windows verification on Python 3.13.17 passed 187 focused tests and all
 671 tests in the full suite, with zero failures or skips. Ruff, compileall, and
 both Git whitespace checks passed.
 
+PRE-M4-D corrected source-level typing issues identified from the owner's
+Problems inventory. The GUI factory exposes the application's CTk attributes
+through a concrete root type. Filename evaluation, filesystem inspection,
+native Trash, journal decoding, and test fixtures now establish required values
+before use. The workspace still uses Basic type checking with the Python
+3.13.17 virtual environment. The live Problems panel was unavailable. The
+owner-reported subtotal of 137 occurrences across 19 files remains the baseline
+for editor verification, which is pending.
+Local Windows verification passed 456 focused tests and all 671 tests in the
+full suite, with zero failures or skips. The 1,200-file test was selected in
+the full suite. A follow-up run of all 47 journal tests passed after the final
+test-only assertions. Ruff, compileall, and both Git whitespace checks passed.
+
 Recovery inspection per cleanup candidate (O1) and large Tk review and
 completion updates (O3) remain deferred. Revisit recovery inspection only with
 evidence that a shorter path preserves current recovery checks. Profile the Tk

@@ -204,15 +204,19 @@ def _output_extension(
     return _normalize_extension(extension)
 
 
-def _terminal_ext_token(parsed: ParsedFormat, index: int) -> bool:
-    return (
-        index == len(parsed.parts) - 1
-        and index > 0
-        and isinstance(parsed.parts[index], TokenOccurrence)
-        and parsed.parts[index].kind is TokenKind.EXT
-        and isinstance(parsed.parts[index - 1], LiteralSpan)
-        and parsed.parts[index - 1].text.endswith(".")
-    )
+def _terminal_ext_token(parsed: ParsedFormat, index: int) -> TokenOccurrence | None:
+    if index != len(parsed.parts) - 1 or index <= 0:
+        return None
+    token = parsed.parts[index]
+    preceding = parsed.parts[index - 1]
+    if (
+        isinstance(token, TokenOccurrence)
+        and token.kind is TokenKind.EXT
+        and isinstance(preceding, LiteralSpan)
+        and preceding.text.endswith(".")
+    ):
+        return token
+    return None
 
 
 def resolve_extension(
@@ -233,14 +237,15 @@ def _resolve_extension_parts(
     parts = parsed.parts
     remove_length = 0
 
-    if parts and _terminal_ext_token(parsed, len(parts) - 1):
+    terminal = _terminal_ext_token(parsed, len(parts) - 1)
+    if terminal is not None:
         remove_length = len(output_extension) + 1
         suffix = "." + output_extension
         if not raw_text.casefold().endswith(suffix.casefold()):
             _extension_error(
                 "Evaluated terminal extension does not match its declaration",
                 context,
-                parts[-1],
+                terminal,
             )
     elif parts and isinstance(parts[-1], LiteralSpan):
         recognized_extensions = [context.source_extension]

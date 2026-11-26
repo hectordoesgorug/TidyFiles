@@ -114,7 +114,9 @@ def test_invalid_extension_metadata_is_not_sanitized() -> None:
             context=context,
             extension_metadata=("bad/name",),
         )
-    assert caught.value.sanitized_candidate is None
+    error = caught.value
+    assert isinstance(error, FilenameValidationError)
+    assert error.sanitized_candidate is None
 
 
 def test_batch_keeps_raw_resolved_and_validated_values_separate() -> None:
@@ -209,5 +211,6 @@ def test_batch_rejects_empty_rename_format_but_parser_still_accepts_it() -> None
         (FileEvaluationContext("photo", "photo.jpg", source_extension="jpg"),),
     )
     assert not result.is_valid
-    assert result.files[0].error is not None
-    assert result.files[0].error.reason == "Filename format is required for rename"
+    error = result.files[0].error
+    assert error is not None
+    assert error.reason == "Filename format is required for rename"

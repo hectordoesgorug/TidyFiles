@@ -787,11 +787,12 @@ def compare_candidate_filenames(
             or after is None
             or (old_candidate, old_validated) != (new_candidate, new_validated)
         ):
-            entry = after.entry if after is not None else before.entry
+            row = after if after is not None else before
+            assert row is not None
             changes.append(
                 CandidateChange(
                     entry_id,
-                    entry.source_path,
+                    row.entry.source_path,
                     old_candidate,
                     new_candidate,
                     old_validated,
@@ -1049,7 +1050,9 @@ class FilenameEvaluationService:
                     metadata_cache=self.metadata_cache,
                     force_metadata_refresh=job.force_metadata_refresh,
                     cancel_check=job.cancel_event.is_set,
-                    progress_callback=lambda update: self._progress(job, update),
+                    progress_callback=lambda update, active_job=job: self._progress(
+                        active_job, update
+                    ),
                 )
             except Exception as error:
                 result = FilenameEvaluationResult(
@@ -1087,13 +1090,13 @@ class FilenameEvaluationService:
 
     def _progress(self, job: _Job, update: EvaluationProgress) -> None:
         with self._condition:
+            callback = job.progress_callback
             deliver = (
                 job.request_id == self._latest_request_id
                 and not job.cancel_event.is_set()
-                and job.progress_callback is not None
             )
-        if deliver:
-            job.progress_callback(update)  # type: ignore[misc]
+        if deliver and callback is not None:
+            callback(update)
 
     def close(self, *, wait: bool = True) -> None:
         pending: _Job | None = None

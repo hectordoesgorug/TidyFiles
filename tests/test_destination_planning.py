@@ -98,7 +98,9 @@ def test_single_rename(expression, operation, occupancy, staging):
     row, = plan.entries
     assert row.operation is operation
     assert row.state is EntryState.PLANNED
+    assert row.candidate_filename is not None
     assert row.destination_path == ntpath.join(_ROOT, row.candidate_filename)
+    assert row.destination_observation is not None
     assert row.destination_observation.occupancy is occupancy
     assert row.depends_on is None
     assert any(group.requires_staging for group in plan.dependency_groups) is staging
@@ -124,6 +126,7 @@ def test_a05_unrelated_file_occupies_destination():
     row, = plan.entries
     assert row.state is EntryState.OCCUPIED
     assert row.reason == "unrelated_occupant"
+    assert row.destination_observation is not None
     assert row.destination_observation.actual_name == "C.txt"
     assert row.depends_on is None
 
@@ -288,6 +291,7 @@ def test_a16_real_destination_directory_is_unsafe(tmp_path):
     (tmp_path / "Target.txt").mkdir()
     plan = _plan(_collection(source), "Target", observe=None)
     assert plan.state is PlanState.SAFETY_BLOCKED
+    assert plan.entries[0].destination_observation is not None
     assert plan.entries[0].destination_observation.occupancy is PathOccupancy.UNSAFE
 
 
@@ -313,6 +317,7 @@ def test_a16_real_junction_is_unsafe_and_its_children_are_not_probed(tmp_path, m
     monkeypatch.setattr(observer, "_find", track)
     plan = _plan(_collection(source), "Redirect", observe=observer)
     assert plan.state is PlanState.SAFETY_BLOCKED
+    assert plan.entries[0].destination_observation is not None
     assert plan.entries[0].destination_observation.occupancy is PathOccupancy.UNSAFE
     child = str(junction / "Child.txt")
     plan = _plan(_collection(child), "Better", observe=observer)
@@ -371,6 +376,7 @@ def test_a18_missing_or_unsafe_source_blocks_planning(occupancy):
 
     plan = _plan(_collection(source), "Better", observe=observe)
     assert plan.state is PlanState.SAFETY_BLOCKED
+    assert plan.entries[0].source_observation is not None
     assert plan.entries[0].source_observation.occupancy is occupancy
     assert not plan.collision_subset_ids
 
@@ -478,6 +484,7 @@ def test_a26_protected_paths_are_rejected_before_observation(root, options):
     _import(collection, (ntpath.join(root, "Nested", "A.txt"),), root=root)
     plan = _plan(collection, "Better", observe=_unexpected_probe, options=options)
     assert plan.state is PlanState.SAFETY_BLOCKED
+    assert plan.entries[0].destination_observation is not None
     assert plan.entries[0].destination_observation.reason == "protected_path"
 
 
@@ -513,7 +520,9 @@ def test_a27_native_planning_leaves_tree_contents_and_identities_unchanged(tmp_p
         assert plan.state is PlanState.COLLISION_BLOCKED
         subset = _subset(plan, collection.snapshot(), observe=None)
         assert subset.state is PlanState.VALID
-        assert Path(subset.entries[0].destination_path) == root / "02.txt"
+        destination = subset.entries[0].destination_path
+        assert destination is not None
+        assert Path(destination) == root / "02.txt"
     assert tree() == before
 
 
@@ -525,6 +534,7 @@ def test_native_case_only_rename_and_possible_short_alias(tmp_path):
     case_only = _plan(collection, "a", observe=None)
     assert case_only.state is PlanState.VALID
     assert case_only.entries[0].operation is PathOperation.CASE_ONLY
+    assert case_only.entries[0].destination_observation is not None
     assert case_only.entries[0].destination_observation.actual_name == "A.txt"
     assert case_only.dependency_groups[0].requires_staging
     potential_alias = _plan(collection, "Long~9", observe=None)
@@ -556,7 +566,9 @@ def test_destination_component_limit_from_volume(tmp_path, monkeypatch):
     observer = WindowsPathObserver()
     root_drive = ntpath.splitdrive(str(tmp_path))[0]
     volume = observer._inspect_volume(root_drive)
-    monkeypatch.setattr(observer, "_volume", lambda _drive: replace(volume, component_limit=8))
+    assert not isinstance(volume, PathObservation)
+    limited = replace(volume, component_limit=8)
+    monkeypatch.setattr(observer, "_volume", lambda _drive: limited)
     plan = _plan(_collection(source), "Lengthy", observe=observer)
     assert plan.state is PlanState.SAFETY_BLOCKED
     assert plan.entries[0].reason == "destination_volume_component_limit"

@@ -119,7 +119,10 @@ def test_recovery_inspection_keeps_cross_volume_trash_copy_identity(monkeypatch,
     )
 
     assert copy_observation.matches_recorded_identity is True
-    assert copy_observation.current.object_metadata.identity != source.object_metadata.identity
+    observed_metadata = copy_observation.current.object_metadata
+    source_metadata = source.object_metadata
+    assert observed_metadata is not None and source_metadata is not None
+    assert observed_metadata.identity != source_metadata.identity
     assert "different from the recorded identity" not in (
         report.transactions[0].entries[0].detail or ""
     )

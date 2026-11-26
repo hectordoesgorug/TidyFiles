@@ -39,7 +39,7 @@ def app_runtime(tmp_path_factory):
         root.update()
         runtime = {"root": root, "app": root.application, "config_path": config_path}
         yield runtime
-        runtime["app"].close()
+        root.application.close()
 
 
 def _wait_for_idle(root, app, timeout: float = 8) -> None:
@@ -1037,9 +1037,11 @@ def test_columns_dialog_is_single_instance_and_mode_scoped(
     assert first.winfo_exists() == 0
 
     app.open_columns()
+    dialog = app.column_dialog
+    assert dialog is not None
     done = next(
         widget
-        for widget in _descendants(app.column_dialog)
+        for widget in _descendants(dialog)
         if isinstance(widget, app_module.ctk.CTkButton) and widget.cget("text") == "Done"
     )
     done.invoke()
@@ -1048,6 +1050,7 @@ def test_columns_dialog_is_single_instance_and_mode_scoped(
 
     app.open_columns()
     bulk_dialog = app.column_dialog
+    assert bulk_dialog is not None
     app.tabs.set("Duplicate Finder")
     app._on_mode_change()
     root.update()

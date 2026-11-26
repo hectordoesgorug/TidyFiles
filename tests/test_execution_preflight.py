@@ -131,13 +131,16 @@ def test_b01_b09_b10_b13_b43_b44_discovery_identity_and_read_only_preflight(tmp_
             patched.setattr(os, name, forbidden)
         result = run_preflight(request)
     assert result.state is PreflightState.PASSED, result.diagnostic
-    assert result.fresh_evaluation.request_id == request.request_id
-    assert result.fresh_evaluation.request_id != request.current_evaluation_id
-    assert result.fresh_evaluation.directory_enumerations == 0
-    assert result.fresh_plan.entries == request.reviewed_plan.entries
-    assert result.fresh_plan.entries[0].source_observation.object_metadata.identity == (
-        request.snapshot.entries[0].filesystem_identity
-    )
+    fresh_evaluation, fresh_plan = result.fresh_evaluation, result.fresh_plan
+    assert fresh_evaluation is not None and fresh_plan is not None
+    assert fresh_evaluation.request_id == request.request_id
+    assert fresh_evaluation.request_id != request.current_evaluation_id
+    assert fresh_evaluation.directory_enumerations == 0
+    assert fresh_plan.entries == request.reviewed_plan.entries
+    source_observation = fresh_plan.entries[0].source_observation
+    assert source_observation is not None and source_observation.object_metadata is not None
+    imported_identity = request.snapshot.entries[0].filesystem_identity
+    assert source_observation.object_metadata.identity == imported_identity
     assert collection.snapshot() == request.snapshot
     assert tree() == before
 
@@ -161,34 +164,36 @@ def test_b02_to_b06_stale_and_inconsistent_reviews(tmp_path, change):
     request = _request(_collection(_files(tmp_path, "One.txt", "Two.txt")))
     snapshot, review = request.snapshot, request.reviewed_plan
     edits = {
-        "revision": {"snapshot": replace(snapshot, revision=snapshot.revision + 1)},
-        "order": {"snapshot": replace(snapshot, entries=snapshot.entries[::-1])},
-        "membership": {"snapshot": replace(snapshot, entries=snapshot.entries[:1])},
-        "expression": {"expression": "<Name> other"},
-        "settings": {"settings": EvaluationSettings(max_component_length=100)},
-        "options": {"options": DestinationOptions(single_folder=True)},
-        "evaluation": {"current_evaluation_id": uuid4()},
-        "intended_ids": {"intended_entry_ids": request.intended_entry_ids[::-1]},
-        "candidate": {
-            "reviewed_plan": replace(
+        "revision": replace(request, snapshot=replace(snapshot, revision=snapshot.revision + 1)),
+        "order": replace(request, snapshot=replace(snapshot, entries=snapshot.entries[::-1])),
+        "membership": replace(request, snapshot=replace(snapshot, entries=snapshot.entries[:1])),
+        "expression": replace(request, expression="<Name> other"),
+        "settings": replace(request, settings=EvaluationSettings(max_component_length=100)),
+        "options": replace(request, options=DestinationOptions(single_folder=True)),
+        "evaluation": replace(request, current_evaluation_id=uuid4()),
+        "intended_ids": replace(request, intended_entry_ids=request.intended_entry_ids[::-1]),
+        "candidate": replace(
+            request,
+            reviewed_plan=replace(
                 review,
                 entries=(
                     replace(review.entries[0], candidate_filename="Bad.txt"),
                     review.entries[1],
                 ),
             )
-        },
-        "destination": {
-            "reviewed_plan": replace(
+        ),
+        "destination": replace(
+            request,
+            reviewed_plan=replace(
                 review,
                 entries=(
                     replace(review.entries[0], destination_path=str(tmp_path / "Bad.txt")),
                     review.entries[1],
                 ),
             )
-        },
+        ),
     }
-    result = run_preflight(replace(request, **edits[change]), observer_factory=_forbid_observation)
+    result = run_preflight(edits[change], observer_factory=_forbid_observation)
     assert result.state is PreflightState.STALE_INPUT
 
 
@@ -210,9 +215,13 @@ def test_b07_b08_b12_force_refresh_without_importing_new_files(tmp_path, monkeyp
     (change,) = result.candidate_changes
     assert change.previous_validated_filename == "One_1_0_1.txt"
     assert change.current_validated_filename == "One_2_1_1.txt"
-    assert result.destination_changes[0].reviewed_path.endswith("One_1_0_1.txt")
-    assert result.destination_changes[0].refreshed_path.endswith("One_2_1_1.txt")
-    assert result.fresh_evaluation.directory_enumerations == 1
+    destination = result.destination_changes[0]
+    reviewed, refreshed = destination.reviewed_path, destination.refreshed_path
+    assert reviewed is not None and reviewed.endswith("One_1_0_1.txt")
+    assert refreshed is not None and refreshed.endswith("One_2_1_1.txt")
+    fresh_evaluation = result.fresh_evaluation
+    assert fresh_evaluation is not None
+    assert fresh_evaluation.directory_enumerations == 1
     assert collection.snapshot() == request.snapshot
 
 
@@ -304,6 +313,7 @@ def test_b24_distinct_hard_link_entries_remain_distinct(tmp_path):
     result = run_preflight(_request(_collection((source, other))))
     assert result.state is PreflightState.PASSED, result.diagnostic
     (_, first), (_, second) = result.source_observations
+    assert first.object_metadata is not None and second.object_metadata is not None
     assert first.object_metadata.identity == second.object_metadata.identity
     assert first.actual_name != second.actual_name
 
@@ -321,6 +331,7 @@ def test_b28_b29_b30_dependencies_revalidated(tmp_path, names, expression):
     request = _request(_collection(paths), expression)
     passed = run_preflight(request)
     assert passed.state is PreflightState.PASSED, passed.diagnostic
+    assert passed.fresh_plan is not None
     assert passed.fresh_plan.dependency_groups == request.reviewed_plan.dependency_groups
     paths[1].rename(tmp_path / "moved.txt")
     assert run_preflight(request).state is PreflightState.SOURCE_CHANGED
@@ -333,13 +344,13 @@ def test_b27_b31_native_new_collision_and_case_only_noop(tmp_path):
     other_dir.mkdir()
     paths = (*_files(tmp_path, "First.txt"), *_files(other_dir, "first.txt"))
     collection = _collection(paths)
-    name_plan = _request(collection, "<Name>")
-    assert all(
-        row.operation is PathOperation.NO_OP for row in run_preflight(name_plan).fresh_plan.entries
-    )
+    name_plan = run_preflight(_request(collection, "<Name>")).fresh_plan
+    assert name_plan is not None
+    assert all(row.operation is PathOperation.NO_OP for row in name_plan.entries)
     lower = _request(collection, "first")
     checked = run_preflight(lower)
     assert checked.state is PreflightState.PASSED, checked.diagnostic
+    assert checked.fresh_plan is not None
     assert tuple(row.operation for row in checked.fresh_plan.entries) == (
         PathOperation.CASE_ONLY,
         PathOperation.NO_OP,
@@ -363,6 +374,7 @@ def test_b32_b33_b34_exact_subset_preserves_numbering(tmp_path):
     passed = run_preflight(request)
     assert passed.state is PreflightState.PASSED, passed.diagnostic
     assert passed.intended_entry_ids == request.intended_entry_ids
+    assert passed.fresh_plan is not None
     (row,) = passed.fresh_plan.entries
     assert row.candidate_filename == "04.txt"
     assert len(passed.excluded_entry_ids) == 3
@@ -452,7 +464,9 @@ def test_b37_b38_cancellation_during_read_only_preparation(tmp_path, stage):
 
 
 @pytest.mark.parametrize("fail_query", [False, True])
-def test_b38_b40_cancel_or_fail_during_native_observation_releases_handles(tmp_path, fail_query):
+def test_b38_b40_cancel_or_fail_during_native_observation_releases_handles(
+    tmp_path, fail_query, monkeypatch
+):
     request = _request(_collection(_files(tmp_path, "One.txt")))
     cancelled = Event()
     opened, closed = [], []
@@ -470,9 +484,10 @@ def test_b38_b40_cancel_or_fail_during_native_observation_releases_handles(tmp_p
             closed.append(handle)
             return native_close(handle)
 
-        observer._open, observer._close = open_handle, close_handle
+        monkeypatch.setattr(observer, "_open", open_handle)
+        monkeypatch.setattr(observer, "_close", close_handle)
         if fail_query:
-            observer._file_info = lambda *_args: False
+            monkeypatch.setattr(observer, "_file_info", lambda *_args: False)
 
         def observe(path):
             actual = observer(path)

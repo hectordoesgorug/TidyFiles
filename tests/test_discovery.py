@@ -703,9 +703,10 @@ def test_metadata_is_a_snapshot_when_a_file_changes_during_discovery(
     assert entry.metadata is not None
     assert entry.metadata.size_bytes == len(b"before")
     assert source.stat().st_size != entry.metadata.size_bytes
-    assert items[0].entry is not None
-    assert items[0].entry.entry_id == entry.entry_id
-    assert items[0].entry.metadata == entry.metadata
+    discovered_entry = items[0].entry
+    assert discovered_entry is not None
+    assert discovered_entry.entry_id == entry.entry_id
+    assert discovered_entry.metadata == entry.metadata
 
 
 def test_unavailable_nonessential_metadata_does_not_invent_values_or_incomplete_scan(
@@ -753,7 +754,9 @@ def test_unavailable_nonessential_metadata_does_not_invent_values_or_incomplete_
     assert not collection.snapshot().has_incomplete_imports
 
 
-def test_worker_failure_rolls_back_and_service_accepts_next_session(tmp_path: Path) -> None:
+def test_worker_failure_rolls_back_and_service_accepts_next_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = tmp_path / "good.txt"
     source.write_text("good")
     collection = WorkingCollection()
@@ -764,7 +767,7 @@ def test_worker_failure_rolls_back_and_service_accepts_next_session(tmp_path: Pa
         raise RuntimeError("simulated worker failure")
         yield
 
-    failed._walk_files = broken_walk
+    monkeypatch.setattr(failed, "_walk_files", broken_walk)
     _, report = _complete(failed)
     assert report.state is DiscoveryState.FAILED
     assert collection.snapshot().entries == ()

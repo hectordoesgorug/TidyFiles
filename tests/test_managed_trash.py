@@ -145,16 +145,18 @@ def test_e02_native_cross_volume_verifies_before_removing_source(
         row = _record(store).entries[0]
         assert source.exists()
         assert row.stage == TRASH_COPY_BEFORE_REMOVE
-        assert row.verification.outcome is VerifiedOutcome.TRASH_COPY
-        assert row.verification.content_sha256 == hashlib.sha256(content).hexdigest()
-        assert row.verification.observation.volume_guid != row.source_observation.volume_guid
+        verification = row.verification
+        assert verification is not None
+        assert verification.outcome is VerifiedOutcome.TRASH_COPY
+        assert verification.content_sha256 == hashlib.sha256(content).hexdigest()
+        assert verification.observation.volume_guid != row.source_observation.volume_guid
         with pytest.raises(ValueError, match="cross-volume Trash content evidence"):
-            validate_verification(row, row.verification, OperationType.RENAME)
+            validate_verification(row, verification, OperationType.RENAME)
         with pytest.raises(ValueError, match="cross-volume Trash content evidence"):
             validate_verification(
-                row, replace(row.verification, content_sha256=None), OperationType.TRASH
+                row, replace(verification, content_sha256=None), OperationType.TRASH
             )
-        checked.append(row.verification)
+        checked.append(verification)
         remove(handle)
 
     monkeypatch.setattr(native, "_remove_original", before_remove)
@@ -253,6 +255,8 @@ def test_e07_e08_e09_failed_cross_volume_transfer_preserves_evidence(
     source = _file(other_volume)
     scope = _scope(source)
     identity = source.stat().st_ino
+    metadata = scope.sources[0].observation.object_metadata
+    assert metadata is not None
     copy = native._write_data
 
     def bad_copy(reader, writer):
@@ -268,7 +272,7 @@ def test_e07_e08_e09_failed_cross_volume_transfer_preserves_evidence(
             handle = observer._open(str(source), 0x100, 7, None, 3, 0x200000, None)
             assert handle != _INVALID_HANDLE
             try:
-                written = scope.sources[0].observation.object_metadata.modified_time_ns // 100
+                written = metadata.modified_time_ns // 100
                 native._set_information(
                     handle,
                     0,
@@ -297,11 +301,9 @@ def test_e07_e08_e09_failed_cross_volume_transfer_preserves_evidence(
     else:
         assert row.stage == "before_trash_copy" and row.verification is None
         if fault == "source_changed":
-            assert "changed" in result.detail or "no longer matches" in result.detail
-            assert (
-                source.stat().st_mtime_ns
-                != scope.sources[0].observation.object_metadata.modified_time_ns
-            )
+            detail = result.detail
+            assert detail is not None and ("changed" in detail or "no longer matches" in detail)
+            assert source.stat().st_mtime_ns != metadata.modified_time_ns
 
 
 def test_e10_destination_appearing_after_checkpoint_is_preserved(runtime, tmp_path, monkeypatch):

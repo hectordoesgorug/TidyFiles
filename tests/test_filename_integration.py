@@ -18,6 +18,7 @@ from tidyfiles.filename_integration import (
     EvaluationSettings,
     EvaluationStage,
     EvaluationState,
+    FilenameEvaluationResult,
     FilenameEvaluationService,
     compare_candidate_filenames,
     evaluate_collection,
@@ -32,7 +33,12 @@ def _add_files(collection: WorkingCollection, paths: list[os.PathLike[str] | str
     collection.finalize_import(session)
 
 
-def _result_by_path(result):
+def _required[T](value: T | None) -> T:
+    assert value is not None
+    return value
+
+
+def _result_by_path(result: FilenameEvaluationResult):
     return {item.entry.source_path: item for item in result.entries}
 
 
@@ -74,12 +80,13 @@ def test_adapter_preserves_entry_identity_roots_and_actual_parents(tmp_path) -> 
 
     assert result.state is EvaluationState.VALID
     assert rows[str(path_a)].entry.entry_id == entry_a.entry_id
-    assert rows[str(path_a)].file_result.context.import_root_name == "Vacation"
-    assert rows[str(path_a)].file_result.context.parent_name == "Day1"
-    assert rows[str(path_a)].file_result.context.original_stem == "image01"
+    context_a = _required(rows[str(path_a)].file_result).context
+    assert context_a.import_root_name == "Vacation"
+    assert context_a.parent_name == "Day1"
+    assert context_a.original_stem == "image01"
     assert rows[str(path_a)].validated_filename == "Vacation_Day1_image01_png.png"
     assert rows[str(path_b)].entry.entry_id == entry_b.entry_id
-    assert rows[str(path_b)].file_result.context.import_root_name == "Events"
+    assert _required(rows[str(path_b)].file_result).context.import_root_name == "Events"
     assert rows[str(path_b)].validated_filename == "Events_Day1_image02_jpg.jpg"
     assert snapshot.entries == collection.snapshot().entries
 
@@ -92,11 +99,13 @@ def test_add_files_and_drive_root_directory_context_are_lexical() -> None:
     rows = {row.entry.source_path: row for row in result.entries}
 
     assert result.state is EvaluationState.VALID
-    assert rows[r"R:\image.jpg"].file_result.context.import_root_name == ""
-    assert rows[r"R:\image.jpg"].file_result.context.parent_name == ""
-    assert rows[r"R:\image.jpg"].file_result.value == "||image|jpg"
-    assert rows[r"D:\Photos\Day1\one.jpg"].file_result.context.import_root_name == "Day1"
-    assert rows[r"D:\Photos\Day1\one.jpg"].file_result.context.parent_name == "Day1"
+    root_result = _required(rows[r"R:\image.jpg"].file_result)
+    assert root_result.context.import_root_name == ""
+    assert root_result.context.parent_name == ""
+    assert root_result.value == "||image|jpg"
+    day_context = _required(rows[r"D:\Photos\Day1\one.jpg"].file_result).context
+    assert day_context.import_root_name == "Day1"
+    assert day_context.parent_name == "Day1"
 
 
 def test_counts_use_physical_immediate_contents_not_import_membership(tmp_path) -> None:
@@ -128,10 +137,12 @@ def test_counts_use_physical_immediate_contents_not_import_membership(tmp_path) 
     assert result.state is EvaluationState.VALID
     assert result.distinct_parent_directories == 2
     assert result.directory_enumerations == 2
-    assert rows[str(first)].metadata.physical_file_count == 5
-    assert rows[str(first)].metadata.physical_directory_count == 2
-    assert rows[str(nested)].metadata.physical_file_count == 1
-    assert rows[str(nested)].metadata.physical_directory_count == 0
+    first_metadata = _required(rows[str(first)].metadata)
+    nested_metadata = _required(rows[str(nested)].metadata)
+    assert first_metadata.physical_file_count == 5
+    assert first_metadata.physical_directory_count == 2
+    assert nested_metadata.physical_file_count == 1
+    assert nested_metadata.physical_directory_count == 0
     assert rows[str(first)].validated_filename == "5_2_2_image01.jpg"
     assert rows[str(nested)].validated_filename == "1_0_2_image04.jpg"
 
@@ -142,9 +153,10 @@ def test_counts_use_physical_immediate_contents_not_import_membership(tmp_path) 
         metadata_cache=cache,
     )
     remaining = after_removal.entries[0]
-    assert remaining.metadata.physical_file_count == 5
-    assert remaining.metadata.physical_directory_count == 2
-    assert remaining.file_result.context.collection_size == 1
+    metadata = _required(remaining.metadata)
+    assert metadata.physical_file_count == 5
+    assert metadata.physical_directory_count == 2
+    assert _required(remaining.file_result).context.collection_size == 1
     assert remaining.validated_filename == "5_2_1_image01.jpg"
     assert after_removal.directory_enumerations == 0
     assert after_removal.directory_cache_hits == 1
@@ -170,9 +182,10 @@ def test_empty_directory_counts_are_available_zero_and_do_not_read_sources(
 
     row = result.entries[0]
     assert result.state is EvaluationState.VALID
-    assert row.metadata.available
-    assert row.metadata.physical_file_count == 0
-    assert row.metadata.physical_directory_count == 0
+    metadata = _required(row.metadata)
+    assert metadata.available
+    assert metadata.physical_file_count == 0
+    assert metadata.physical_directory_count == 0
     assert row.validated_filename == "0_0_not-created.jpg"
 
 
@@ -294,7 +307,9 @@ def test_ordered_batch_numbering_uses_effective_collection_order(tmp_path) -> No
         tuple(reversed([entry.entry_id for entry in collection.snapshot().entries]))
     )
     reordered = evaluate_collection(collection.snapshot(), "<Name>_<IncNr>_<IncNrDir>")
-    assert [row.file_result.context.global_index for row in reordered.entries] == [0, 1, 2, 3]
+    assert [_required(row.file_result).context.global_index for row in reordered.entries] == [
+        0, 1, 2, 3
+    ]
     assert [row.validated_filename for row in reordered.entries] == [
         "image04_01_01.jpg",
         "image02_02_01.jpg",
@@ -364,7 +379,8 @@ def test_one_invalid_file_invalidates_the_batch_and_keeps_good_rows(tmp_path) ->
     assert result.entries[0].validated_filename == "Good.jpg"
     assert result.entries[0].is_valid
     assert result.entries[1].candidate_filename is None
-    assert result.entries[1].file_result.error.token == "<Word:2>"
+    broken_file = _required(result.entries[1].file_result)
+    assert _required(broken_file.error).token == "<Word:2>"
     assert result.diagnostics[-1].entry_id == result.entries[1].entry.entry_id
 
 
@@ -416,10 +432,12 @@ def test_metadata_failure_is_per_entry_and_never_becomes_zero(tmp_path) -> None:
     result = evaluate_collection(collection.snapshot(), "<NumFiles>_<Name>")
 
     assert result.state is EvaluationState.INVALID
-    assert result.entries[0].metadata.available
-    assert result.entries[0].metadata.physical_file_count == 0
-    assert result.entries[1].metadata.physical_file_count is None
-    assert result.entries[1].metadata.failure.code == "missing_directory"
+    available = _required(result.entries[0].metadata)
+    unavailable = _required(result.entries[1].metadata)
+    assert available.available
+    assert available.physical_file_count == 0
+    assert unavailable.physical_file_count is None
+    assert _required(unavailable.failure).code == "missing_directory"
     metadata_error = next(
         item for item in result.diagnostics if item.kind is DiagnosticKind.METADATA
     )
@@ -471,9 +489,10 @@ def test_partial_directory_enumeration_discards_partial_counts(tmp_path, monkeyp
 
     assert result.state is EvaluationState.INVALID
     failed = rows[str(broken / "source.jpg")]
-    assert failed.metadata.failure.code == "partial_enumeration"
-    assert failed.metadata.physical_file_count is None
-    assert rows[str(intact / "source.jpg")].metadata.physical_file_count == 1
+    failed_metadata = _required(failed.metadata)
+    assert _required(failed_metadata.failure).code == "partial_enumeration"
+    assert failed_metadata.physical_file_count is None
+    assert _required(rows[str(intact / "source.jpg")].metadata).physical_file_count == 1
     assert rows[str(intact / "source.jpg")].is_valid
 
 
@@ -508,8 +527,9 @@ def test_reparse_children_are_skipped_and_linked_parent_paths_fail(tmp_path, mon
 
     monkeypatch.setattr(integration.os, "scandir", ExtraEntryScan)
     result = evaluate_collection(collection.snapshot(), "<NumFiles>_<NumDirs>_<Name>")
-    assert result.entries[0].metadata.physical_file_count == 1
-    assert result.entries[0].metadata.physical_directory_count == 0
+    metadata = _required(result.entries[0].metadata)
+    assert metadata.physical_file_count == 1
+    assert metadata.physical_directory_count == 0
 
     target = tmp_path / "target"
     linked = tmp_path / "linked"
@@ -521,7 +541,7 @@ def test_reparse_children_are_skipped_and_linked_parent_paths_fail(tmp_path, mon
     linked_collection = _new_collection(linked / "source.jpg")
     linked_result = evaluate_collection(linked_collection.snapshot(), "<NumFiles>_<Name>")
     observation = linked_result.entries[0].metadata
-    assert observation.failure.code == "linked_path"
+    assert _required(observation.failure).code == "linked_path"
     assert observation.physical_file_count is None
 
 
@@ -546,8 +566,9 @@ def test_non_symlink_reparse_parent_is_rejected_from_metadata(tmp_path, monkeypa
     result = evaluate_collection(collection.snapshot(), "<NumFiles>")
 
     assert result.state is EvaluationState.INVALID
-    assert result.entries[0].metadata.failure.code == "linked_path"
-    assert result.entries[0].metadata.physical_file_count is None
+    metadata = _required(result.entries[0].metadata)
+    assert _required(metadata.failure).code == "linked_path"
+    assert metadata.physical_file_count is None
 
 
 def test_native_symlink_entries_are_not_counted(tmp_path) -> None:
@@ -581,7 +602,7 @@ def test_hard_link_names_count_as_separate_physical_files(tmp_path) -> None:
     except OSError as error:
         pytest.skip(f"native hard links unavailable: {error}")
     result = evaluate_collection(_new_collection(folder / "source.jpg").snapshot(), "<NumFiles>")
-    assert result.entries[0].metadata.physical_file_count == 3
+    assert _required(result.entries[0].metadata).physical_file_count == 3
 
 
 def test_cache_invalidation_and_forced_refresh_bypass_success_and_failure(
@@ -612,7 +633,7 @@ def test_cache_invalidation_and_forced_refresh_bypass_success_and_failure(
 
     monkeypatch.setattr(integration.os, "scandir", denied)
     failed_refresh = cache.refresh(folder)
-    assert failed_refresh.failure.code == "inaccessible_directory"
+    assert _required(failed_refresh.failure).code == "inaccessible_directory"
     assert failed_refresh.physical_file_count is None
 
     monkeypatch.setattr(integration.os, "scandir", real_scandir)
@@ -623,7 +644,7 @@ def test_cache_invalidation_and_forced_refresh_bypass_success_and_failure(
         force_metadata_refresh=True,
     )
     assert recovered.state is EvaluationState.VALID
-    assert recovered.entries[0].metadata.physical_file_count == 1
+    assert _required(recovered.entries[0].metadata).physical_file_count == 1
     assert recovered.directory_cache_hits == 0
     assert recovered.directory_enumerations == 1
 
@@ -664,7 +685,7 @@ def test_replacement_during_enumeration_makes_counts_unavailable(tmp_path, monke
 
     monkeypatch.setattr(integration, "_inspect_directory", changing)
     observation = cache.observe(folder)
-    assert observation.failure.code == "directory_replaced_during_enumeration"
+    assert _required(observation.failure).code == "directory_replaced_during_enumeration"
     assert observation.physical_file_count is None
 
 

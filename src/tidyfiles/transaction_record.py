@@ -184,9 +184,10 @@ def _identity_json(identity: FileSystemIdentitySnapshot) -> dict:
 
 
 def _hex_value(value: object, width: int) -> int:
-    if not re.fullmatch(rf"[0-9a-f]{{{width}}}", _text(value)):
+    encoded = _text(value)
+    if not re.fullmatch(rf"[0-9a-f]{{{width}}}", encoded):
         raise ValueError("Invalid native identity encoding")
-    return int(value, 16)
+    return int(encoded, 16)
 
 
 def _identity(value: object) -> FileSystemIdentitySnapshot:

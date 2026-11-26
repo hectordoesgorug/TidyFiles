@@ -12,7 +12,7 @@ def _file(
     stem: str,
     identity: str | None = r"C:\root\Photos",
     *,
-    root: str = "root",
+    root: str | None = "root",
     parent: str = "Photos",
     files: int | None = 4,
     directories: int | None = 0,

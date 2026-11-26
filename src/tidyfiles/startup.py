@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+from pathlib import Path
 
 from tidyfiles.config import load_config
 from tidyfiles.instance import SingleInstanceGuard
@@ -25,7 +26,7 @@ def _show_startup_error(message: str) -> None:
         pass
 
 
-def _launch_gui(config: dict[str, object], config_path: str | os.PathLike[str]) -> None:
+def _launch_gui(config: dict[str, object], config_path: Path) -> None:
     from tidyfiles.app import create_main_window
 
     create_main_window(config, config_path).mainloop()

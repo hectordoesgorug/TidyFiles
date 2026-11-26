@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
 
@@ -16,10 +17,10 @@ from tidyfiles.import_controller import ImportController
 
 class _FakeRoot:
     def __init__(self) -> None:
-        self._callbacks: dict[str, tuple[float, object]] = {}
+        self._callbacks: dict[str, tuple[float, Callable[[], None]]] = {}
         self._next = 0
 
-    def after(self, delay_ms: int, callback):
+    def after(self, delay_ms: int, callback: Callable[[], None]) -> str:
         self._next += 1
         callback_id = str(self._next)
         self._callbacks[callback_id] = (time.monotonic() + delay_ms / 1000, callback)
@@ -221,7 +222,7 @@ def test_folder_results_render_before_walk_finishes_and_cancel_rolls_back(
 
 
 def test_cancel_during_incremental_final_order_restores_previous_order_and_selection(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     collection = WorkingCollection()
     initial = collection.begin_import(ImportMode.ADD_FILES)
@@ -229,7 +230,7 @@ def test_cancel_during_incremental_final_order_restores_previous_order_and_selec
     collection.finalize_import(initial)
     harness = _Harness(collection)
     harness.selection = (middle.entry_id,)
-    harness.controller.RENDER_CHUNK = 1
+    monkeypatch.setattr(harness.controller, "RENDER_CHUNK", 1)
     a_path = _file(tmp_path / "a.txt")
     z_path = _file(tmp_path / "z.txt")
 

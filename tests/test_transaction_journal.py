@@ -275,6 +275,7 @@ def test_d2_04_05_06_invalid_checkpoint_matches_full_codec(tmp_path, invalid, re
         changed = replace(second, staging_path="relative")
     elif invalid == "changed_metadata":
         original = second.source_observation
+        assert original.object_metadata is not None
         changed = replace(
             second,
             source_observation=replace(
@@ -659,6 +660,7 @@ def test_c13_recovery_discovery_never_recovers_or_removes_any_file(locations, tm
     new_instance = JournalStore(app_dir=tmp_path / "absent-portable", local_app_data=local)
     location = _found(new_instance)
     assert location.status is RecoveryStatus.UNRESOLVED
+    assert location.record is not None
     assert location.record.entries[0].stage == "before_install"
     assert location.record.entries[0].staging_path == str(stage)
     inspection = new_instance.inspect_recovery()
@@ -778,7 +780,8 @@ def test_c16_c17_c18_exclusive_job_requires_persisted_modification_boundary(loca
     with pytest.raises(ModifyingJobError, match="active"):
         coordinator.reserve(OperationType.TRASH)
     coordinator.begin_modification(job.job_id, session)
-    assert coordinator.current.modifying and session.can_modify
+    current = coordinator.current
+    assert current is not None and current.modifying and session.can_modify
     assert not coordinator.can_cancel and not coordinator.normal_close_permitted
     assert not coordinator.cancel_preparation(job.job_id)
     with pytest.raises(ModifyingJobError, match="verified outcome"):
@@ -810,7 +813,8 @@ def test_c17_start_boundary_failure_does_not_activate_modification(
     monkeypatch.setattr(journal_module, "_publish", fail)
     with pytest.raises(JournalError):
         coordinator.begin_modification(job.job_id, session)
-    assert not coordinator.current.modifying and coordinator.normal_close_permitted
+    current = coordinator.current
+    assert current is not None and not current.modifying and coordinator.normal_close_permitted
     assert not session.can_modify
     coordinator.finish(job.job_id)
 

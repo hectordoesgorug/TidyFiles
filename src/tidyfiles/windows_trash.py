@@ -147,12 +147,14 @@ def _security(handle: int):
     try:
         if not owner or not group:
             raise OSError("File owner or group is unverifiable")
-        acl = _access_rules(dacl.value) if dacl else None
+        dacl_address = dacl.value
+        label_address = label.value
+        acl = _access_rules(dacl_address) if dacl_address is not None else None
         values = (
             ctypes.string_at(owner, sid_length(owner)),
             ctypes.string_at(group, sid_length(group)),
             acl,
-            _access_rules(label.value) if label else (),
+            _access_rules(label_address) if label_address is not None else (),
         )
         yield (owner, group, dacl), values
     finally:

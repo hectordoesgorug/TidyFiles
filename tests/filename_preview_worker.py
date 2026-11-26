@@ -88,8 +88,9 @@ def _evaluate(expression: str, stem: str, *, root: str = "root") -> str:
     )
     result = evaluate_batch(parse_format(expression), (context,))
     assert result.is_valid, result.errors
-    assert result.files[0].validated_filename is not None
-    return result.files[0].validated_filename
+    filename = result.files[0].validated_filename
+    assert filename is not None
+    return filename
 
 
 def test_reference_templates_and_examples_match_engine() -> None:

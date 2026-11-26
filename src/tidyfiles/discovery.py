@@ -649,7 +649,7 @@ class DiscoverySession:
             return
 
         # Keep only one iterator per path depth; never collect a directory's files first.
-        stack: list[tuple[str, os.ScandirIterator[str]]] = [(root, first)]
+        stack = [(root, first)]
         try:
             while stack and not self._cancel.is_set():
                 directory, iterator = stack[-1]

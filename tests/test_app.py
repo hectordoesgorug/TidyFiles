@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -14,8 +15,13 @@ import pytest
 
 import tidyfiles.app as app_module
 import tidyfiles.discovery as discovery_module
-from tidyfiles.app import create_main_window
-from tidyfiles.collection import FileMetadataSnapshot, ImportDiagnostic, ImportMode
+from tidyfiles.app import _ApplicationRoot, create_main_window
+from tidyfiles.collection import (
+    FileMetadataSnapshot,
+    ImportDiagnostic,
+    ImportMode,
+    WorkingCollection,
+)
 from tidyfiles.config import default_config, load_config
 from tidyfiles.discovery import DiscoverySession
 from tidyfiles.ui_preferences import COLUMNS
@@ -27,7 +33,7 @@ def _descendants(widget):
         yield from _descendants(child)
 
 
-def _wait_for(root, predicate, timeout: float = 10) -> None:
+def _wait_for(root: _ApplicationRoot, predicate: Callable[[], object], timeout: float = 10) -> None:
     deadline = time.monotonic() + timeout
     while not predicate() and time.monotonic() < deadline:
         root.update()
@@ -147,10 +153,12 @@ def test_main_window_collection_columns_import_and_persistence(
         assert app.sort_direction_button.cget("state") == "normal"
 
         app.open_columns()
-        app.column_dialog.update_idletasks()
+        dialog = app.column_dialog
+        assert dialog is not None
+        dialog.update_idletasks()
         checkboxes = {
             widget.cget("text"): widget
-            for widget in _descendants(app.column_dialog)
+            for widget in _descendants(dialog)
             if isinstance(widget, ctk.CTkCheckBox)
         }
         assert checkboxes["Original filename"].cget("state") == "disabled"
@@ -159,7 +167,7 @@ def test_main_window_collection_columns_import_and_persistence(
         assert checkboxes["Status"].cget("state") == "disabled"
         assert checkboxes["Extension"].cget("state") == "normal"
         assert checkboxes["Extension"].get() == 0
-        app.column_dialog.destroy()
+        dialog.destroy()
         assert app.rename_format.get() == ""
 
         session = app.collection.begin_import(ImportMode.ADD_FILES)
@@ -792,7 +800,8 @@ def test_manual_trash_clear_requires_confirmation_and_auto_clear_defaults_off(
     try:
         root.update()
         app.open_settings()
-        assert not app.auto_clear_trash_switch.get()
+        switch = app.auto_clear_trash_switch
+        assert switch is not None and not switch.get()
 
         app.clear_trash()
         _wait_for(root, lambda: app._processing_phase == "idle")
@@ -904,7 +913,9 @@ def test_auto_clear_trash_exit_silently_handles_empty_and_cleared_trash(
             root.update()
             dialog = app.settings_window
             assert dialog is not None
-            app.auto_clear_trash_switch.toggle()
+            switch = app.auto_clear_trash_switch
+            assert switch is not None
+            switch.toggle()
             assert app.config["global_settings"]["auto_clear_trash_on_exit"]
             dialog.destroy()
             root.update()
@@ -995,15 +1006,19 @@ def test_startup_recovery_notice_shows_paths_stages_and_explorer_location(
     try:
         root.update()
         _wait_for(root, lambda: app._recovery_dialog is not None)
+        dialog = app._recovery_dialog
+        assert dialog is not None
         box = next(
             widget
-            for widget in _descendants(app._recovery_dialog)
+            for widget in _descendants(dialog)
             if isinstance(widget, ctk.CTkTextbox)
         )
         details = box.get("1.0", "end")
         assert "before_rename" in details
         assert str(source) in details
-        app._recovery_path_list.selection_set(0)
+        paths = app._recovery_path_list
+        assert paths is not None
+        paths.selection_set(0)
         app._open_selected_recovery_location()
         assert opened == [["explorer.exe", "/select,", str(journal_path)]]
     finally:
@@ -1076,19 +1091,22 @@ def test_recovery_record_clearing_confirms_selection_and_refreshes_warnings(
     try:
         root.update()
         _wait_for(root, lambda: app._recovery_dialog is not None)
-        app._recovery_transaction_list.selection_set(0, 1)
-        app._recovery_transaction_list.event_generate("<<ListboxSelect>>")
+        transactions_list = app._recovery_transaction_list
+        clear_button = app._recovery_clear_button
+        assert transactions_list is not None and clear_button is not None
+        transactions_list.selection_set(0, 1)
+        transactions_list.event_generate("<<ListboxSelect>>")
         root.update()
-        assert app._recovery_clear_button.cget("state") == "normal"
+        assert clear_button.cget("state") == "normal"
 
         app._set_processing_phase("rename_preparing", "Preparing")
-        assert app._recovery_clear_button.cget("state") == "disabled"
+        assert clear_button.cget("state") == "disabled"
         app._clear_selected_recovery_records()
         assert clears == [] and confirmations == []
         assert "while processing is active" in warnings[-1][1]
 
         app._set_processing_phase("idle", "Ready")
-        assert app._recovery_clear_button.cget("state") == "normal"
+        assert clear_button.cget("state") == "normal"
         app._clear_selected_recovery_records()
         _wait_for(root, lambda: inspector.calls >= 2 and app._recovery_after is None)
 
@@ -1143,7 +1161,8 @@ def test_modifying_phase_disables_conflicting_actions_and_blocks_cancel_and_clos
         _wait_for(root, entered_modification.is_set)
         assert app._plan_review_dialog is None
 
-        assert app.coordinator.current.modifying
+        job = app.coordinator.current
+        assert job is not None and job.modifying
         app.cancel_current_work()
         assert app._processing_phase == "rename_modifying"
         assert not app._processing_cancel.is_set()
@@ -1546,7 +1565,7 @@ def test_large_rename_failure_summary_aggregates_unprocessed_rows():
     )
 
     app = object.__new__(app_module._MainWindow)
-    app._processing_snapshot = SimpleNamespace(entries=())
+    app._processing_snapshot = WorkingCollection().snapshot()
     app._processing_diagnostics_by_id = {}
     error = "Cannot persist checkpoint: [WinError 5] Access is denied."
     entries = tuple(
