@@ -20,8 +20,9 @@ entries leaves source files unchanged. Bulk Rename provides live filename
 previews, three built-in formats, token insertion, a scrollable token reference,
 and an explicit refresh for physical directory-count metadata. The format is
 session-only. Expression and file-specific errors are shown in the preview;
-Process requires destination review and fresh preflight. Duplicate analysis and
-repacking are not available. The application is not production-ready.
+Process uses the live filename preview as the review interface and runs fresh
+preflight before renaming. Duplicate analysis and repacking are not available.
+The application is not production-ready.
 
 Collection controls are shared across Bulk Rename, Duplicate Finder, and
 Repacker. Use Ctrl+A in the table to select all rows and Delete to remove the
@@ -36,12 +37,13 @@ Refresh Preview recalculates names for the existing collection and refreshes
 required directory counts without rescanning folders or changing collection
 membership.
 
-Process opens a destination review and requires confirmation before fresh
-preflight and journaled Windows renaming. It supports ordinary rename and
-Single Folder destinations. Collision-only partial processing requires its own
-explicit confirmation; filename-format errors block the full batch, and
-incomplete imports require acknowledgment. Preparation runs outside Tk and can
-be canceled. Active filesystem modification cannot be canceled, and normal
+Clicking Process authorizes the displayed operation scope. For an ordinary,
+conflict-free plan, background preflight proceeds directly to journaled Windows
+renaming when it passes unchanged. Process supports ordinary rename and Single
+Folder destinations. Collision-only partial processing and changed plans
+require review; filename-format errors block the full batch, and incomplete
+imports require acknowledgment. Preparation runs outside Tk and can be
+canceled. Active filesystem modification cannot be canceled, and normal
 application closure waits until it finishes.
 
 Startup displays unresolved transaction recovery details without restoring,

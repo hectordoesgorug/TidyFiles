@@ -365,8 +365,9 @@ selection restoration and already-applied preview clearing are skipped.
 
 The common status and progress area reports evaluation and processing stages.
 Process is enabled only for the current valid Bulk Rename evaluation. It opens
-destination review, then runs fresh preflight and the journaled rename executor
-in background workers. Deduplicate and Repack remain disabled.
+background destination planning and fresh preflight, then runs the journaled
+rename executor when a conflict-free plan passes unchanged. Exceptional plans
+require review. Deduplicate and Repack remain disabled.
 
 An evaluation marked valid establishes that the filename expression was
 evaluated and each filename component passed validation. Destination planning,
@@ -412,18 +413,21 @@ against the reviewed plan and observes its proposed collision-only subset
 again. It keeps the original candidate filenames and destination paths, and
 reports IDs excluded from the original review. Safety and observation failures,
 incomplete imports, and format failures prevent collision-only replanning.
-The resulting plan describes the observations in that call. Execution still
-requires confirmation, fresh preflight, and transaction safeguards.
+The resulting plan describes the observations in that call. Processing still
+requires explicit Process authorization, fresh preflight, and transaction
+safeguards; a collision-only subset also requires confirmation.
 
 ## Execution preflight
 
 `capture_review_plan()` runs the planner with handle-based identity capture
-before a plan is presented for review. `PreflightRequest` binds that full plan
-and its evaluation to a current snapshot, evaluation ID, expression, settings,
-destination options, and ordered intended IDs. The intended set is either the
-full valid batch or the exact collision-only proposal from the review. The
-request carries review context and scope. Confirmation and authorization are
-separate workflow steps.
+before a plan is used for preflight or exceptional review. `PreflightRequest`
+binds that full plan and its evaluation to a current snapshot, evaluation ID,
+expression, settings, destination options, and ordered intended IDs. The
+intended set is either the full valid batch or the exact collision-only proposal
+from the review. The
+request carries the reviewed context and authorized scope. Clicking Process
+authorizes an ordinary conflict-free scope. Collision-only subsets and plans
+changed by preflight require renewed review and confirmation.
 
 `run_preflight()` first checks input consistency by replaying the planner
 against recorded observations. It checks source continuity against the import
@@ -604,12 +608,13 @@ was added.
 ## GUI rename integration
 
 The Process control consumes the current filename evaluation and collection
-snapshot, shows the complete destination plan, and asks for confirmation before
-preflight. A collision-only subset is offered only when independent operations
-remain valid; confirming it preserves the original reviewed candidate names.
-Fresh preflight changes return to destination review. Incomplete import sessions
-require explicit acknowledgment and remain visible in the plan. Filename-format
-errors block the complete batch.
+snapshot. The live filename preview reviews ordinary operation names; clicking
+Process authorizes that scope. A valid, conflict-free destination plan proceeds
+directly to fresh preflight, then to execution if preflight passes unchanged. A
+collision-only subset is offered only when independent operations remain valid;
+confirming it preserves the original reviewed candidate names. Fresh preflight
+changes return to destination review. Incomplete import sessions require
+explicit acknowledgment. Filename-format errors block the complete batch.
 
 Preflight and the journaled Windows rename executor run outside Tk. Preparation
 can be canceled; active modification cannot. Conflicting collection and

@@ -11,9 +11,12 @@ and script extensions are disabled for Open File; suffix checks cannot identify
 every potentially launchable file. Bulk Rename shows read-only filename
 previews. The **Valid preview** label means filename-level validation passed;
 it does not verify destination collisions, source identity or execution
-readiness. Process requires destination review, explicit confirmation, and fresh
-preflight before journaled Windows renaming. Clear Trash requires explicit
-permanent-deletion confirmation. Deduplicate and Repack remain disabled.
+readiness. For an ordinary, conflict-free plan, clicking Process authorizes the
+displayed scope and starts mandatory fresh preflight; a passing unchanged plan
+proceeds to journaled Windows renaming. Collision-only subsets and changed
+plans require review, and incomplete imports require acknowledgment. Clear
+Trash requires explicit permanent-deletion confirmation. Deduplicate and
+Repack remain disabled.
 
 Auto-clean is an optional default-off setting with a permanent-deletion
 disclosure. It runs only after complete rename success, uses the original

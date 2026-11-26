@@ -486,9 +486,9 @@ def test_main_window_collection_columns_import_and_persistence(
     assert saved["global_settings"]["auto_clean"] is True
 
 
-def test_process_button_renames_only_after_destination_review(tmp_path, monkeypatch) -> None:
+def test_process_button_runs_conflict_free_plan_without_review(tmp_path, monkeypatch) -> None:
     if _run_gui_test_in_isolated_process(
-        "test_process_button_renames_only_after_destination_review"
+        "test_process_button_runs_conflict_free_plan_without_review"
     ):
         return
     from tidyfiles.transaction_journal import JournalStore
@@ -509,12 +509,12 @@ def test_process_button_renames_only_after_destination_review(tmp_path, monkeypa
         _wait_for(root, app._process_ready)
 
         app.process_button.invoke()
-        _wait_for(root, lambda: app._plan_review_dialog is not None)
+        _wait_for(root, lambda: app._processing_request is not None)
+        assert app._plan_review_dialog is None
         destination = tmp_path / "source reviewed.txt"
         assert source.exists()
         assert not destination.exists()
 
-        _confirm_review(app, "Confirm rename")
         _wait_for(
             root,
             lambda: app._processing_phase == "idle" and destination.exists(),
@@ -574,11 +574,11 @@ def test_collision_subset_processes_only_confirmed_unaffected_file(
         _close_app(app, root)
 
 
-def test_invalid_filename_confirmation_cancel_and_changed_preflight_stay_read_only(
+def test_invalid_filename_blocks_and_changed_preflight_requires_review(
     tmp_path, monkeypatch
 ) -> None:
     if _run_gui_test_in_isolated_process(
-        "test_invalid_filename_confirmation_cancel_and_changed_preflight_stay_read_only"
+        "test_invalid_filename_blocks_and_changed_preflight_requires_review"
     ):
         return
     from tidyfiles.destination_planning import PlanState
@@ -605,18 +605,15 @@ def test_invalid_filename_confirmation_cancel_and_changed_preflight_stay_read_on
 
         app.rename_format.set("<Name> reviewed")
         _wait_for(root, app._process_ready)
-        app.process_button.invoke()
-        _wait_for(root, lambda: app._plan_review_dialog is not None)
-        app.cancel_current_work()
-        _wait_for(root, lambda: app._processing_phase == "idle")
-        assert source.exists()
-        assert not (tmp_path / "source reviewed.txt").exists()
-
-        app.process_button.invoke()
-        _wait_for(root, lambda: app._plan_review_dialog is not None)
         destination = tmp_path / "source reviewed.txt"
-        destination.write_bytes(b"new unrelated content")
-        _confirm_review(app, "Confirm rename")
+        submit_preflight = app.preflight_service.submit
+
+        def occupy_destination_then_submit(request, *, progress_callback=None):
+            destination.write_bytes(b"new unrelated content")
+            return submit_preflight(request, progress_callback=progress_callback)
+
+        monkeypatch.setattr(app.preflight_service, "submit", occupy_destination_then_submit)
+        app.process_button.invoke()
         _wait_for(
             root,
             lambda: app._plan_review_dialog is not None
@@ -675,8 +672,8 @@ def test_single_folder_and_auto_clean_use_the_original_folder_snapshot(
         _wait_for(root, app._process_ready)
 
         app.process_button.invoke()
-        _wait_for(root, lambda: app._plan_review_dialog is not None)
-        _confirm_review(app, "Confirm rename")
+        _wait_for(root, lambda: app._processing_request is not None)
+        assert app._plan_review_dialog is None
         destination = root_folder / "source flattened.txt"
         _wait_for(
             root,
@@ -729,8 +726,8 @@ def test_incomplete_import_requires_acknowledgment_before_rename(tmp_path, monke
 
         app.process_button.invoke()
         assert acknowledgments == ["Acknowledge incomplete imports"]
-        _wait_for(root, lambda: app._plan_review_dialog is not None)
-        _confirm_review(app, "Confirm rename")
+        _wait_for(root, lambda: app._processing_request is not None)
+        assert app._plan_review_dialog is None
         destination = tmp_path / "source acknowledged.txt"
         _wait_for(
             root,
@@ -946,8 +943,8 @@ def test_modifying_phase_disables_conflicting_actions_and_blocks_cancel_and_clos
         app.rename_format.set("<Name> reviewed")
         _wait_for(root, app._process_ready)
         app.process_button.invoke()
-        _wait_for(root, lambda: app._plan_review_dialog is not None)
-        _confirm_review(app, "Confirm rename")
+        _wait_for(root, lambda: app._processing_request is not None)
+        assert app._plan_review_dialog is None
         _wait_for(root, entered_modification.is_set)
 
         assert app.coordinator.current.modifying

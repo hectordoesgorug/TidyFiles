@@ -872,13 +872,14 @@ checkpoint before M3-G GUI confirmation and normal-exit integration.
 ### M3-G — GUI execution integration
 
 Bulk Rename Process now consumes the current filename evaluation and finalized
-collection snapshot, displays a destination plan, and requires confirmation
-before fresh preflight and journaled execution. A changed preflight returns to
-review. A confirmed collision-only subset keeps the reviewed candidates and
-retains excluded or failed entries with diagnostics. Incomplete imports require
-explicit acknowledgment. Processing runs outside Tk; preparation can be
-canceled, active modification cannot, and normal close waits for filesystem
-changes to finish.
+collection snapshot. The live filename preview is the review interface for an
+ordinary conflict-free operation: clicking Process authorizes the displayed
+scope, and an unchanged passing preflight proceeds directly to journaled
+execution. Collision-only subsets and changed plans require review. A confirmed
+collision-only subset keeps the reviewed candidates and retains excluded or
+failed entries with diagnostics. Incomplete imports require explicit
+acknowledgment. Processing runs outside Tk; preparation can be canceled, active
+modification cannot, and normal close waits for filesystem changes to finish.
 
 Startup displays read-only unresolved-transaction details and recorded paths,
 stages, and Explorer access. Auto-clean runs only after complete success with
@@ -898,6 +899,17 @@ directory-count preview worker; its isolated rerun passed, and the final full
 suite passed. GUI tests used temporary source, journal, and configuration
 fixtures; no production Trash was cleared. Visible hardware and DPI acceptance
 was not repeated.
+
+### M3-G1 — Simplify processing workflow
+
+An ordinary conflict-free plan proceeds from Process to background preflight
+and directly to execution when the reviewed scope remains unchanged. Collision
+subsets and changes detected by preflight still require review; incomplete
+imports still require acknowledgment.
+
+Verification on Windows Python 3.13.17: the focused GUI workflow run passed 7
+tests, and the complete suite passed 640 tests with zero skips. Ruff, compileall,
+and both Git whitespace checks passed. The full suite took 199.32 seconds.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 

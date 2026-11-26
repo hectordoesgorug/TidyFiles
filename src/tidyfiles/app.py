@@ -1530,7 +1530,7 @@ class _MainWindow:
                 actions,
                 text=label,
                 width=200,
-                command=lambda: self._confirm_destination_review(
+                command=lambda: self._submit_preflight(
                     dialog, plan, evaluation, intended, partial
                 ),
             ).pack(side="right", padx=(6, 0))
@@ -1542,9 +1542,9 @@ class _MainWindow:
         ).pack(side="right")
         dialog.grab_set()
 
-    def _confirm_destination_review(
+    def _submit_preflight(
         self,
-        dialog: ctk.CTkToplevel,
+        dialog: ctk.CTkToplevel | None,
         plan: DestinationPlan,
         evaluation: FilenameEvaluationResult,
         intended: tuple[UUID, ...],
@@ -1557,8 +1557,9 @@ class _MainWindow:
                 parent=self.root,
             )
             return
-        self._plan_review_dialog = None
-        dialog.destroy()
+        if dialog is not None:
+            self._plan_review_dialog = None
+            dialog.destroy()
         options = self._processing_options
         assert options is not None and evaluation.expression is not None
         request = PreflightRequest(
@@ -1626,7 +1627,16 @@ class _MainWindow:
                 elif error is not None:
                     self._finish_processing(f"Destination review failed: {error}")
                 elif plan is not None:
-                    self._show_destination_review(plan, evaluation, notice)
+                    if plan.state is PlanState.VALID and notice is None:
+                        self._submit_preflight(
+                            None,
+                            plan,
+                            evaluation,
+                            tuple(row.entry_id for row in plan.entries),
+                            False,
+                        )
+                    else:
+                        self._show_destination_review(plan, evaluation, notice)
             elif kind == "preflight":
                 self._handle_preflight_result(payload)
             elif kind == "preflight_error":
