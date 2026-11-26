@@ -330,9 +330,13 @@ directory and its recognized batch directories. Clear accepts the M3-E
 inside those boundaries do not require per-file ownership records. It deletes
 files individually, then removes empty directories deepest first. It preserves
 unrecognized root content, unresolved recovery dependencies, links, and
-inaccessible or failed entries. Manual Clear Trash requires explicit
-authorization; Auto-Clear Trash is an independent default-off setting intended
-only for normal exit while idle. Missing or empty Trash and successful exit
+inaccessible or failed entries. Manual Clear Trash confirms the inspected files
+and directories, including recognized empty batches. Each confirmed candidate
+is revalidated against the current managed root, its inspected identity, and
+current recovery dependencies. New entries remain in Trash, and a confirmed
+directory containing any remaining entries is preserved. Auto-Clear Trash is
+an independent default-off setting intended only for normal exit while idle.
+Missing or empty Trash and successful exit
 clearing are silent; errors and remaining protected or undeleted entries are
 reported. Exit clearing does not create the Trash directory. Both use the same
 inspection and deletion safeguards. No ownership manifest was added. The GUI

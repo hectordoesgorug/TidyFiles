@@ -35,7 +35,8 @@ Bulk Rename labels individually valid filename results **Valid preview**; it
 does not check destination collisions, source identity or execution readiness.
 Refresh Preview recalculates names for the existing collection and refreshes
 required directory counts without rescanning folders or changing collection
-membership.
+membership. If the table could not be rebuilt after a canceled or failed import,
+Refresh Preview retries that rebuild before Process becomes available.
 
 Clicking Process authorizes the displayed operation scope. For an ordinary,
 conflict-free plan, background preflight proceeds directly to journaled Windows
@@ -50,7 +51,8 @@ files and elapsed time, with an estimated remaining time after enough progress.
 Startup displays unresolved transaction recovery details without restoring,
 moving, or deleting files. Clear Recovery Records requires confirmation and
 removes selected recovery information without changing affected files. Clear
-Trash requires confirmation and is limited to recognized managed batches.
+Trash requires confirmation for the inspected files and removable directories in
+recognized managed batches. Items that arrive after inspection are preserved.
 Auto-clean and Auto-Clear Trash are separate,
 default-off settings. Auto-clean runs only after complete rename success from
 explicit Add Folder roots; Auto-Clear Trash runs only after normal exit and

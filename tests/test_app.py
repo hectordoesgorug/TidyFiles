@@ -509,17 +509,23 @@ def test_process_button_runs_conflict_free_plan_without_review(tmp_path, monkeyp
         app.rename_format.set("<Name> reviewed")
         _wait_for(root, app._process_ready)
 
-        app.process_button.invoke()
-        _wait_for(root, lambda: app._processing_request is not None)
-        assert app._plan_review_dialog is None
         destination = tmp_path / "source reviewed.txt"
-        assert source.exists()
-        assert not destination.exists()
+        submit = app.preflight_service.submit
+        submissions = []
 
+        def record_submission(request, *, progress_callback):
+            assert app._plan_review_dialog is None
+            assert source.exists() and not destination.exists()
+            submissions.append(request)
+            return submit(request, progress_callback=progress_callback)
+
+        monkeypatch.setattr(app.preflight_service, "submit", record_submission)
+        app.process_button.invoke()
         _wait_for(
             root,
             lambda: app._processing_phase == "idle" and destination.exists(),
         )
+        assert len(submissions) == 1
         assert destination.read_bytes() == b"fixture contents"
         assert not source.exists()
         assert app.collection.snapshot().entries == ()
@@ -673,8 +679,6 @@ def test_single_folder_and_auto_clean_use_the_original_folder_snapshot(
         _wait_for(root, app._process_ready)
 
         app.process_button.invoke()
-        _wait_for(root, lambda: app._processing_request is not None)
-        assert app._plan_review_dialog is None
         destination = root_folder / "source flattened.txt"
         _wait_for(
             root,
@@ -686,6 +690,10 @@ def test_single_folder_and_auto_clean_use_the_original_folder_snapshot(
         assert destination.read_bytes() == b"fixture contents"
         assert not source.exists()
         assert not nested.exists()
+        assert app._plan_review_dialog is None
+        assert app.collection.snapshot().entries == ()
+        assert "1 renamed" in app.status.cget("text")
+        assert "Auto-clean removed 2 item(s)" in app.status.cget("text")
     finally:
         _close_app(app, root)
 
@@ -727,14 +735,13 @@ def test_incomplete_import_requires_acknowledgment_before_rename(tmp_path, monke
 
         app.process_button.invoke()
         assert acknowledgments == ["Acknowledge incomplete imports"]
-        _wait_for(root, lambda: app._processing_request is not None)
-        assert app._plan_review_dialog is None
         destination = tmp_path / "source acknowledged.txt"
         _wait_for(
             root,
             lambda: app._processing_phase == "idle" and destination.exists(),
         )
         assert destination.read_bytes() == b"fixture contents"
+        assert app._plan_review_dialog is None
         assert app.collection.snapshot().incomplete_imports
     finally:
         _close_app(app, root)
@@ -752,19 +759,22 @@ def test_manual_trash_clear_requires_confirmation_and_auto_clear_defaults_off(
     class TrashService:
         def __init__(self):
             self.clear_calls = []
-
-        def inspect(self):
-            return SimpleNamespace(
+            self.inspection = SimpleNamespace(
                 eligible_count=1,
+                eligible_directory_count=1,
                 eligible_size_bytes=9,
                 items=(),
                 detail=None,
             )
 
+        def inspect(self):
+            return self.inspection
+
         def clear(self, **options):
             self.clear_calls.append(options)
             return SimpleNamespace(
-                cleanup=SimpleNamespace(deleted_paths=("fixture-item",), failures=(), detail=None)
+                inspection=self.inspection,
+                cleanup=SimpleNamespace(deleted_paths=("fixture-item",), items=(), detail=None),
             )
 
     (tmp_path / "local").mkdir()
@@ -790,7 +800,8 @@ def test_manual_trash_clear_requires_confirmation_and_auto_clear_defaults_off(
 
         app.clear_trash()
         _wait_for(root, lambda: app._processing_phase == "idle" and service.clear_calls)
-        assert service.clear_calls == [{"manually_authorized": True}]
+        assert len(service.clear_calls) == 1
+        assert service.clear_calls[0]["confirmed"] is service.inspection
     finally:
         _close_app(app, root)
         assert len(service.clear_calls) == 1
@@ -838,11 +849,12 @@ def test_auto_clear_trash_runs_only_during_enabled_normal_exit(tmp_path, monkeyp
     ]
 
 
+@pytest.mark.parametrize("case", ("absent", "empty", "populated", "failed", "leftover", "disabled"))
 def test_auto_clear_trash_exit_silently_handles_empty_and_cleared_trash(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, case
 ) -> None:
     if _run_gui_test_in_isolated_process(
-        "test_auto_clear_trash_exit_silently_handles_empty_and_cleared_trash"
+        f"test_auto_clear_trash_exit_silently_handles_empty_and_cleared_trash[{case}]"
     ):
         return
     if os.name != "nt":
@@ -863,89 +875,63 @@ def test_auto_clear_trash_exit_silently_handles_empty_and_cleared_trash(
         "askyesno",
         lambda *_args, **_options: confirmations.append(True) or True,
     )
-    remove_file = cleanup_module.remove_file
-
     def fail_remove_file(*_args):
         raise PermissionError("fixture deletion failure")
 
-    for index, case in enumerate(
-        ("absent", "empty", "populated", "failed", "leftover", "disabled")
-    ):
-        fixture = tmp_path / case
-        local_app_data = fixture / "local"
-        local_app_data.mkdir(parents=True)
-        trash_path = fixture / "managed-trash"
-        if case != "absent":
-            trash_path.mkdir()
-        batch = trash_path / f"20261126T000000Z-{index:032x}"
-        if case in {"populated", "failed", "disabled"}:
-            batch.mkdir()
-            (batch / "photo.txt").write_text("fixture contents", encoding="utf-8")
-        elif case == "leftover":
-            (trash_path / "unrecognized.txt").write_text(
-                "preserve", encoding="utf-8"
-            )
+    local_app_data = tmp_path / "local"
+    local_app_data.mkdir()
+    trash_path = tmp_path / "managed-trash"
+    if case != "absent":
+        trash_path.mkdir()
+    batch = trash_path / f"20261126T000000Z-{'0' * 32}"
+    if case in {"populated", "failed", "disabled"}:
+        batch.mkdir()
+        (batch / "photo.txt").write_text("fixture contents", encoding="utf-8")
+    elif case == "leftover":
+        (trash_path / "unrecognized.txt").write_text("preserve", encoding="utf-8")
 
-        monkeypatch.setattr(
-            cleanup_module, "managed_trash_path", lambda path=trash_path: path
-        )
-        monkeypatch.setattr(
-            cleanup_module,
-            "remove_file",
-            fail_remove_file if case == "failed" else remove_file,
-        )
-        journals = JournalStore(
-            app_dir=fixture / "app", local_app_data=local_app_data
-        )
-        monkeypatch.setattr(
-            app_module, "JournalStore", lambda store=journals: store
-        )
-        root = create_main_window(default_config(), fixture / "config.json")
-        app = root.application
-        try:
+    monkeypatch.setattr(cleanup_module, "managed_trash_path", lambda: trash_path)
+    if case == "failed":
+        monkeypatch.setattr(cleanup_module, "remove_file", fail_remove_file)
+    journals = JournalStore(app_dir=tmp_path / "app", local_app_data=local_app_data)
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    root = create_main_window(default_config(), tmp_path / "config.json")
+    app = root.application
+    try:
+        root.update()
+        if case != "disabled":
+            app.open_settings()
             root.update()
-            if case != "disabled":
-                app.open_settings()
-                root.update()
-                dialog = app.settings_window
-                assert dialog is not None
-                app.auto_clear_trash_switch.toggle()
-                assert app.config["global_settings"]["auto_clear_trash_on_exit"]
-                dialog.destroy()
-                root.update()
-                assert app.settings_window is None
-                assert app.appearance_choice is None
-                assert app.auto_clear_trash_switch is None
+            dialog = app.settings_window
+            assert dialog is not None
+            app.auto_clear_trash_switch.toggle()
+            assert app.config["global_settings"]["auto_clear_trash_on_exit"]
+            dialog.destroy()
+            root.update()
+            assert app.settings_window is None
+            assert app.appearance_choice is None
+            assert app.auto_clear_trash_switch is None
 
-            app.close()
-            _wait_for(root, lambda: app._closing)
+        app.close()
+        _wait_for(root, lambda: app._closing)
+    finally:
+        _close_app(app, root)
 
-            if case == "absent":
-                assert not trash_path.exists()
-            elif case == "empty":
-                assert list(trash_path.iterdir()) == []
-            elif case == "populated":
-                assert list(trash_path.iterdir()) == []
-            elif case == "failed":
-                assert (batch / "photo.txt").read_text(encoding="utf-8") == (
-                    "fixture contents"
-                )
-            elif case == "leftover":
-                assert (trash_path / "unrecognized.txt").read_text(
-                    encoding="utf-8"
-                ) == "preserve"
-            elif case == "disabled":
-                assert (batch / "photo.txt").read_text(encoding="utf-8") == (
-                    "fixture contents"
-                )
-        finally:
-            _close_app(app, root)
-
-    assert len(confirmations) == 5
-    assert len(warnings) == 2
-    assert all(title == "Auto-Clear Trash results" for title, _message in warnings)
-    assert "fixture deletion failure" in warnings[0][1]
-    assert "unrecognized.txt" in warnings[1][1]
+    assert len(confirmations) == (0 if case == "disabled" else 1)
+    if case == "absent":
+        assert not trash_path.exists()
+    elif case in {"empty", "populated"}:
+        assert list(trash_path.iterdir()) == []
+    elif case in {"failed", "disabled"}:
+        assert (batch / "photo.txt").read_text(encoding="utf-8") == "fixture contents"
+    else:
+        assert (trash_path / "unrecognized.txt").read_text(encoding="utf-8") == "preserve"
+    if case in {"failed", "leftover"}:
+        [(title, message)] = warnings
+        assert title == "Auto-Clear Trash results"
+        assert ("fixture deletion failure" if case == "failed" else "unrecognized.txt") in message
+    else:
+        assert warnings == []
 
 
 def test_startup_recovery_notice_shows_paths_stages_and_explorer_location(
@@ -1154,9 +1140,8 @@ def test_modifying_phase_disables_conflicting_actions_and_blocks_cancel_and_clos
         app.rename_format.set("<Name> reviewed")
         _wait_for(root, app._process_ready)
         app.process_button.invoke()
-        _wait_for(root, lambda: app._processing_request is not None)
-        assert app._plan_review_dialog is None
         _wait_for(root, entered_modification.is_set)
+        assert app._plan_review_dialog is None
 
         assert app.coordinator.current.modifying
         app.cancel_current_work()
@@ -1347,12 +1332,14 @@ def test_empty_managed_trash_states_show_message_without_clearing(tmp_path, monk
                 (
                     SimpleNamespace(
                         eligible_count=0,
+                        eligible_directory_count=0,
                         eligible_size_bytes=0,
                         items=(),
                         detail="Managed Trash does not exist",
                     ),
                     SimpleNamespace(
                         eligible_count=0,
+                        eligible_directory_count=0,
                         eligible_size_bytes=0,
                         items=(),
                         detail=None,
@@ -1407,6 +1394,109 @@ def test_empty_managed_trash_states_show_message_without_clearing(tmp_path, monk
         assert service.clear_calls == 0
     finally:
         _close_app(app, root)
+
+
+def test_manual_clear_trash_confirms_and_removes_empty_recognized_batches(tmp_path, monkeypatch):
+    if _run_gui_test_in_isolated_process(
+        "test_manual_clear_trash_confirms_and_removes_empty_recognized_batches"
+    ):
+        return
+    import tidyfiles.cleanup as cleanup_module
+    from tidyfiles.transaction_journal import JournalStore
+
+    trash = tmp_path / "trash"
+    batch = trash / "20261126_010203"
+    batch.mkdir(parents=True)
+    unknown = trash / "unknown"
+    unknown.mkdir()
+    journals = JournalStore(app_dir=tmp_path / "app", local_app_data=tmp_path / "local")
+    monkeypatch.setattr(cleanup_module, "managed_trash_path", lambda: trash)
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    confirmations = []
+    results = []
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "askyesno",
+        lambda _title, message, **_options: confirmations.append(message) or True,
+    )
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "showwarning",
+        lambda _title, message, **_options: results.append(message),
+    )
+    root = create_main_window(default_config(), tmp_path / "config.json")
+    app = root.application
+    try:
+        app.clear_trash()
+        _wait_for(root, lambda: app._processing_phase == "idle" and results)
+        assert len(confirmations) == 1
+        assert "0 inspected file(s)" in confirmations[0]
+        assert "1 inspected directories if empty" in confirmations[0]
+        assert "deleted 1 item(s)" in results[0]
+        assert str(unknown) in results[0]
+        assert unknown.is_dir() and not batch.exists()
+    finally:
+        _close_app(app, root)
+
+
+def test_failed_import_view_rebuild_blocks_rename_until_refresh(tmp_path, monkeypatch):
+    if _run_gui_test_in_isolated_process(
+        "test_failed_import_view_rebuild_blocks_rename_until_refresh"
+    ):
+        return
+    from tidyfiles.transaction_journal import JournalStore
+
+    prior = tmp_path / "prior.txt"
+    discarded = tmp_path / "discarded.txt"
+    prior.write_bytes(b"prior")
+    discarded.write_bytes(b"discarded")
+    journals = JournalStore(app_dir=tmp_path / "app", local_app_data=tmp_path / "local")
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    root = create_main_window(default_config(), tmp_path / "config.json")
+    app = root.application
+    try:
+        _import_files(app, root, monkeypatch, prior)
+        initial = app.collection.snapshot().entries
+        selected = str(initial[0].entry_id)
+        app.tree.selection_set(selected)
+        app.rename_format.set("<Name> renamed")
+        _wait_for(root, app._process_ready)
+        controller = app.import_controller
+        on_activity = controller.on_activity
+
+        def cancel_at_rendering(phase, session):
+            on_activity(phase, session)
+            if phase == "rendering":
+                assert controller.cancel()
+
+        def fail_removal(_entries):
+            raise RuntimeError("persistent removal failure")
+
+        def fail_rebuild():
+            raise RuntimeError("table unavailable")
+
+        monkeypatch.setattr(controller, "on_activity", cancel_at_rendering)
+        monkeypatch.setattr(controller, "on_remove_chunk", fail_removal)
+        with monkeypatch.context() as attempt:
+            attempt.setattr(app, "refresh_collection", fail_rebuild)
+            _import_files(app, root, monkeypatch, discarded)
+        assert app.collection.snapshot().entries == initial
+        assert len(app.tree.get_children("")) == 2
+        assert "persistent removal failure" in app.status.cget("text")
+        assert "table unavailable" in app.status.cget("text")
+        assert app.process_button.cget("state") == "disabled"
+        assert app.refresh_preview_button.cget("state") == "normal"
+        app.start_rename_review()
+        assert app._processing_phase == "idle"
+        assert prior.read_bytes() == b"prior" and discarded.read_bytes() == b"discarded"
+
+        app.refresh_preview_button.invoke()
+        _wait_for(root, app._process_ready)
+        assert app.tree.get_children("") == (selected,)
+        assert app.tree.selection() == (selected,)
+    finally:
+        _close_app(app, root)
+    assert app._closing
 
 
 def test_rename_progress_shows_measured_elapsed_and_delays_eta(tmp_path, monkeypatch):

@@ -46,6 +46,7 @@ class ImportController:
         on_order_chunk: OrderCallback,
         on_remove_chunk: RemoveCallback,
         on_rollback_complete: Callable[[tuple[UUID, ...], ViewState], None],
+        on_rollback_rebuild: Callable[[ViewState], None],
         on_finished: Callable[[DiscoveryReport], None],
         on_error: Callable[[str], None],
         on_shutdown: Callable[[], None],
@@ -60,6 +61,7 @@ class ImportController:
         self.on_order_chunk = on_order_chunk
         self.on_remove_chunk = on_remove_chunk
         self.on_rollback_complete = on_rollback_complete
+        self.on_rollback_rebuild = on_rollback_rebuild
         self.on_finished = on_finished
         self.on_error = on_error
         self.on_shutdown = on_shutdown
@@ -212,7 +214,10 @@ class ImportController:
             elif self._phase == "removing":
                 self._poll_removal()
         except Exception as error:
-            self._fail_current(error)
+            if self._phase in {"restoring", "removing"}:
+                self._finish_terminal(rollback_error=error)
+            else:
+                self._fail_current(error)
         if self.busy:
             self._schedule()
 
@@ -393,7 +398,7 @@ class ImportController:
         else:
             self._phase = "discovering"
 
-    def _finish_terminal(self) -> None:
+    def _finish_terminal(self, *, rollback_error: Exception | None = None) -> None:
         assert self.session is not None
         report = self.session.report
         self._discovery_duration_seconds = report.duration_seconds
@@ -406,10 +411,21 @@ class ImportController:
                 pass
             self._after_id = None
         try:
-            self.on_activity("idle", None)
-            self.on_finished(report)
-        except Exception as error:
-            self.on_error(str(error))
-        if self._shutdown_requested:
-            self._closed = True
-            self.on_shutdown()
+            message = None
+            if rollback_error is not None:
+                message = f"Could not update the table during import rollback: {rollback_error}"
+                try:
+                    self.on_rollback_rebuild(self._prior_view)
+                except Exception as error:
+                    message += f"\nTable rebuild failed: {error}. Use Refresh Preview to retry."
+            try:
+                self.on_activity("idle", None)
+                self.on_finished(report)
+            except Exception as error:
+                self.on_error(str(error))
+            if message is not None:
+                self.on_error(message)
+        finally:
+            if self._shutdown_requested:
+                self._closed = True
+                self.on_shutdown()

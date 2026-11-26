@@ -328,6 +328,7 @@ class _MainWindow:
         self._preview_result: FilenameEvaluationResult | None = None
         self._preview_diagnostics_by_id: dict[UUID, Any] = {}
         self._preview_import_invalidated = False
+        self._unsynced_selection: tuple[UUID, ...] | None = None
         self._format_reference_dialog: ctk.CTkToplevel | None = None
         self._preview_details_dialog: ctk.CTkToplevel | None = None
         self._preview_details_textbox: ctk.CTkTextbox | None = None
@@ -350,6 +351,7 @@ class _MainWindow:
             on_order_chunk=self._apply_order_chunk,
             on_remove_chunk=self._remove_rows_chunk,
             on_rollback_complete=self._complete_view_rollback,
+            on_rollback_rebuild=self._rebuild_rollback_view,
             on_finished=self._on_import_finished,
             on_error=self._on_import_error,
             on_shutdown=self._finish_close,
@@ -911,7 +913,7 @@ class _MainWindow:
         ) or self.collection.capabilities.is_importing
 
     def _on_format_changed(self, *_args: Any) -> None:
-        if self._closing:
+        if self._closing or self._unsynced_selection is not None:
             return
         self._set_format_diagnostic(None)
         self._invalidate_filename_preview(schedule=True)
@@ -921,7 +923,7 @@ class _MainWindow:
         self._update_control_states()
 
     def _on_collection_changed(self, _event: tk.Event[Any] | None = None) -> None:
-        if self._closing:
+        if self._closing or self._unsynced_selection is not None:
             return
         self._invalidate_filename_preview(schedule=True)
         if not self.rename_format.get() and not self._entries_by_id:
@@ -1421,6 +1423,15 @@ class _MainWindow:
     def refresh_filename_preview(self) -> None:
         if self._closing or self._import_is_busy() or self._collection_operation_pending:
             return
+        if self._unsynced_selection is not None:
+            try:
+                self.refresh_collection()
+            except Exception as error:
+                self._on_import_error(
+                    f"Table rebuild failed: {error}. Use Refresh Preview to retry."
+                )
+                return
+            self._update_control_states()
         self._invalidate_filename_preview(
             schedule=True, force_metadata=True, invalidate_metadata=True
         )
@@ -2049,7 +2060,7 @@ class _MainWindow:
             self._finish_processing(summary.detail)
             messagebox.showwarning("Clear Trash unavailable", summary.detail, parent=self.root)
             return
-        if not summary.eligible_count:
+        if not (summary.eligible_count or summary.eligible_directory_count):
             message = "Trash is empty."
             if summary.items:
                 message += " Unsafe or recovery-dependent entries were preserved."
@@ -2059,9 +2070,9 @@ class _MainWindow:
         size = format_size(summary.eligible_size_bytes)
         if not messagebox.askyesno(
             "Permanently clear managed Trash?",
-            f"Permanently delete {summary.eligible_count} eligible file(s) ({size}) from "
-            "recognized TidyFiles Trash batches? Unrecognized entries and files needed for "
-            "transaction recovery will be preserved.",
+            f"Permanently delete {summary.eligible_count} inspected file(s) ({size}) and "
+            f"remove up to {summary.eligible_directory_count} inspected directories if empty? "
+            "New entries, unrecognized entries, and recovery dependencies will be preserved.",
             icon="warning",
             parent=self.root,
         ):
@@ -2073,7 +2084,7 @@ class _MainWindow:
 
         def clear() -> None:
             try:
-                result = self.trash_clear_service.clear(manually_authorized=True)
+                result = self.trash_clear_service.clear(confirmed=summary)
                 payload = (result, None)
             except Exception as clear_error:
                 payload = (None, clear_error)
@@ -2092,17 +2103,22 @@ class _MainWindow:
             return
         cleanup = result.cleanup
         deleted = len(cleanup.deleted_paths)
-        failures = cleanup.failures
+        remaining = [
+            item
+            for item in (*result.inspection.items, *cleanup.items)
+            if item.status in {CleanupStatus.SKIPPED, CleanupStatus.FAILED}
+        ]
         message = f"Trash clear deleted {deleted} item(s)."
         if cleanup.detail:
             message += f"\n{cleanup.detail}"
-        if failures:
-            message += "\n\nSome eligible entries could not be deleted:"
+        if remaining:
+            message += "\n\nSome entries were preserved or could not be deleted:"
             message += "\n" + "\n".join(
-                f"{item.path}: {item.reason or 'deletion failed'}" for item in failures[:12]
+                f"{item.path}: {(item.reason or 'deletion failed').replace('_', ' ')}"
+                for item in remaining[:12]
             )
         self._finish_processing(message)
-        if failures or cleanup.detail:
+        if remaining or cleanup.detail:
             messagebox.showwarning("Trash clear results", message, parent=self.root)
         else:
             messagebox.showinfo("Trash clear complete", message, parent=self.root)
@@ -2483,7 +2499,11 @@ class _MainWindow:
             and self.import_controller.busy
         ) or self._collection_operation_pending:
             raise RuntimeError("Cannot rebuild the table during a collection operation")
-        selected = set(self.tree.selection())
+        selected = (
+            set(self.tree.selection())
+            if self._unsynced_selection is None
+            else {str(entry_id) for entry_id in self._unsynced_selection}
+        )
         for item in self.tree.get_children(""):
             self.tree.delete(item)
         snapshot = self.collection.snapshot()
@@ -2514,6 +2534,7 @@ class _MainWindow:
             self.tree.selection_set(surviving)
         self._update_summary()
         self._update_import_warnings(snapshot.import_sessions)
+        self._unsynced_selection = None
 
     @staticmethod
     def _entry_values(
@@ -2605,14 +2626,14 @@ class _MainWindow:
             or self._closing
             or self._close_pending
         )
-        if busy:
+        if busy or self._unsynced_selection is not None:
             for control in self.controls.values():
                 control.configure(state="disabled")
             self.sort_dropdown.configure(state="disabled")
             self.sort_direction_button.configure(state="disabled")
             for button in self.movement_buttons.values():
                 button.configure(state="disabled")
-            self.refresh_preview_button.configure(state="disabled")
+            self.refresh_preview_button.configure(state="disabled" if busy else "normal")
             self._configure_process_button(False)
             self.trash_clear_button.configure(state="disabled")
             if (
@@ -2701,6 +2722,7 @@ class _MainWindow:
         result = self._preview_result
         return bool(
             self.active_mode == "Bulk Rename"
+            and self._unsynced_selection is None
             and self._entries_by_id
             and result is not None
             and result.state is EvaluationState.VALID
@@ -2968,7 +2990,8 @@ class _MainWindow:
 
     def remove_selected(self) -> None:
         if (
-            self._collection_operation_pending
+            self._unsynced_selection is not None
+            or self._collection_operation_pending
             or self.import_controller.busy
             or self.collection.capabilities.is_importing
         ):
@@ -3213,6 +3236,12 @@ class _MainWindow:
                 self.tree.selection_remove(*current_selection)
         self._update_summary()
 
+    def _rebuild_rollback_view(
+        self, previous_view: tuple[tuple[UUID, ...], tuple[UUID, ...]]
+    ) -> None:
+        self._unsynced_selection = previous_view[1]
+        self.refresh_collection()
+
     def _on_import_finished(self, report: DiscoveryReport) -> None:
         self._last_import_report = report
         snapshot = self.collection.snapshot()
@@ -3421,6 +3450,7 @@ class _MainWindow:
         item_id = self.tree.identify_row(event.y)
         if (
             not item_id
+            or self._unsynced_selection is not None
             or self._collection_operation_pending
             or self.import_controller.busy
             or self.collection.capabilities.is_importing

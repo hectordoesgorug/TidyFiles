@@ -68,6 +68,7 @@ class _Harness:
             on_order_chunk=self.apply_order,
             on_remove_chunk=self.remove_rows,
             on_rollback_complete=self.finish_rollback,
+            on_rollback_rebuild=self.rebuild,
             on_finished=self.reports.append,
             on_error=self.errors.append,
             on_shutdown=lambda: None,
@@ -105,6 +106,11 @@ class _Harness:
             self.rows.pop(entry_id, None)
         self.order = list(view_state[0])
         self.selection = view_state[1]
+
+    def rebuild(self, view_state) -> None:
+        self.rows = {entry.entry_id: entry for entry in self.collection.snapshot().entries}
+        self.order = list(self.rows)
+        self.selection = tuple(entry_id for entry_id in view_state[1] if entry_id in self.rows)
 
     def pump_until(self, predicate, timeout: float = 5) -> None:
         deadline = time.monotonic() + timeout
@@ -252,6 +258,51 @@ def test_cancel_during_incremental_final_order_restores_previous_order_and_selec
     assert harness.order == [middle.entry_id]
     assert harness.selection == (middle.entry_id,)
     assert set(harness.rows) == {middle.entry_id}
+
+
+def test_persistent_rollback_view_failure_rebuilds_collection_and_releases_controller(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness()
+    controller = harness.controller
+    first = _file(tmp_path / "a.txt")
+    second = _file(tmp_path / "b.txt")
+    discarded = _file(tmp_path / "discarded.txt")
+    assert controller.start_files((first, second))
+    harness.pump_until(lambda: not controller.busy)
+    prior_order = tuple(harness.order)
+    harness.selection = (prior_order[1],)
+    attempted = []
+    rebuilt = []
+    shutdown = []
+
+    def fail_removal(entry_ids):
+        attempted.append(entry_ids)
+        raise RuntimeError("persistent removal failure")
+
+    def rebuild(view_state):
+        rebuilt.append(view_state)
+        assert not controller.busy
+        harness.rebuild(view_state)
+
+    controller.on_remove_chunk = fail_removal
+    controller.on_rollback_rebuild = rebuild
+    controller.on_shutdown = lambda: shutdown.append(True)
+    assert controller.start_files((discarded,))
+    harness.pump_until(lambda: controller._phase == "rendering")
+    assert len(harness.rows) == 3
+    assert not controller.request_shutdown()
+    harness.pump_until(lambda: not controller.busy)
+
+    assert len(attempted) == len(rebuilt) == 1
+    assert "persistent removal failure" in harness.errors[-1]
+    assert harness.reports[-1].state.value == "cancelled"
+    assert tuple(entry.entry_id for entry in harness.collection.snapshot().entries) == prior_order
+    assert tuple(harness.order) == prior_order
+    assert harness.selection == (prior_order[1],)
+    assert set(harness.rows) == set(prior_order)
+    assert not harness.collection.capabilities.is_importing
+    assert shutdown == [True]
 
 
 def test_incomplete_warning_survives_later_success_and_failure_recovers(

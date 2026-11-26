@@ -451,6 +451,12 @@ class TrashInspectionSummary:
     eligible_size_bytes: int
     items: tuple[CleanupItem, ...]
     detail: str | None = None
+    _candidates: tuple[_TrashCandidate, ...] = ()
+    _root_observation: PathObservation | None = None
+
+    @property
+    def eligible_directory_count(self) -> int:
+        return len(self._candidates) - self.eligible_count
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,31 +480,20 @@ class TrashClearService:
         self.journals = journals
 
     def inspect(self) -> TrashInspectionSummary:
-        summary, _ = self._inspect()
-        return summary
-
-    def _inspect(self) -> tuple[TrashInspectionSummary, tuple[_TrashCandidate, ...]]:
         root = managed_trash_path()
         if root is None or os.name != "nt":
-            return (
-                TrashInspectionSummary(0, 0, (), "The managed Trash location is unavailable"),
-                (),
-            )
+            return TrashInspectionSummary(0, 0, (), "The managed Trash location is unavailable")
         if is_protected_system_path(str(root)):
-            return (
-                TrashInspectionSummary(0, 0, (), "Managed Trash is inside a protected system path"),
-                (),
+            return TrashInspectionSummary(
+                0, 0, (), "Managed Trash is inside a protected system path"
             )
         observer = WindowsPathObserver(capture_identity=True, allow_managed_trash=True)
         root_observation = observer.observe_directory(str(root))
         if root_observation.occupancy is not PathOccupancy.DIRECTORY:
             if root_observation.occupancy is PathOccupancy.VACANT:
-                return TrashInspectionSummary(0, 0, (), "Managed Trash does not exist"), ()
-            return (
-                TrashInspectionSummary(
-                    0, 0, (), root_observation.reason or "Managed Trash is inaccessible or unsafe"
-                ),
-                (),
+                return TrashInspectionSummary(0, 0, (), "Managed Trash does not exist")
+            return TrashInspectionSummary(
+                0, 0, (), root_observation.reason or "Managed Trash is inaccessible or unsafe"
             )
         assert root_observation.object_metadata is not None
         items = []
@@ -510,13 +505,10 @@ class TrashClearService:
         try:
             root_entries = directory_entries(observer, str(root), root_observation)
         except OSError as error:
-            return TrashInspectionSummary(0, 0, (), str(error)), ()
+            return TrashInspectionSummary(0, 0, (), str(error))
         if not _same_directory(root_observation, observer.observe_directory(str(root))):
-            return (
-                TrashInspectionSummary(
-                    0, 0, (CleanupItem(str(root), CleanupStatus.SKIPPED, "directory_changed"),)
-                ),
-                (),
+            return TrashInspectionSummary(
+                0, 0, (CleanupItem(str(root), CleanupStatus.SKIPPED, "directory_changed"),)
             )
 
         stack = []
@@ -626,11 +618,6 @@ class TrashClearService:
                 )
                 items.append(CleanupItem(candidate.path, CleanupStatus.SKIPPED, reason))
                 candidates.remove(candidate)
-        summary = TrashInspectionSummary(
-            len(files),
-            sum(item.observation.object_metadata.size_bytes for item in files),
-            tuple(items),
-        )
         ordered = tuple(
             sorted(
                 candidates,
@@ -640,17 +627,23 @@ class TrashClearService:
                 ),
             )
         )
-        return summary, ordered
+        return TrashInspectionSummary(
+            len(files),
+            sum(item.observation.object_metadata.size_bytes for item in files),
+            tuple(items),
+            _candidates=ordered,
+            _root_observation=root_observation,
+        )
 
     def clear(
         self,
         *,
-        manually_authorized: bool = False,
+        confirmed: TrashInspectionSummary | None = None,
         auto_clear_enabled: bool = False,
         normal_exit: bool = False,
     ) -> TrashClearResult:
-        inspection, candidates = self._inspect()
         if normal_exit:
+            inspection = self.inspect()
             if not auto_clear_enabled:
                 return TrashClearResult(
                     inspection, CleanupResult(detail="Auto-Clear Trash is disabled")
@@ -660,13 +653,16 @@ class TrashClearService:
                     inspection,
                     CleanupResult(detail="Trash cannot be cleared during another modifying job"),
                 )
-        elif not manually_authorized:
+        elif confirmed is None:
             return TrashClearResult(
-                inspection,
+                TrashInspectionSummary(0, 0, ()),
                 CleanupResult(detail="Explicit authorization is required to clear Trash"),
             )
+        else:
+            inspection = confirmed
         if inspection.detail:
             return TrashClearResult(inspection, CleanupResult(detail=inspection.detail))
+        candidates = inspection._candidates
         if not candidates:
             return TrashClearResult(inspection, CleanupResult(detail="No eligible Trash items"))
         try:
@@ -685,13 +681,34 @@ class TrashClearService:
             observer = WindowsPathObserver(capture_identity=True, allow_managed_trash=True)
             items = []
             guard = RecoveryGuard(self.journals)
+            root_key = path_key(str(root))
             for candidate in candidates:
-                if not is_within(path_key(candidate.path), path_key(str(root))):
+                candidate_key = path_key(candidate.path)
+                if not is_within(candidate_key, root_key):
                     items.append(
                         CleanupItem(candidate.path, CleanupStatus.SKIPPED, "outside_trash_boundary")
                     )
                     continue
                 try:
+                    if not normal_exit:
+                        batch_name = ntpath.relpath(candidate_key, root_key).partition("\\")[0]
+                        if not _TRASH_BATCH_NAME.fullmatch(batch_name):
+                            items.append(CleanupItem(
+                                candidate.path, CleanupStatus.SKIPPED, "outside_recognized_batch"
+                            ))
+                            continue
+                        # A confirmation belongs to the inspected Trash root and its entries.
+                        observer = WindowsPathObserver(
+                            capture_identity=True, allow_managed_trash=True
+                        )
+                        expected_root = inspection._root_observation
+                        if expected_root is None or not _same_directory(
+                            expected_root, observer.observe_directory(str(root))
+                        ):
+                            items.append(
+                                CleanupItem(candidate.path, CleanupStatus.SKIPPED, "trash_changed")
+                            )
+                            continue
                     current = (
                         observer.observe_directory(candidate.path)
                         if candidate.is_directory
@@ -703,8 +720,13 @@ class TrashClearService:
                         else current == candidate.observation
                     )
                     if not matches:
+                        reason = (
+                            "entry_missing"
+                            if current.occupancy is PathOccupancy.VACANT
+                            else current.reason or "entry_changed"
+                        )
                         items.append(
-                            CleanupItem(candidate.path, CleanupStatus.SKIPPED, "entry_changed")
+                            CleanupItem(candidate.path, CleanupStatus.SKIPPED, reason)
                         )
                         continue
                     guard.check((candidate.path,), (current,))

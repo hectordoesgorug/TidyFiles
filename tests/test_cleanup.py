@@ -529,7 +529,7 @@ def test_trash_clear_removes_recognized_current_and_legacy_batches(runtime):
 
     summary = service.inspect()
     unauthorized = service.clear()
-    result = service.clear(manually_authorized=True)
+    result = service.clear(confirmed=summary)
 
     assert summary.eligible_count == result.inspection.eligible_count == 2
     assert summary.eligible_size_bytes == len(b"recoverable user file") + len(
@@ -544,6 +544,84 @@ def test_trash_clear_removes_recognized_current_and_legacy_batches(runtime):
     assert any(item.reason == "outside_recognized_batch" for item in summary.items)
 
 
+def test_manual_trash_clear_preserves_new_entries_inside_and_outside_confirmed_batch(runtime):
+    app, coordinator, journals = runtime
+    batch = app / "trash" / "20261126_010203"
+    batch.mkdir(parents=True)
+    confirmed = batch / "confirmed.txt"
+    confirmed.write_bytes(b"confirmed")
+    service = TrashClearService(coordinator, journals)
+    inspection = service.inspect()
+
+    new_file = batch / "new.txt"
+    new_file.write_bytes(b"new file")
+    new_directory = batch / "new-directory"
+    new_directory.mkdir()
+    new_batch = batch.parent / "20261126_010204"
+    new_batch.mkdir()
+
+    result = service.clear(confirmed=inspection)
+
+    assert result.cleanup.deleted_paths == (str(confirmed),)
+    assert not confirmed.exists()
+    assert new_file.read_bytes() == b"new file"
+    assert new_directory.is_dir() and new_batch.is_dir()
+    assert any(
+        item.path == str(batch)
+        and item.status is CleanupStatus.SKIPPED
+        and item.reason == "directory_not_empty"
+        for item in result.cleanup.items
+    )
+
+
+def test_manual_trash_clear_skips_replaced_and_missing_candidates(runtime, tmp_path):
+    app, coordinator, journals = runtime
+    batch = app / "trash" / "20261126_010203"
+    batch.mkdir(parents=True)
+    replaced = batch / "replaced.txt"
+    missing = batch / "missing.txt"
+    for path in (replaced, missing):
+        path.write_bytes(b"confirmed")
+    service = TrashClearService(coordinator, journals)
+    inspection = service.inspect()
+
+    original = replaced.rename(tmp_path / "original.txt")
+    missing.rename(tmp_path / "moved.txt")
+    replaced.write_bytes(b"replacement")
+    result = service.clear(confirmed=inspection)
+
+    assert not result.cleanup.deleted_paths
+    assert original.read_bytes() == b"confirmed"
+    assert replaced.read_bytes() == b"replacement"
+    assert {(item.path, item.reason) for item in result.cleanup.items} >= {
+        (str(replaced), "entry_changed"),
+        (str(missing), "entry_missing"),
+    }
+
+
+def test_manual_trash_clear_skips_candidates_under_a_replaced_root(runtime):
+    app, coordinator, journals = runtime
+    trash = app / "trash"
+    batch = trash / "20261126_010203"
+    batch.mkdir(parents=True)
+    contents = batch / "confirmed.txt"
+    contents.write_bytes(b"confirmed")
+    service = TrashClearService(coordinator, journals)
+    inspection = service.inspect()
+
+    parked = trash.rename(app / "parked-trash")
+    trash.mkdir()
+    (parked / batch.name).rename(batch)
+    result = service.clear(confirmed=inspection)
+
+    assert not result.cleanup.deleted_paths
+    assert contents.read_bytes() == b"confirmed"
+    assert {(item.path, item.reason) for item in result.cleanup.items} == {
+        (str(contents), "trash_changed"),
+        (str(batch), "trash_changed"),
+    }
+
+
 def test_trash_clear_preserves_unresolved_recovery_file_and_containing_batch(runtime):
     app, coordinator, journals = runtime
     batch = app / "trash" / f"20261126T000000Z-{'b' * 32}"
@@ -552,6 +630,10 @@ def test_trash_clear_preserves_unresolved_recovery_file_and_containing_batch(run
     sibling = batch / "safe.txt"
     protected.write_bytes(b"recovery dependency")
     sibling.write_bytes(b"ordinary managed Trash content")
+    service = TrashClearService(coordinator, journals)
+    confirmed = service.inspect()
+    assert confirmed.eligible_count == 2
+    assert confirmed.eligible_directory_count == 1
     observer = WindowsPathObserver(capture_identity=True, allow_managed_trash=True)
     row = TransactionEntry(
         uuid4(),
@@ -564,9 +646,8 @@ def test_trash_clear_preserves_unresolved_recovery_file_and_containing_batch(run
     journal.start()
     journal.checkpoint(recovery_required="test unresolved Trash copy")
 
-    service = TrashClearService(coordinator, journals)
     summary = service.inspect()
-    result = service.clear(manually_authorized=True)
+    result = service.clear(confirmed=confirmed)
 
     assert any(
         item.path == str(protected) and item.reason == "recovery_dependent"
@@ -575,6 +656,12 @@ def test_trash_clear_preserves_unresolved_recovery_file_and_containing_batch(run
     assert protected.read_bytes() == b"recovery dependency"
     assert not sibling.exists()
     assert batch.is_dir()
+    assert any(
+        item.path == str(protected)
+        and item.status is CleanupStatus.SKIPPED
+        and str(journal.record.transaction_id) in (item.reason or "")
+        for item in result.cleanup.items
+    )
     assert any(
         item.path == str(sibling) and item.status is CleanupStatus.DELETED
         for item in result.cleanup.items
@@ -588,8 +675,9 @@ def test_missing_managed_trash_inspection_does_not_create_its_directory(
     missing = tmp_path / "not-created-trash"
     monkeypatch.setattr(cleanup_module, "managed_trash_path", lambda: missing)
 
-    summary = TrashClearService(coordinator, journals).inspect()
-    result = TrashClearService(coordinator, journals).clear(manually_authorized=True)
+    service = TrashClearService(coordinator, journals)
+    summary = service.inspect()
+    result = service.clear(confirmed=summary)
 
     assert summary.detail == "Managed Trash does not exist"
     assert summary.eligible_count == 0
@@ -605,7 +693,7 @@ def test_existing_empty_managed_trash_has_no_eligible_content(runtime, tmp_path,
 
     service = TrashClearService(coordinator, journals)
     summary = service.inspect()
-    result = service.clear(manually_authorized=True)
+    result = service.clear(confirmed=summary)
 
     assert summary.detail is None
     assert summary.eligible_count == 0
@@ -634,7 +722,8 @@ def test_trash_clear_does_not_follow_junction_outside_managed_batch(runtime, tmp
     safe = batch / "safe.txt"
     safe.write_bytes(b"inside Trash")
 
-    result = TrashClearService(coordinator, journals).clear(manually_authorized=True)
+    service = TrashClearService(coordinator, journals)
+    result = service.clear(confirmed=service.inspect())
 
     assert not safe.exists()
     assert junction.is_dir()
@@ -660,7 +749,8 @@ def test_trash_clear_reports_deletion_failure_and_keeps_failed_file(
         return remove(observer, path, expected)
 
     monkeypatch.setattr(cleanup_module, "remove_file", fail_blocked)
-    result = TrashClearService(coordinator, journals).clear(manually_authorized=True)
+    service = TrashClearService(coordinator, journals)
+    result = service.clear(confirmed=service.inspect())
 
     assert blocked.read_bytes() == b"keep after deletion error"
     assert not deleted.exists()
@@ -682,7 +772,8 @@ def test_trash_clear_preserves_locked_content_and_reports_failure(runtime):
     handle = observer._open(str(contents), 0x80000000, 0x01, None, 3, 0, None)
     assert handle not in (None, -1, (1 << 64) - 1)
     try:
-        result = TrashClearService(coordinator, journals).clear(manually_authorized=True)
+        service = TrashClearService(coordinator, journals)
+        result = service.clear(confirmed=service.inspect())
     finally:
         observer._close(handle)
 
