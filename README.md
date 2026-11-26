@@ -20,9 +20,8 @@ entries leaves source files unchanged. Bulk Rename provides live filename
 previews, three built-in formats, token insertion, a scrollable token reference,
 and an explicit refresh for physical directory-count metadata. The format is
 session-only. Expression and file-specific errors are shown in the preview;
-processing remains unavailable. Duplicate analysis, repacking, and all
-filesystem-changing operations are not yet available. The application is not
-production-ready.
+Process requires destination review and fresh preflight. Duplicate analysis and
+repacking are not available. The application is not production-ready.
 
 Collection controls are shared across Bulk Rename, Duplicate Finder, and
 Repacker. Use Ctrl+A in the table to select all rows and Delete to remove the
@@ -37,19 +36,21 @@ Refresh Preview recalculates names for the existing collection and refreshes
 required directory counts without rescanning folders or changing collection
 membership.
 
-The Python service API includes read-only destination planning and preflight
-for finalized batches. Preflight refreshes filename evaluation and checks
-reviewed paths, filesystem identities, collisions, and rename dependencies.
-The service API also provides transaction journals and read-only recovery
-inspection with overlap guards for rename and Trash operations. Controlled
-callers can use the standalone Windows rename executor with an authorized
-scope and current preflight, or the managed Trash service with explicitly
-authorized source paths and current identity evidence. Cleanup services are
-available to controlled callers. Trash clearing is limited to recognized
-application-managed batches and preserves unresolved recovery files, links and
-unrecognized content. GUI confirmation and normal-exit wiring remain
-unimplemented. Duplicate analysis and repacking are not implemented, and the
-desktop processing controls remain disabled.
+Process opens a destination review and requires confirmation before fresh
+preflight and journaled Windows renaming. It supports ordinary rename and
+Single Folder destinations. Collision-only partial processing requires its own
+explicit confirmation; filename-format errors block the full batch, and
+incomplete imports require acknowledgment. Preparation runs outside Tk and can
+be canceled. Active filesystem modification cannot be canceled, and normal
+application closure waits until it finishes.
+
+Startup displays unresolved transaction recovery details without restoring,
+moving, or deleting files. Clear Trash requires confirmation and is limited to
+recognized managed batches. Auto-clean and Auto-Clear Trash are separate,
+default-off settings. Auto-clean runs only after complete rename success from
+explicit Add Folder roots; Auto-Clear Trash runs only after normal exit.
+Duplicate analysis and media repacking are not implemented, and their controls
+remain disabled.
 
 ## Run locally
 

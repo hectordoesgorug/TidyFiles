@@ -3,12 +3,12 @@
 ## Current status
 
 The M0 foundation and minimal GUI shell are implemented. The application opens
-with an empty collection and exposes no file-processing or destructive actions.
-M1 parser, evaluator, extension resolution, and pure filename validation are
+with an empty collection. M1 parser, evaluator, extension resolution, and pure filename validation are
 complete, including M1-D.12's DD-061 parser diagnostic correction. They remain
 pure filename-engine components; M2-D and M2-E4 connect them to read-only
-evaluation and GUI previews. Filesystem-changing operations remain unavailable
-through the desktop interface.
+evaluation and GUI previews. M3-G connects reviewed, journaled Bulk Rename and
+managed Trash cleanup to the desktop interface. Duplicate analysis and media
+repacking remain unavailable.
 See `docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-decision audit and
 historical verification record.
 
@@ -29,8 +29,9 @@ standalone read-only destination planner. M3-B adds read-only preflight for
 reviewed plans. M3-C adds journals, recovery discovery, and exclusive job
 coordination. M3-D adds a standalone Windows rename executor, M3-E adds
 standalone managed Trash transfers, and M3-F adds read-only recovery inspection,
-overlap protection, and guarded cleanup services. Desktop processing controls
-remain disabled.
+overlap protection, and guarded cleanup services. M3-G connects Bulk Rename,
+startup recovery notices, and managed Trash cleanup. Duplicate and Repack
+controls remain disabled.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -46,13 +47,14 @@ remain disabled.
 | M2-E3 | Complete | Shared sorting controls and preference persistence, manual ordering and drag-and-drop, selection shortcuts, row context actions, non-destructive removal and clearing, and collection-change notifications. |
 | M2-E4 | Complete | Session-only live filename-format controls, token insertion and reference, background ordered previews, structured diagnostics, metadata refresh, and stale-result protection. |
 | M2-E5 | Complete | Targeted large-table optimization, preview guidance, and lifecycle coverage. Owner manual acceptance passed 21/21. |
-| M3 | In progress | Destination planning, preflight, journals, standalone rename and Trash services, recovery inspection, overlap protection, and cleanup services are implemented. Desktop integration remains planned. |
+| M3 | In progress | Destination planning, preflight, journals, standalone rename and Trash services, recovery inspection, overlap protection, cleanup, and Bulk Rename GUI integration are implemented. Milestone acceptance remains subject to review. |
 | M3-A | Complete | Standalone destination planning, collision and dependency classification, and read-only collision-only subset replanning. |
 | M3-B | Complete | Review-time identity capture and cancellable read-only execution preflight. |
 | M3-C | Complete | Durable journals, persistent recovery locator, recovery discovery, and modifying-job coordination. |
 | M3-D | Complete | Standalone, journaled, handle-relative rename and same-volume Single Folder execution. |
 | M3-E | Complete | Standalone recoverable deletion, guarded cross-volume copying, and managed Trash discovery exclusions. |
 | M3-F | Implemented | Read-only recovery observations, overlap guards, temporary artifact cleanup, Auto-clean, and guarded managed Trash clearing (DD-087). |
+| M3-G | Implemented | Confirmed Bulk Rename execution, startup recovery notice, Auto-clean, manual Trash clearing, and normal-exit Auto-Clear Trash. |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
@@ -85,7 +87,7 @@ DD-079 through DD-085 are recorded as follows:
 | DD-081 — Shared collection toolbar and list interactions | M2-E2 enables Add Files and Add Folder. M2-E3 enables sorting, manual movement, Remove from List, and Clear All against the shared collection. |
 | DD-082 — Compact Bulk Rename format controls | The editable format field and three approved built-in presets are present. M2-E4 adds Insert Token, Format Reference, and live evaluation. Profiles remain deferred, and unsaved field edits are not persisted. |
 | DD-083 — Optional post-processing Counter | The switch is present, defaults OFF, and has no execution effect. The algorithm remains deferred. |
-| DD-084 — Native toggle switches for boolean operation options | Single Folder, Auto-clean, and Counter use CustomTkinter switches. Single Folder and Counter only change session-local UI state. Auto-clean is disabled. |
+| DD-084 — Native toggle switches for boolean operation options | Single Folder, Auto-clean, and Counter use CustomTkinter switches. Single Folder changes destination planning; Auto-clean is an explicit default-off setting; Counter remains UI-only. |
 | DD-085 — Problematic-row highlighting and expression-wide errors | M2-E1 supplied the subtle problem-row Treeview style. M2-E4 implements live evaluation, row diagnostics, expression-wide invalidation, and preview clearing. |
 
 The default visible columns are:
@@ -823,13 +825,13 @@ introduced.
 The two cleanup settings remain independent and default off. Cleanup errors
 are returned separately from primary-operation results. Manual Clear Trash
 requires explicit authorization, while Auto-Clear Trash requires a normal exit
-and an idle coordinator. GUI confirmation, startup recovery dialog, Explorer
-action, and normal-exit invocation remain for M3-G. The desktop processing
-controls remain disabled.
+and an idle coordinator. At the M3-F checkpoint, GUI confirmation, startup
+recovery dialog, Explorer action, and normal-exit invocation remained for
+M3-G.
 
-M3-G must pass successful output paths with the pre-operation snapshot when it
-invokes Auto-clean. This prevents a newly renamed file such as `Thumbs.db` from
-being mistaken for pre-existing clutter.
+M3-G passes successful output paths with the pre-operation snapshot when it
+invokes Auto-clean. This protects a renamed output whose name matches an
+allowlisted clutter name.
 
 Focused M3-F verification on the Windows Python 3.13.17 environment ran
 `pytest tests/test_recovery.py tests/test_cleanup.py tests/test_config.py
@@ -864,8 +866,38 @@ managed Trash, rename executor, transaction journal, and configuration tests
 passed: 164 passed, zero skipped. The full suite passed 629 tests, zero skipped.
 Ruff, `compileall -q src tests`, `git diff --check`, and
 `git diff --cached --check` passed. The tests used isolated temporary fixtures;
-no real Trash contents were cleared. M3-G GUI confirmation and normal-exit
-integration were not verified.
+no real Trash contents were cleared. This records verification at the M3-F1
+checkpoint before M3-G GUI confirmation and normal-exit integration.
+
+### M3-G — GUI execution integration
+
+Bulk Rename Process now consumes the current filename evaluation and finalized
+collection snapshot, displays a destination plan, and requires confirmation
+before fresh preflight and journaled execution. A changed preflight returns to
+review. A confirmed collision-only subset keeps the reviewed candidates and
+retains excluded or failed entries with diagnostics. Incomplete imports require
+explicit acknowledgment. Processing runs outside Tk; preparation can be
+canceled, active modification cannot, and normal close waits for filesystem
+changes to finish.
+
+Startup displays read-only unresolved-transaction details and recorded paths,
+stages, and Explorer access. Auto-clean runs only after complete success with
+the original collection snapshot and successful output paths. Manual Clear
+Trash requires confirmation; Auto-Clear Trash runs only on enabled normal exit.
+Deduplicate and Repack remain disabled.
+
+M3-F1 checkpoint: commit `fc9393934bd0462c6bddfbb45823a87ea16e1e5d` was pushed
+to `main`, and Windows CI run #34 passed, as reported with the M3-G handover.
+
+Verification used Windows Python 3.13.17. The focused GUI, collection,
+destination-planning, preflight, and rename-executor run passed 150 tests. The
+complete suite passed 640 tests with zero skips. `ruff check .`,
+`compileall -q src tests`, `git diff --check`, and `git diff --cached --check`
+passed. Two earlier full-suite attempts timed out in the existing physical
+directory-count preview worker; its isolated rerun passed, and the final full
+suite passed. GUI tests used temporary source, journal, and configuration
+fixtures; no production Trash was cleared. Visible hardware and DPI acceptance
+was not repeated.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 

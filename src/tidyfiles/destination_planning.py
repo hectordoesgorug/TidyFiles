@@ -114,6 +114,7 @@ class DestinationPlan:
     incomplete_imports: tuple[ImportSessionSnapshot, ...] = ()
     collision_subset_ids: tuple[UUID, ...] = ()
     excluded_entry_ids: tuple[UUID, ...] = ()
+    acknowledged_incomplete_import_ids: tuple[UUID, ...] = ()
 
 
 def plan_destinations(
@@ -122,6 +123,7 @@ def plan_destinations(
     *,
     current_request_id: UUID,
     options: DestinationOptions = DestinationOptions(),
+    acknowledged_incomplete_import_ids: tuple[UUID, ...] = (),
     observe: PathObserver | None = None,
 ) -> DestinationPlan:
     """Plan from a current evaluation. The caller supplies the authoritative request ID."""
@@ -135,6 +137,7 @@ def plan_destinations(
         PlanState.INCOMPATIBLE_INPUT,
         evaluation_diagnostics=evaluation.diagnostics,
         incomplete_imports=snapshot.incomplete_imports,
+        acknowledged_incomplete_import_ids=tuple(acknowledged_incomplete_import_ids),
     )
     if (
         evaluation.request_id != current_request_id
@@ -176,7 +179,8 @@ def plan_destinations(
         )
     ):
         return replace(plan, reason="incomplete_valid_evaluation")
-    if plan.incomplete_imports:
+    incomplete_ids = tuple(session.session_id for session in plan.incomplete_imports)
+    if incomplete_ids != plan.acknowledged_incomplete_import_ids:
         return replace(plan, state=PlanState.INCOMPLETE_IMPORT, reason="incomplete_import")
 
     entries = []
@@ -205,6 +209,7 @@ def replan_collision_subset(
     *,
     current_request_id: UUID,
     current_options: DestinationOptions,
+    acknowledged_incomplete_import_ids: tuple[UUID, ...] = (),
     observe: PathObserver | None = None,
 ) -> DestinationPlan:
     """Observe the collision-only subset again using the reviewed names and options."""
@@ -221,10 +226,14 @@ def replan_collision_subset(
         or snapshot.revision != reviewed.collection_revision
         or current_request_id != reviewed.evaluation_request_id
         or current_options != reviewed.options
+        or tuple(acknowledged_incomplete_import_ids)
+        != reviewed.acknowledged_incomplete_import_ids
         or snapshot.capabilities.is_importing
     ):
         return replace(plan, reason="stale_reviewed_plan")
-    if snapshot.has_incomplete_imports:
+    if tuple(session.session_id for session in snapshot.incomplete_imports) != tuple(
+        acknowledged_incomplete_import_ids
+    ):
         return replace(plan, state=PlanState.INCOMPLETE_IMPORT, reason="incomplete_import")
     if reviewed.state is not PlanState.COLLISION_BLOCKED or not reviewed.collision_subset_ids:
         return replace(plan, reason="no_collision_only_subset")

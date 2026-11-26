@@ -70,6 +70,7 @@ class RenameScope:
     options: DestinationOptions
     entries: tuple[tuple[UUID, str, str], ...]
     excluded_entry_ids: tuple[UUID, ...]
+    acknowledged_incomplete_import_ids: tuple[UUID, ...] = ()
 
     @classmethod
     def from_review(cls, result: PreflightResult) -> RenameScope:
@@ -93,6 +94,7 @@ class RenameScope:
             review.options,
             entries,
             result.excluded_entry_ids,
+            result.acknowledged_incomplete_import_ids,
         )
 
 
@@ -161,14 +163,18 @@ def _new_staging_path(source_path: str) -> str:
 def _validate_scope(preflight: PreflightResult, authorized: RenameScope | None) -> DestinationPlan:
     plan = preflight.fresh_plan
     evaluation = preflight.fresh_evaluation
+    incomplete_ids = tuple(
+        session.session_id for session in preflight.incomplete_imports
+    )
     if (
         preflight.state is not PreflightState.PASSED
-        or preflight.incomplete_imports
+        or preflight.acknowledged_incomplete_import_ids != incomplete_ids
         or preflight.candidate_changes
         or preflight.destination_changes
         or plan is None
         or plan.state is not PlanState.VALID
-        or plan.incomplete_imports
+        or tuple(session.session_id for session in plan.incomplete_imports) != incomplete_ids
+        or plan.acknowledged_incomplete_import_ids != incomplete_ids
         or plan.evaluation_request_id != preflight.request_id
         or plan.evaluation_settings.is_conversion
         or preflight.reviewed_plan.evaluation_settings.is_conversion

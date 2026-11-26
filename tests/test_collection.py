@@ -95,6 +95,44 @@ def test_distinct_paths_are_not_merged_by_filesystem_identity() -> None:
     collection.finalize_import(session)
 
 
+def test_verified_path_updates_preserve_entry_identity_and_reject_duplicate_paths() -> None:
+    collection = WorkingCollection()
+    session = collection.begin_import(ImportMode.ADD_FOLDER, folder_root=r"C:\Batch")
+    first = collection.register_path(session, r"C:\Batch\nested\one.txt").entry
+    second = collection.register_path(session, r"C:\Batch\two.txt").entry
+    collection.finalize_import(session)
+    before = collection.snapshot()
+
+    updated = collection.update_entry_paths({first.entry_id: r"C:\Batch\one-renamed.txt"})
+    assert len(updated) == 1
+    assert updated[0].entry_id == first.entry_id
+    assert updated[0].import_session_id == first.import_session_id
+    assert updated[0].import_root_path == r"C:\Batch"
+    assert updated[0].source_path == r"C:\Batch\one-renamed.txt"
+    assert tuple(entry.entry_id for entry in collection.snapshot().entries) == tuple(
+        entry.entry_id for entry in before.entries
+    )
+
+    collection.update_entry_paths(
+        {
+            first.entry_id: r"C:\Batch\one-renamed.txt",
+            second.entry_id: r"C:\Batch\two-renamed.txt",
+        }
+    )
+    duplicate_session = collection.begin_import(ImportMode.ADD_FILES)
+    duplicate = collection.register_path(
+        duplicate_session, r"C:\Batch\one-renamed.txt"
+    )
+    assert not duplicate.added
+    assert duplicate.entry.entry_id == first.entry_id
+    collection.cancel_import(duplicate_session)
+
+    current = collection.snapshot()
+    with pytest.raises(CollectionError, match="already listed"):
+        collection.update_entry_paths({first.entry_id: r"C:\Batch\two-renamed.txt"})
+    assert collection.snapshot() == current
+
+
 def test_reordering_preserves_entry_ids_and_existing_snapshots_are_immutable() -> None:
     collection = WorkingCollection()
     session = collection.begin_import(ImportMode.ADD_FILES)

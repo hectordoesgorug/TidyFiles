@@ -5,6 +5,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import queue
+import subprocess
 import threading
 import tkinter as tk
 from copy import deepcopy
@@ -16,6 +17,12 @@ from uuid import UUID
 
 import customtkinter as ctk
 
+from tidyfiles.cleanup import (
+    AutoCleanRequest,
+    AutoCleanService,
+    CleanupResult,
+    TrashClearService,
+)
 from tidyfiles.collection import (
     CollectionEntry,
     ImportSessionSnapshot,
@@ -27,25 +34,53 @@ from tidyfiles.collection import (
 from tidyfiles.config import (
     ConfigError,
     default_config,
+    get_auto_clean_enabled,
+    get_auto_clear_trash_on_exit,
     get_sorting_preferences,
     save_config,
+    set_auto_clean_enabled,
+    set_auto_clear_trash_on_exit,
     set_sorting_preferences,
+)
+from tidyfiles.destination_planning import (
+    DestinationOptions,
+    DestinationPlan,
+    PlanState,
 )
 from tidyfiles.discovery import (
     DiscoveryReport,
     DiscoverySession,
     DiscoveryState,
 )
+from tidyfiles.execution_preflight import (
+    PreflightProgress,
+    PreflightRequest,
+    PreflightStage,
+    PreflightState,
+    capture_review_plan,
+)
 from tidyfiles.filename_integration import (
     DiagnosticKind,
     EvaluationProgress,
     EvaluationStage,
+    EvaluationState,
     FilenameEvaluationResult,
     FilenameEvaluationService,
 )
 from tidyfiles.format_reference import FORMAT_REFERENCE, TOKEN_GROUPS
 from tidyfiles.import_controller import ImportController
+from tidyfiles.modifying_jobs import ModifyingJobCoordinator
+from tidyfiles.preflight_service import PreflightService
+from tidyfiles.recovery import RecoveryInspection, RecoveryInspector
+from tidyfiles.rename_executor import (
+    RenameExecutor,
+    RenameOutcome,
+    RenameProgress,
+    RenameScope,
+    RenameState,
+)
 from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
+from tidyfiles.transaction_journal import JournalStore
 from tidyfiles.ui_preferences import (
     COLUMN_BY_ID,
     COLUMNS,
@@ -185,12 +220,40 @@ class _MainWindow:
         ctk.set_appearance_mode(self.appearance_mode)
 
         self.collection = WorkingCollection(get_sorting_preferences(self.config))
+        self.coordinator = ModifyingJobCoordinator()
+        self.journals = JournalStore()
+        self.rename_executor = RenameExecutor(self.coordinator, self.journals)
+        self.preflight_service = PreflightService()
+        self.recovery_inspector = RecoveryInspector(self.journals)
+        self.auto_clean_service = AutoCleanService(self.coordinator, self.journals)
+        self.trash_clear_service = TrashClearService(self.coordinator, self.journals)
         self.active_mode = _DEFAULT_MODE
         self.column_preferences = {
             mode: get_column_preferences(self.config, mode) for mode in MODES
         }
         self._closing = False
         self._close_pending = False
+        self._exit_cleanup_done = False
+        self._processing_phase = "idle"
+        self._processing_done: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+        self._processing_progress: queue.Queue[Any] = queue.Queue(maxsize=64)
+        self._processing_after: str | None = None
+        self._processing_cancel = threading.Event()
+        self._processing_snapshot: Any = None
+        self._processing_options: DestinationOptions | None = None
+        self._processing_acknowledged_import_ids: tuple[UUID, ...] = ()
+        self._processing_plan: DestinationPlan | None = None
+        self._processing_request: PreflightRequest | None = None
+        self._processing_future: Any = None
+        self._active_preflight_result: Any = None
+        self._processing_intended_ids: tuple[UUID, ...] = ()
+        self._processing_partial = False
+        self._plan_review_dialog: ctk.CTkToplevel | None = None
+        self._processing_diagnostics_by_id: dict[UUID, str] = {}
+        self._maintenance_kind: str | None = None
+        self._recovery_queue: queue.Queue[Any] = queue.Queue(maxsize=1)
+        self._recovery_after: str | None = None
+        self._recovery_dialog: ctk.CTkToplevel | None = None
         self._geometry_after: str | None = None
         self._appearance_after: str | None = None
         self._resize_started = False
@@ -283,6 +346,7 @@ class _MainWindow:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Configure>", self._schedule_geometry_check, add="+")
         self._schedule_system_appearance_check()
+        self._start_recovery_inspection()
 
     def _configure_root(self) -> None:
         self.root.title("TidyFiles")
@@ -402,7 +466,11 @@ class _MainWindow:
         options = ctk.CTkFrame(panel, fg_color="transparent")
         options.grid(row=2, column=0, padx=4, pady=(0, 1), sticky="w")
         self.single_folder_switch = ctk.CTkSwitch(
-            options, text="Single Folder", onvalue=True, offvalue=False
+            options,
+            text="Single Folder",
+            onvalue=True,
+            offvalue=False,
+            command=self._on_destination_option_changed,
         )
         self.single_folder_switch.grid(row=0, column=0, padx=(0, 14), sticky="w")
         self.auto_clean_switch = ctk.CTkSwitch(
@@ -410,8 +478,10 @@ class _MainWindow:
             text="Auto-clean",
             onvalue=True,
             offvalue=False,
-            state="disabled",
+            command=self._on_auto_clean_changed,
         )
+        if get_auto_clean_enabled(self.config):
+            self.auto_clean_switch.select()
         self.auto_clean_switch.grid(row=0, column=1, padx=(0, 14), sticky="w")
         self.counter_switch = ctk.CTkSwitch(
             options, text="Counter", onvalue=True, offvalue=False
@@ -420,9 +490,8 @@ class _MainWindow:
         ctk.CTkLabel(
             panel,
             text=(
-                "Auto-clean is unavailable until its disclosure and folder checks are implemented. "
-                "Future deletion scope: Thumbs.db, .DS_Store, desktop.ini, and empty eligible "
-                "subdirectories."
+                "Auto-clean permanently deletes Thumbs.db, .DS_Store, desktop.ini, and empty "
+                "subfolders from imported Add Folder roots after a complete successful rename."
             ),
             anchor="w",
             justify="left",
@@ -499,6 +568,10 @@ class _MainWindow:
             toolbar, text="Columns", width=82, command=self.open_columns
         )
         self.columns_button.grid(row=0, column=7, sticky="w")
+        self.trash_clear_button = ctk.CTkButton(
+            toolbar, text="Clear Trash", width=104, command=self.clear_trash
+        )
+        self.trash_clear_button.grid(row=0, column=8, padx=(6, 0), sticky="w")
 
     def _build_table(self) -> None:
         frame = ctk.CTkFrame(self.root, corner_radius=8)
@@ -625,11 +698,13 @@ class _MainWindow:
             text="Cancel",
             width=82,
             state="disabled",
-            command=self.cancel_import,
+            command=self.cancel_current_work,
         )
         self.cancel_button.grid(row=0, column=3, padx=(0, 6), sticky="e")
         self.cancel_button.grid_remove()
-        self.process_button = _disabled_button(footer, text="Process", width=105)
+        self.process_button = _disabled_button(
+            footer, text="Process", width=105, command=self.start_rename_review
+        )
         self.process_button.grid(row=0, column=4, sticky="e")
 
     def _mode_heading(self, identifier: str) -> str:
@@ -661,6 +736,9 @@ class _MainWindow:
 
     def _on_mode_change(self) -> None:
         mode = self.tabs.get()
+        if self._processing_phase != "idle" or self._maintenance_kind is not None:
+            self.tabs.set(self.active_mode)
+            return
         if mode in self.mode_panels:
             previous = self.active_mode
             if mode != previous:
@@ -680,6 +758,48 @@ class _MainWindow:
         self.rename_format.set(value)
         self.format_field._entry.icursor("end")
         self.format_field._entry.focus_set()
+
+    def _on_destination_option_changed(self) -> None:
+        self._update_control_states()
+
+    def _on_auto_clean_changed(self) -> None:
+        enabled = bool(self.auto_clean_switch.get())
+        previous = get_auto_clean_enabled(self.config)
+        if enabled and not previous and not messagebox.askyesno(
+            "Enable Auto-clean?",
+            "After a complete successful rename, Auto-clean permanently deletes "
+            "Thumbs.db, .DS_Store, desktop.ini, and empty subfolders from explicitly "
+            "imported Add Folder roots. Enable this setting?",
+            parent=self.root,
+        ):
+            self.auto_clean_switch.deselect()
+            return
+        set_auto_clean_enabled(self.config, enabled)
+        self._save_preferences()
+        if self.config_path is not None and self._last_save_error is not None:
+            set_auto_clean_enabled(self.config, previous)
+            self.auto_clean_switch.select() if previous else self.auto_clean_switch.deselect()
+
+    def _on_auto_clear_trash_changed(self) -> None:
+        enabled = bool(self.auto_clear_trash_switch.get())
+        previous = get_auto_clear_trash_on_exit(self.config)
+        if enabled and not previous and not messagebox.askyesno(
+            "Enable Auto-Clear Trash?",
+            "Recognized batches in the managed Trash folder will be permanently cleared "
+            "after each normal application exit. Recovery-dependent files and unknown "
+            "content are preserved. Enable this setting?",
+            parent=self.settings_window or self.root,
+        ):
+            self.auto_clear_trash_switch.deselect()
+            return
+        set_auto_clear_trash_on_exit(self.config, enabled)
+        self._save_preferences()
+        if self.config_path is not None and self._last_save_error is not None:
+            set_auto_clear_trash_on_exit(self.config, previous)
+            if previous:
+                self.auto_clear_trash_switch.select()
+            else:
+                self.auto_clear_trash_switch.deselect()
 
     def _show_insert_token_menu(self) -> None:
         menu = self._build_insert_token_menu()
@@ -784,6 +904,7 @@ class _MainWindow:
         self._invalidate_filename_preview(schedule=True)
         if not self.rename_format.get() and not self._entries_by_id:
             self._set_format_diagnostic(None)
+        self._update_control_states()
 
     def _set_format_diagnostic(self, diagnostic: Any | None) -> None:
         if diagnostic is None:
@@ -869,6 +990,7 @@ class _MainWindow:
             status=status,
             baseline=not should_schedule,
         )
+        self._update_control_states()
 
     def _begin_preview_clear(
         self,
@@ -1150,6 +1272,9 @@ class _MainWindow:
             self._preview_filename_ids.discard(entry_id)
         if self.tree.set(item_id, "new_filename") != filename:
             self.tree.set(item_id, "new_filename", filename)
+        operation_detail = self._processing_diagnostics_by_id.get(entry_id)
+        if operation_detail:
+            status = f"{status} · {operation_detail}"
         if self.tree.set(item_id, "status") != status:
             self.tree.set(item_id, "status", status)
         was_problem = entry_id in self._preview_problem_ids
@@ -1219,13 +1344,14 @@ class _MainWindow:
             self.status.configure(
                 text=(
                     f"Preview complete · {len(result.entries)} filenames · "
-                    "processing unavailable"
+                    "destination review available"
                 )
             )
         else:
             self.status.configure(
                 text="Preview contains errors · the complete batch cannot be processed"
             )
+        self._update_control_states()
 
     def _leave_bulk_rename(self) -> None:
         if self._preview_render_after is not None:
@@ -1269,20 +1395,823 @@ class _MainWindow:
             schedule=True, force_metadata=True, invalidate_metadata=True
         )
 
+    def start_rename_review(self) -> None:
+        if not self._process_ready():
+            return
+        snapshot = self.collection.snapshot()
+        evaluation = self._preview_result
+        assert evaluation is not None
+        incomplete_ids = tuple(
+            session.session_id for session in snapshot.incomplete_imports
+        )
+        if incomplete_ids:
+            diagnostics = sum(len(session.diagnostics) for session in snapshot.incomplete_imports)
+            if not messagebox.askyesno(
+                "Acknowledge incomplete imports",
+                f"{len(incomplete_ids)} import session(s) did not complete ({diagnostics} "
+                "recorded issue(s)). Continue with the files that were collected? Each source "
+                "will still be checked before processing.",
+                parent=self.root,
+            ):
+                return
+        self._processing_snapshot = snapshot
+        self._processing_options = DestinationOptions(
+            single_folder=bool(self.single_folder_switch.get()),
+            managed_paths=self.journals.managed_paths,
+        )
+        self._processing_acknowledged_import_ids = incomplete_ids
+        self._processing_auto_clean_enabled = bool(self.auto_clean_switch.get())
+        self._processing_cancel.clear()
+        self._submit_destination_plan(evaluation)
+
+    def _submit_destination_plan(
+        self, evaluation: FilenameEvaluationResult, notice: str | None = None
+    ) -> None:
+        snapshot = self._processing_snapshot
+        options = self._processing_options
+        if snapshot is None or options is None or not self.collection.is_current(snapshot):
+            self._finish_processing("The collection changed before destination review.")
+            return
+        self._set_processing_phase("planning", "Checking destination paths…", cancellable=True)
+        self._start_processing_poll()
+
+        def work() -> None:
+            try:
+                plan = capture_review_plan(
+                    snapshot,
+                    evaluation,
+                    current_request_id=evaluation.request_id,
+                    options=options,
+                    acknowledged_incomplete_import_ids=(
+                        self._processing_acknowledged_import_ids
+                    ),
+                )
+                payload = (plan, evaluation, notice, None)
+            except Exception as error:
+                payload = (None, evaluation, notice, error)
+            self._processing_done.put(("plan", payload))
+
+        threading.Thread(
+            target=work, name="TidyFiles-destination-review", daemon=True
+        ).start()
+
+    def _show_destination_review(
+        self,
+        plan: DestinationPlan,
+        evaluation: FilenameEvaluationResult,
+        notice: str | None,
+    ) -> None:
+        self._processing_plan = plan
+        self._set_processing_phase("review", "Review the destinations before renaming.")
+        dialog = ctk.CTkToplevel(self.root)
+        self._plan_review_dialog = dialog
+        dialog.title("Review destination plan")
+        dialog.geometry("900x600")
+        dialog.minsize(680, 420)
+        dialog.transient(self.root)
+        dialog.protocol("WM_DELETE_WINDOW", self.cancel_current_work)
+        body = ctk.CTkFrame(dialog)
+        body.pack(fill="both", expand=True, padx=12, pady=12)
+        if plan.state is PlanState.VALID:
+            summary = f"{len(plan.entries)} destinations are ready for final preflight."
+        elif plan.state is PlanState.COLLISION_BLOCKED:
+            summary = (
+                f"{len(plan.collision_subset_ids)} of {len(plan.entries)} files can be processed "
+                "as a collision-only subset. Conflicting and dependent files will remain listed."
+            )
+        else:
+            summary = f"This batch cannot be processed: {plan.reason or plan.state.value}."
+        if notice:
+            summary = f"{notice}\n\n{summary}"
+        ctk.CTkLabel(
+            body, text=summary, anchor="w", justify="left", wraplength=850
+        ).pack(fill="x", padx=8, pady=(8, 6))
+        if plan.incomplete_imports:
+            ctk.CTkLabel(
+                body,
+                text=(
+                    f"Acknowledged incomplete imports: {len(plan.incomplete_imports)}. "
+                    "Collected entries remain subject to fresh source validation."
+                ),
+                anchor="w",
+                justify="left",
+                wraplength=850,
+            ).pack(fill="x", padx=8, pady=(0, 6))
+        details = ctk.CTkTextbox(body, wrap="none")
+        details.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        if plan.entries:
+            lines = [
+                f"{row.state.value} / {row.operation.value if row.operation else 'blocked'}"
+                f"\n  {row.source_path}\n  → {row.destination_path or 'unavailable'}"
+                f"\n  Candidate: {row.candidate_filename}"
+                + (f"\n  Reason: {row.reason}" if row.reason else "")
+                for row in plan.entries
+            ]
+            details.insert("1.0", "\n\n".join(lines))
+        else:
+            details.insert("1.0", plan.reason or plan.state.value)
+        details.configure(state="disabled")
+        actions = ctk.CTkFrame(body, fg_color="transparent")
+        actions.pack(fill="x", padx=8, pady=(0, 4))
+        partial = plan.state is PlanState.COLLISION_BLOCKED
+        can_confirm = plan.state is PlanState.VALID or bool(plan.collision_subset_ids)
+        if can_confirm:
+            intended = (
+                plan.collision_subset_ids
+                if partial
+                else tuple(row.entry_id for row in plan.entries)
+            )
+            label = (
+                f"Process {len(intended)} unaffected files"
+                if partial
+                else "Confirm rename"
+            )
+            ctk.CTkButton(
+                actions,
+                text=label,
+                width=200,
+                command=lambda: self._confirm_destination_review(
+                    dialog, plan, evaluation, intended, partial
+                ),
+            ).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(
+            actions,
+            text="Cancel",
+            width=95,
+            command=self.cancel_current_work,
+        ).pack(side="right")
+        dialog.grab_set()
+
+    def _confirm_destination_review(
+        self,
+        dialog: ctk.CTkToplevel,
+        plan: DestinationPlan,
+        evaluation: FilenameEvaluationResult,
+        intended: tuple[UUID, ...],
+        partial: bool,
+    ) -> None:
+        if not self.collection.is_current(self._processing_snapshot):
+            self.cancel_current_work()
+            messagebox.showwarning(
+                "Review expired", "The collection changed. Review the destinations again.",
+                parent=self.root,
+            )
+            return
+        self._plan_review_dialog = None
+        dialog.destroy()
+        options = self._processing_options
+        assert options is not None and evaluation.expression is not None
+        request = PreflightRequest(
+            snapshot=self._processing_snapshot,
+            reviewed_plan=plan,
+            reviewed_evaluation=evaluation,
+            current_evaluation_id=evaluation.request_id,
+            expression=evaluation.expression,
+            settings=evaluation.settings,
+            options=options,
+            intended_entry_ids=intended,
+            acknowledged_incomplete_import_ids=(
+                self._processing_acknowledged_import_ids
+            ),
+        )
+        self._processing_plan = plan
+        self._processing_intended_ids = intended
+        self._processing_partial = partial
+        self._processing_request = request
+        self._processing_future = self.preflight_service.submit(
+            request, progress_callback=self._queue_processing_progress
+        )
+        self._processing_future.add_done_callback(self._queue_preflight_result)
+        self._set_processing_phase(
+            "preflight", "Rechecking sources and destinations…", cancellable=True
+        )
+        self._start_processing_poll()
+
+    def _queue_preflight_result(self, future: Any) -> None:
+        try:
+            result = future.result()
+        except Exception as error:
+            self._processing_done.put(("preflight_error", error))
+        else:
+            self._processing_done.put(("preflight", result))
+
+    def _queue_processing_progress(self, update: Any) -> None:
+        try:
+            self._processing_progress.put_nowait(update)
+        except queue.Full:
+            pass
+
+    def _start_processing_poll(self) -> None:
+        if self._processing_after is None:
+            self._processing_after = self.root.after(40, self._poll_processing)
+
+    def _poll_processing(self) -> None:
+        self._processing_after = None
+        while True:
+            try:
+                update = self._processing_progress.get_nowait()
+            except queue.Empty:
+                break
+            self._show_processing_progress(update)
+        try:
+            kind, payload = self._processing_done.get_nowait()
+        except queue.Empty:
+            kind = ""
+            payload = None
+        if kind:
+            if kind == "plan":
+                plan, evaluation, notice, error = payload
+                if self._processing_cancel.is_set():
+                    self._finish_processing("Destination review canceled.")
+                elif error is not None:
+                    self._finish_processing(f"Destination review failed: {error}")
+                elif plan is not None:
+                    self._show_destination_review(plan, evaluation, notice)
+            elif kind == "preflight":
+                self._handle_preflight_result(payload)
+            elif kind == "preflight_error":
+                self._finish_processing(f"Preflight failed safely: {payload}")
+            elif kind == "rename":
+                self._handle_rename_result(payload)
+            elif kind == "trash_inspection":
+                self._handle_trash_inspection(payload)
+            elif kind == "trash_clear":
+                self._handle_trash_clear(payload)
+            elif kind == "exit_trash_clear":
+                self._handle_exit_trash_clear(payload)
+        if self._processing_phase not in {"idle", "review"}:
+            self._start_processing_poll()
+
+    def _show_processing_progress(self, update: Any) -> None:
+        if isinstance(update, PreflightProgress):
+            labels = {
+                PreflightStage.INPUT: "Preparing validation…",
+                PreflightStage.SOURCES: "Checking source files…",
+                PreflightStage.METADATA: "Refreshing required metadata…",
+                PreflightStage.EVALUATION: "Refreshing filename evaluation…",
+                PreflightStage.COMPARISON: "Comparing reviewed candidates…",
+                PreflightStage.DESTINATIONS: "Rechecking destinations…",
+                PreflightStage.FINALIZATION: "Finishing validation…",
+            }
+            text = labels[update.stage]
+            if update.total:
+                text += f" {update.completed}/{update.total}"
+                self.progress.set(update.completed / update.total)
+            self.status.configure(text=text)
+        elif isinstance(update, RenameProgress):
+            job = self.coordinator.current
+            modifying = bool(job and job.job_id == update.job_id and job.modifying)
+            if modifying:
+                self._set_processing_phase("rename_modifying", "Renaming files…")
+            else:
+                self._set_processing_phase(
+                    "rename_preparing",
+                    "Preparing the journaled rename…",
+                    cancellable=True,
+                )
+            if update.total:
+                self.progress.set(update.completed / update.total)
+            label = "Renaming files" if modifying else "Preparing rename"
+            if update.entry_id is not None:
+                entry = self._entries_by_id.get(update.entry_id)
+                index = self._display_positions.get(update.entry_id, -1) + 1
+                label += f" · {index}/{len(self._display_order)}"
+                if entry is not None:
+                    label += f" · {entry.original_filename}"
+            self.status.configure(text=label)
+        elif isinstance(update, tuple) and update[0] == "stage":
+            self._set_processing_phase(update[1], update[2])
+
+    def _handle_preflight_result(self, result: Any) -> None:
+        self._processing_future = None
+        self._active_preflight_result = None
+        if self._close_pending:
+            self._finish_processing("Preflight canceled before closing.")
+            return
+        if result.state is PreflightState.PASSED:
+            self._active_preflight_result = result
+            self._start_rename_execution(result)
+            return
+        if result.state in {PreflightState.REVIEW_REQUIRED, PreflightState.COLLISION_BLOCKED}:
+            fresh = result.fresh_evaluation
+            if fresh is not None and fresh.state is EvaluationState.VALID:
+                self._submit_destination_plan(
+                    fresh,
+                    "Filesystem observations or reviewed filenames changed. Confirm the "
+                    "updated destination plan before processing.",
+                )
+                return
+        if result.diagnostic.entry_id is not None:
+            self._processing_diagnostics_by_id[result.diagnostic.entry_id] = (
+                result.diagnostic.detail or result.diagnostic.code.replace("_", " ")
+            )
+        self._finish_processing(
+            f"Rename was not started: {result.diagnostic.detail or result.diagnostic.code}."
+        )
+
+    def _start_rename_execution(self, preflight: Any) -> None:
+        self._active_preflight_result = preflight
+        self._set_processing_phase(
+            "rename_preparing", "Preparing the journaled rename…", cancellable=True
+        )
+        self.progress.set(0)
+        self._start_processing_poll()
+        snapshot = self._processing_snapshot
+        partial = self._processing_partial
+        auto_clean_enabled = self._processing_auto_clean_enabled
+
+        def work() -> None:
+            try:
+                scope = RenameScope.from_review(preflight)
+                result = self.rename_executor.execute(
+                    preflight,
+                    authorized=scope,
+                    current_preflight=lambda: (
+                        None
+                        if self._processing_cancel.is_set()
+                        else self._active_preflight_result
+                    ),
+                    progress=self._queue_processing_progress,
+                )
+                clean_result = None
+                if auto_clean_enabled:
+                    self._queue_processing_progress(
+                        ("stage", "auto_cleaning", "Running eligible post-processing cleanup…")
+                    )
+                    outputs = tuple(
+                        item.actual_path
+                        for item in result.entries
+                        if item.outcome in {RenameOutcome.RENAMED, RenameOutcome.UNCHANGED}
+                        and item.actual_path is not None
+                    )
+                    clean_result = self.auto_clean_service.run(
+                        AutoCleanRequest(
+                            snapshot=snapshot,
+                            enabled=True,
+                            primary_succeeded=result.state is RenameState.SUCCEEDED,
+                            partial=partial,
+                            unresolved=result.state is RenameState.RECOVERY_REQUIRED,
+                            output_paths=outputs,
+                        )
+                    )
+                paths = {
+                    item.entry_id: item.actual_path
+                    for item in result.entries
+                    if item.outcome
+                    in {
+                        RenameOutcome.FAILED_SAFE,
+                        RenameOutcome.NOT_PROCESSED,
+                        RenameOutcome.RECOVERY_REQUIRED,
+                    }
+                    and item.actual_path is not None
+                }
+                self._processing_done.put(
+                    ("rename", (result, clean_result, paths, None))
+                )
+            except Exception as error:
+                self._processing_done.put(("rename", (None, None, {}, error)))
+
+        threading.Thread(
+            target=work, name="TidyFiles-rename-executor", daemon=True
+        ).start()
+
+    def _handle_rename_result(self, payload: Any) -> None:
+        result, clean_result, paths, error = payload
+        if error is not None or result is None:
+            self._finish_processing(f"Rename failed safely: {error}")
+            return
+        removed_ids = tuple(
+            item.entry_id
+            for item in result.entries
+            if item.outcome in {RenameOutcome.RENAMED, RenameOutcome.UNCHANGED}
+        )
+        excluded = set(self._processing_plan.excluded_entry_ids if self._processing_plan else ())
+        planned_ids = {entry.entry_id for entry in self._processing_snapshot.entries}
+        excluded.update(planned_ids.difference(self._processing_intended_ids))
+        for entry_id in excluded:
+            self._processing_diagnostics_by_id[entry_id] = (
+                "Excluded by the confirmed collision-only subset"
+            )
+        for item in result.entries:
+            if item.outcome in {RenameOutcome.RENAMED, RenameOutcome.UNCHANGED}:
+                self._processing_diagnostics_by_id.pop(item.entry_id, None)
+            else:
+                self._processing_diagnostics_by_id[item.entry_id] = (
+                    item.detail or item.outcome.value.replace("_", " ")
+                )
+        removed = self.collection.remove_entries(removed_ids)
+        for entry in removed:
+            self._account_size(entry, -1)
+            self._entries_by_id.pop(entry.entry_id, None)
+            self._preview_filename_ids.discard(entry.entry_id)
+            self._preview_problem_ids.discard(entry.entry_id)
+            if self.tree.exists(str(entry.entry_id)):
+                self.tree.delete(str(entry.entry_id))
+        try:
+            updated = self.collection.update_entry_paths(paths)
+        except Exception as update_error:
+            updated = ()
+            self._processing_diagnostics_by_id.update(
+                {entry_id: f"Verified path could not be refreshed in the collection: {update_error}"
+                 for entry_id in paths}
+            )
+        for entry in updated:
+            self._entries_by_id[entry.entry_id] = entry
+        self._display_order = [
+            entry_id for entry_id in self._display_order
+            if entry_id in self._entries_by_id
+        ]
+        self._display_positions = {
+            entry_id: index for index, entry_id in enumerate(self._display_order)
+        }
+        for index, entry_id in enumerate(self._display_order, 1):
+            entry = self._entries_by_id[entry_id]
+            detail = self._processing_diagnostics_by_id.get(entry_id)
+            status = "Needs attention" if detail else "Imported"
+            self.tree.item(
+                str(entry_id),
+                values=self._entry_values(index, entry, status=status),
+            )
+        self._update_import_warnings()
+        if removed or updated:
+            self._notify_collection_changed()
+        self._update_summary()
+        summary = self._rename_result_summary(result, clean_result, excluded)
+        issues = bool(excluded) or result.state is not RenameState.SUCCEEDED or any(
+            item.outcome not in {RenameOutcome.RENAMED, RenameOutcome.UNCHANGED}
+            for item in result.entries
+        )
+        if clean_result is not None and (clean_result.detail or clean_result.failures):
+            issues = True
+        self._finish_processing(summary, show_dialog=True, warning=issues)
+
+    def _rename_result_summary(
+        self, result: Any, cleanup: CleanupResult | None, excluded: set[UUID]
+    ) -> str:
+        counts = {outcome: 0 for outcome in RenameOutcome}
+        for item in result.entries:
+            counts[item.outcome] += 1
+        text = (
+            f"Rename result: {counts[RenameOutcome.RENAMED]} renamed, "
+            f"{counts[RenameOutcome.UNCHANGED]} unchanged, "
+            f"{counts[RenameOutcome.FAILED_SAFE]} failed safely, "
+            f"{counts[RenameOutcome.RECOVERY_REQUIRED]} need recovery, "
+            f"{counts[RenameOutcome.NOT_PROCESSED] + len(excluded)} not processed."
+        )
+        problems = [
+            item for item in result.entries
+            if item.outcome not in {RenameOutcome.RENAMED, RenameOutcome.UNCHANGED}
+        ]
+        lines = [result.detail] if result.detail else []
+        lines.extend(
+            f"{item.outcome.value}: {item.actual_path or item.entry_id}"
+            + (f" — {item.detail}" if item.detail else "")
+            for item in problems[:12]
+        )
+        lines.extend(
+            f"Excluded: {entry.source_path} — "
+            f"{self._processing_diagnostics_by_id.get(entry.entry_id, 'not processed')}"
+            for entry in self._processing_snapshot.entries
+            if entry.entry_id in excluded
+        )
+        if cleanup is not None:
+            if cleanup.detail:
+                lines.append(f"Auto-clean: {cleanup.detail}")
+            lines.extend(
+                f"Auto-clean failed: {item.path} — {item.reason or 'deletion failed'}"
+                for item in cleanup.failures[:12]
+            )
+            if not cleanup.detail and not cleanup.failures:
+                lines.append(f"Auto-clean removed {len(cleanup.deleted_paths)} item(s).")
+        if lines:
+            text += "\n\n" + "\n".join(lines)
+        return text
+
+    def _finish_processing(
+        self, message: str, *, show_dialog: bool = False, warning: bool = False
+    ) -> None:
+        if self._plan_review_dialog is not None:
+            try:
+                self._plan_review_dialog.grab_release()
+                self._plan_review_dialog.destroy()
+            except tk.TclError:
+                pass
+            self._plan_review_dialog = None
+        self._processing_phase = "idle"
+        self._collection_operation_pending = False
+        self._maintenance_kind = None
+        self._processing_future = None
+        self._processing_request = None
+        self._active_preflight_result = None
+        self._processing_plan = None
+        self._processing_options = None
+        self._processing_snapshot = None
+        self.progress.set(0)
+        self.cancel_button.grid_remove()
+        self.status.configure(text=message)
+        self._update_control_states()
+        if show_dialog:
+            if warning:
+                messagebox.showwarning("Rename results", message, parent=self.root)
+            else:
+                messagebox.showinfo("Rename complete", message, parent=self.root)
+        if self._close_pending:
+            self._continue_close()
+
+    def _set_processing_phase(
+        self, phase: str, status: str, *, cancellable: bool = False
+    ) -> None:
+        self._processing_phase = phase
+        self._collection_operation_pending = phase != "idle"
+        self.status.configure(text=status)
+        if phase == "idle":
+            self.cancel_button.grid_remove()
+        else:
+            self.cancel_button.grid()
+            self.cancel_button.configure(state="normal" if cancellable else "disabled")
+        self._update_control_states()
+
+    def cancel_current_work(self) -> None:
+        if self.import_controller.busy:
+            self.cancel_import()
+            return
+        phase = self._processing_phase
+        if phase == "idle":
+            return
+        if phase == "review":
+            self._finish_processing("Rename review canceled.")
+            return
+        if phase in {"rename_modifying", "auto_cleaning", "trash_clearing", "exit_trash_clear"}:
+            self.status.configure(text="The current filesystem changes cannot be canceled safely.")
+            return
+        if phase == "rename_preparing":
+            job = self.coordinator.current
+            if job is not None:
+                try:
+                    canceled = self.coordinator.cancel_preparation(job.job_id)
+                except Exception:
+                    canceled = False
+                if not canceled and job.modifying:
+                    self._set_processing_phase("rename_modifying", "Renaming files…")
+                    self.status.configure(
+                        text="The current filesystem changes cannot be canceled safely."
+                    )
+                    return
+            self._processing_cancel.set()
+        else:
+            self._processing_cancel.set()
+            if phase == "preflight" and self._processing_request is not None:
+                self.preflight_service.cancel(self._processing_request.request_id)
+        self.status.configure(text="Canceling preparation…")
+
+    def clear_trash(self) -> None:
+        if self._closing or self._collection_operation_pending or self.import_controller.busy:
+            return
+        self._maintenance_kind = "trash_inspection"
+        self._set_processing_phase("trash_inspecting", "Inspecting managed Trash…")
+        self._start_processing_poll()
+
+        def inspect() -> None:
+            try:
+                result = self.trash_clear_service.inspect()
+                payload = (result, None)
+            except Exception as error:
+                payload = (None, error)
+            self._processing_done.put(("trash_inspection", payload))
+
+        threading.Thread(
+            target=inspect, name="TidyFiles-trash-inspection", daemon=True
+        ).start()
+
+    def _handle_trash_inspection(self, payload: Any) -> None:
+        summary, error = payload
+        if self._close_pending:
+            self._finish_processing("Trash inspection stopped before closing.")
+            return
+        if error is not None or summary is None:
+            message = f"Trash inspection failed: {error or 'unknown error'}"
+            self._finish_processing(message)
+            messagebox.showwarning("Clear Trash", message, parent=self.root)
+            return
+        if summary.detail:
+            self._finish_processing(summary.detail)
+            messagebox.showwarning("Clear Trash unavailable", summary.detail, parent=self.root)
+            return
+        if not summary.eligible_count:
+            message = "No eligible files were found in recognized managed Trash batches."
+            if summary.items:
+                message += " Unknown, linked, or recovery-dependent entries were preserved."
+            self._finish_processing(message)
+            messagebox.showinfo("Clear Trash", message, parent=self.root)
+            return
+        size = format_size(summary.eligible_size_bytes)
+        if not messagebox.askyesno(
+            "Permanently clear managed Trash?",
+            f"Permanently delete {summary.eligible_count} eligible file(s) ({size}) from "
+            "recognized TidyFiles Trash batches? Unrecognized entries and files needed for "
+            "transaction recovery will be preserved.",
+            icon="warning",
+            parent=self.root,
+        ):
+            self._finish_processing("Trash clear canceled.")
+            return
+        self._maintenance_kind = "trash_clear"
+        self._set_processing_phase("trash_clearing", "Clearing eligible managed Trash…")
+        self._start_processing_poll()
+
+        def clear() -> None:
+            try:
+                result = self.trash_clear_service.clear(manually_authorized=True)
+                payload = (result, None)
+            except Exception as clear_error:
+                payload = (None, clear_error)
+            self._processing_done.put(("trash_clear", payload))
+
+        threading.Thread(
+            target=clear, name="TidyFiles-trash-clear", daemon=True
+        ).start()
+
+    def _handle_trash_clear(self, payload: Any) -> None:
+        result, error = payload
+        if error is not None or result is None:
+            message = f"Trash clear failed: {error or 'unknown error'}"
+            self._finish_processing(message)
+            messagebox.showwarning("Clear Trash", message, parent=self.root)
+            return
+        cleanup = result.cleanup
+        deleted = len(cleanup.deleted_paths)
+        failures = cleanup.failures
+        message = f"Trash clear deleted {deleted} item(s)."
+        if cleanup.detail:
+            message += f"\n{cleanup.detail}"
+        if failures:
+            message += "\n\nSome eligible entries could not be deleted:"
+            message += "\n" + "\n".join(
+                f"{item.path}: {item.reason or 'deletion failed'}" for item in failures[:12]
+            )
+        self._finish_processing(message)
+        if failures or cleanup.detail:
+            messagebox.showwarning("Trash clear results", message, parent=self.root)
+        else:
+            messagebox.showinfo("Trash clear complete", message, parent=self.root)
+
+    def _start_recovery_inspection(self) -> None:
+        if self._closing:
+            return
+
+        def inspect() -> None:
+            try:
+                result = self.recovery_inspector.inspect()
+                payload = (result, None)
+            except Exception as error:
+                payload = (None, error)
+            self._recovery_queue.put(payload)
+
+        threading.Thread(target=inspect, name="TidyFiles-startup-recovery", daemon=True).start()
+        self._recovery_after = self.root.after(50, self._poll_recovery_inspection)
+
+    def _poll_recovery_inspection(self) -> None:
+        self._recovery_after = None
+        try:
+            inspection, error = self._recovery_queue.get_nowait()
+        except queue.Empty:
+            if not self._closing:
+                self._recovery_after = self.root.after(50, self._poll_recovery_inspection)
+            return
+        if self._closing:
+            return
+        if error is not None:
+            self._show_recovery_inspection(None, error)
+        elif inspection is not None:
+            if inspection.transactions or inspection.storage_issues:
+                self._show_recovery_inspection(inspection)
+
+    def _show_recovery_inspection(
+        self, inspection: RecoveryInspection | None, error: Exception | None = None
+    ) -> None:
+        if self._recovery_dialog is not None:
+            try:
+                if self._recovery_dialog.winfo_exists():
+                    self._recovery_dialog.lift()
+                    return
+            except tk.TclError:
+                pass
+        dialog = ctk.CTkToplevel(self.root)
+        self._recovery_dialog = dialog
+        dialog.title("Recovery requires attention")
+        dialog.geometry("800x560")
+        dialog.minsize(620, 420)
+        dialog.transient(self.root)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        body = ctk.CTkFrame(dialog)
+        body.pack(fill="both", expand=True, padx=12, pady=12)
+        ctk.CTkLabel(
+            body,
+            text=(
+                "TidyFiles found transaction recovery information. No files were restored, "
+                "moved, or deleted. Review the recorded stages and paths below."
+                if error is None
+                else f"Recovery inspection could not complete: {error}"
+            ),
+            anchor="w",
+            justify="left",
+            wraplength=740,
+        ).pack(fill="x", padx=8, pady=(8, 8))
+        details = ctk.CTkTextbox(body, wrap="word")
+        details.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        lines: list[str] = []
+        paths: list[str] = []
+        if inspection is not None:
+            for issue in inspection.storage_issues:
+                lines.append(f"Recovery storage: {issue.status.value} · {issue.path}")
+                paths.append(str(issue.path))
+                if issue.detail:
+                    lines.append(f"  {issue.detail}")
+            for transaction in inspection.transactions:
+                operation = (
+                    transaction.operation.value
+                    if transaction.operation
+                    else "unknown operation"
+                )
+                lines.append(
+                    f"Transaction {transaction.transaction_id} · "
+                    f"{operation} "
+                    f"· {transaction.journal_status.value}"
+                )
+                for location in transaction.journal_locations:
+                    paths.append(str(location.path))
+                    lines.append(f"  Journal: {location.status.value} · {location.path}")
+                    if location.detail:
+                        lines.append(f"    {location.detail}")
+                for entry in transaction.entries:
+                    lines.append(
+                        f"  {entry.source_path} → {entry.destination_path}"
+                        f" · stage {entry.recorded_stage} · {entry.recorded_outcome.value}"
+                    )
+                    if entry.detail:
+                        lines.append(f"    {entry.detail}")
+                    for observed in entry.paths:
+                        paths.append(observed.path)
+                        lines.append(
+                            f"    {observed.role}: {observed.path} · "
+                            f"{observed.current.occupancy.value}"
+                        )
+                        if observed.current.reason:
+                            lines.append(f"      {observed.current.reason}")
+        details.insert("1.0", "\n".join(lines) or "No transaction details are available.")
+        details.configure(state="disabled")
+        path_frame = ctk.CTkFrame(body, fg_color="transparent")
+        path_frame.pack(fill="x", padx=8, pady=(0, 8))
+        self._recovery_paths = tuple(dict.fromkeys(paths))
+        self._recovery_path_list = tk.Listbox(path_frame, height=6, exportselection=False)
+        scrollbar = tk.Scrollbar(path_frame, command=self._recovery_path_list.yview)
+        self._recovery_path_list.configure(yscrollcommand=scrollbar.set)
+        self._recovery_path_list.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="left", fill="y")
+        for path in self._recovery_paths:
+            self._recovery_path_list.insert("end", path)
+        actions = ctk.CTkFrame(body, fg_color="transparent")
+        actions.pack(fill="x", padx=8, pady=(0, 4))
+        ctk.CTkButton(
+            actions,
+            text="Open selected location in File Explorer",
+            command=self._open_selected_recovery_location,
+        ).pack(side="left")
+        ctk.CTkButton(actions, text="Close", width=90, command=dialog.destroy).pack(
+            side="right"
+        )
+        dialog.grab_set()
+
+    def _open_selected_recovery_location(self) -> None:
+        selection = self._recovery_path_list.curselection()
+        if not selection:
+            return
+        path = self._recovery_paths[selection[0]]
+        target = Path(path)
+        if not target.exists() and target.parent.exists():
+            target = target.parent
+        try:
+            subprocess.Popen(["explorer.exe", "/select,", str(target)])
+        except OSError as error:
+            messagebox.showerror(
+                "Could not open File Explorer", str(error), parent=self._recovery_dialog
+            )
+
     def open_preview_details(self, entry_id: UUID | None = None) -> None:
         entry_id = entry_id or self._context_entry_id
         if self._closing or entry_id is None:
             return
         diagnostic = self._preview_diagnostics_by_id.get(entry_id)
+        operation_detail = self._processing_diagnostics_by_id.get(entry_id)
         entry = self._entries_by_id.get(entry_id)
-        if diagnostic is None or entry is None:
+        if (diagnostic is None and operation_detail is None) or entry is None:
             return
         if self._preview_details_dialog is not None:
             try:
                 if self._preview_details_dialog.winfo_exists():
                     self._preview_details_dialog.deiconify()
                     self._preview_details_dialog.lift()
-                    self._set_preview_detail_text(entry, diagnostic)
+                    self._set_preview_detail_text(entry, diagnostic, operation_detail)
                     return
             except tk.TclError:
                 pass
@@ -1302,21 +2231,32 @@ class _MainWindow:
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
         self._preview_details_textbox = ctk.CTkTextbox(dialog, wrap="word")
         self._preview_details_textbox.pack(fill="both", expand=True, padx=12, pady=12)
-        self._set_preview_detail_text(entry, diagnostic)
+        self._set_preview_detail_text(entry, diagnostic, operation_detail)
 
-    def _set_preview_detail_text(self, entry: CollectionEntry, diagnostic: Any) -> None:
+    def _set_preview_detail_text(
+        self,
+        entry: CollectionEntry,
+        diagnostic: Any | None,
+        operation_detail: str | None = None,
+    ) -> None:
         details = [
             f"Source filename: {entry.original_filename}",
             f"Source path: {entry.source_path}",
-            f"Category: {diagnostic.kind.value}",
-            f"Reason: {diagnostic.message}",
         ]
-        if diagnostic.token is not None:
-            details.append(f"Token: {diagnostic.token}")
-        if diagnostic.position is not None:
-            details.append(f"Expression offset: {diagnostic.position}")
-        if diagnostic.required_tokens:
-            details.append("Required metadata tokens: " + ", ".join(diagnostic.required_tokens))
+        if diagnostic is not None:
+            details.extend(
+                (f"Category: {diagnostic.kind.value}", f"Reason: {diagnostic.message}")
+            )
+            if diagnostic.token is not None:
+                details.append(f"Token: {diagnostic.token}")
+            if diagnostic.position is not None:
+                details.append(f"Expression offset: {diagnostic.position}")
+            if diagnostic.required_tokens:
+                details.append(
+                    "Required metadata tokens: " + ", ".join(diagnostic.required_tokens)
+                )
+        if operation_detail:
+            details.append(f"Processing result: {operation_detail}")
         result = self._preview_result
         if result is not None:
             item = next(
@@ -1473,6 +2413,20 @@ class _MainWindow:
             for button in self.movement_buttons.values():
                 button.configure(state="disabled")
             self.refresh_preview_button.configure(state="disabled")
+            self.process_button.configure(state="disabled")
+            self.trash_clear_button.configure(state="disabled")
+            if (
+                self._processing_phase != "idle"
+                or self._maintenance_kind is not None
+                or self._closing
+                or self._close_pending
+            ):
+                self.settings_button.configure(state="disabled")
+                self.format_field.configure(state="disabled")
+                self.single_folder_switch.configure(state="disabled")
+                self.auto_clean_switch.configure(state="disabled")
+                if hasattr(self, "auto_clear_trash_switch"):
+                    self.auto_clear_trash_switch.configure(state="disabled")
             return
 
         self.controls["add_files"].configure(state="normal")
@@ -1499,6 +2453,16 @@ class _MainWindow:
                 else "disabled"
             )
         )
+        self.process_button.configure(
+            state="normal" if self._process_ready() else "disabled"
+        )
+        self.trash_clear_button.configure(state="normal")
+        self.settings_button.configure(state="normal")
+        self.format_field.configure(state="normal")
+        self.single_folder_switch.configure(state="normal")
+        self.auto_clean_switch.configure(state="normal")
+        if hasattr(self, "auto_clear_trash_switch"):
+            self.auto_clear_trash_switch.configure(state="normal")
         positions = [self._display_positions[entry_id] for entry_id in selected]
         can_move = bool(positions)
         movement = {
@@ -1520,6 +2484,19 @@ class _MainWindow:
         }
         for key, button in self.movement_buttons.items():
             button.configure(state="normal" if movement[key] else "disabled")
+
+    def _process_ready(self) -> bool:
+        result = self._preview_result
+        return bool(
+            self.active_mode == "Bulk Rename"
+            and self._entries_by_id
+            and result is not None
+            and result.state is EvaluationState.VALID
+            and result.is_valid
+            and self._preview_result_is_current(result)
+            and not self.import_controller.busy
+            and not self.collection.capabilities.is_importing
+        )
 
     def _notify_collection_changed(self) -> None:
         self.root.collection_revision = self.collection.revision  # type: ignore[attr-defined]
@@ -2162,13 +3139,11 @@ class _MainWindow:
             if busy and key in {"remove", "move_top", "move_up", "move_down", "move_bottom"}:
                 state = "disabled"
             self.context_menu.entryconfigure(index, state=state)
-        has_preview_error = (
-            self.active_mode == "Bulk Rename"
-            and self._context_entry_id in self._preview_diagnostics_by_id
-        )
+        has_preview_error = self._context_entry_id in self._preview_diagnostics_by_id
+        has_process_result = self._context_entry_id in self._processing_diagnostics_by_id
         self.context_menu.entryconfigure(
             self._context_menu_indices["preview_details"],
-            state="normal" if has_preview_error else "disabled",
+            state="normal" if has_preview_error or has_process_result else "disabled",
         )
         try:
             self.context_menu.tk_popup(event.x_root, event.y_root)
@@ -2516,7 +3491,7 @@ class _MainWindow:
         dialog = ctk.CTkToplevel(self.root)
         self.settings_window = dialog
         dialog.title("Settings")
-        dialog.geometry("420x220")
+        dialog.geometry("470x350")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         content = ctk.CTkFrame(dialog)
@@ -2533,11 +3508,25 @@ class _MainWindow:
         )
         self.appearance_choice = theme
         choice.pack(anchor="w", padx=10, pady=(0, 12))
+        self.auto_clear_trash_switch = ctk.CTkSwitch(
+            content,
+            text="Auto-Clear Trash on normal exit",
+            onvalue=True,
+            offvalue=False,
+            command=self._on_auto_clear_trash_changed,
+        )
+        if get_auto_clear_trash_on_exit(self.config):
+            self.auto_clear_trash_switch.select()
+        self.auto_clear_trash_switch.pack(anchor="w", padx=10, pady=(2, 4))
         ctk.CTkLabel(
             content,
-            text="Column choices, widths, and window placement save automatically.",
+            text=(
+                "When enabled, recognized managed Trash batches are permanently cleared "
+                "after a normal exit. It does not run at startup. Column choices, widths, "
+                "and window placement save automatically."
+            ),
             anchor="w",
-            wraplength=360,
+            wraplength=420,
         ).pack(fill="x", padx=10, pady=(4, 10))
         ctk.CTkButton(content, text="Done", width=85, command=dialog.destroy).pack(
             anchor="e", padx=10, pady=(0, 8)
@@ -2621,6 +3610,21 @@ class _MainWindow:
     def close(self) -> None:
         if self._closing or self._close_pending:
             return
+        job = self.coordinator.current
+        if (
+            (job is not None and job.modifying)
+            or self._processing_phase
+            in {"rename_modifying", "auto_cleaning", "trash_clearing", "exit_trash_clear"}
+        ):
+            self.status.configure(
+                text="Wait for the active filesystem changes to finish before closing."
+            )
+            return
+        if self._processing_phase != "idle":
+            self._close_pending = True
+            self._update_control_states()
+            self.cancel_current_work()
+            return
         if not self.import_controller.request_shutdown():
             self._close_pending = True
             self._update_control_states()
@@ -2631,11 +3635,48 @@ class _MainWindow:
             return
         self._finish_close()
 
+    def _continue_close(self) -> None:
+        if not self._close_pending or self._processing_phase != "idle":
+            return
+        if not self.import_controller.request_shutdown():
+            self.status.configure(
+                text="Waiting for discovery to stop before closing · source files are unchanged"
+            )
+            self._update_control_states()
+            self.cancel_button.configure(state="disabled")
+            return
+        self._finish_close()
+
     def _finish_close(self) -> None:
         if self._closing:
             return
+        if not self._exit_cleanup_done:
+            self._exit_cleanup_done = True
+            if get_auto_clear_trash_on_exit(self.config):
+                self._close_pending = True
+                self._maintenance_kind = "exit_trash_clear"
+                self._set_processing_phase(
+                    "exit_trash_clear", "Auto-Clear Trash is running before normal exit…"
+                )
+                self._start_processing_poll()
+
+                def clear() -> None:
+                    try:
+                        result = self.trash_clear_service.clear(
+                            auto_clear_enabled=True, normal_exit=True
+                        )
+                        payload = (result, None)
+                    except Exception as error:
+                        payload = (None, error)
+                    self._processing_done.put(("exit_trash_clear", payload))
+
+                threading.Thread(
+                    target=clear, name="TidyFiles-exit-trash-clear", daemon=True
+                ).start()
+                return
         self._closing = True
         self.import_controller.dispose()
+        self.preflight_service.close(wait=False)
         for name in (
             "_preview_after",
             "_preview_debounce_after",
@@ -2643,10 +3684,21 @@ class _MainWindow:
             "_preview_render_after",
         ):
             self._cancel_preview_after(name)
+        if self._recovery_after is not None:
+            try:
+                self.root.after_cancel(self._recovery_after)
+            except tk.TclError:
+                pass
+            self._recovery_after = None
         if self._preview_service is not None:
             self._preview_service.close(wait=False)
             self._preview_service = None
-        for dialog in (self._format_reference_dialog, self._preview_details_dialog):
+        for dialog in (
+            self._format_reference_dialog,
+            self._preview_details_dialog,
+            self._recovery_dialog,
+            self._plan_review_dialog,
+        ):
             if dialog is not None:
                 try:
                     dialog.destroy()
@@ -2670,6 +3722,34 @@ class _MainWindow:
             self.root.after_cancel(self._appearance_after)
         self._save_preferences()
         self.root.destroy()
+
+    def _handle_exit_trash_clear(self, payload: Any) -> None:
+        result, error = payload
+        self._maintenance_kind = None
+        self._collection_operation_pending = False
+        self._processing_phase = "idle"
+        if error is not None or result is None:
+            messagebox.showwarning(
+                "Auto-Clear Trash failed",
+                str(error or "Trash clear did not return a result."),
+                parent=self.root,
+            )
+        elif result.cleanup.failures or result.cleanup.detail not in {
+            None,
+            "No eligible Trash items",
+        }:
+            details = result.cleanup.detail or "Some Trash entries could not be deleted."
+            failed = "\n".join(
+                f"{item.path}: {item.reason or 'deletion failed'}"
+                for item in result.cleanup.failures[:12]
+            )
+            messagebox.showwarning(
+                "Auto-Clear Trash results",
+                details + (f"\n\n{failed}" if failed else ""),
+                parent=self.root,
+            )
+        self._update_control_states()
+        self._finish_close()
 
 
 def create_main_window(

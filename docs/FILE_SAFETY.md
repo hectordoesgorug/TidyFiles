@@ -11,15 +11,17 @@ and script extensions are disabled for Open File; suffix checks cannot identify
 every potentially launchable file. Bulk Rename shows read-only filename
 previews. The **Valid preview** label means filename-level validation passed;
 it does not verify destination collisions, source identity or execution
-readiness. The desktop rename, deduplication, repacking, and cleanup controls
-are disabled.
+readiness. Process requires destination review, explicit confirmation, and fresh
+preflight before journaled Windows renaming. Clear Trash requires explicit
+permanent-deletion confirmation. Deduplicate and Repack remain disabled.
 
-The Auto-clean switch remains disabled. Its service now requires complete
-primary-operation success, complete discovery, and explicit Add Folder roots
-from the active snapshot. It is limited to `Thumbs.db`, `.DS_Store`,
-`desktop.ini`, and empty descendant directories. The Counter is still an
-off-by-default UI option only; no counter analysis runs. Cleanup services are
-not invoked by the GUI, startup, or application shutdown.
+Auto-clean is an optional default-off setting with a permanent-deletion
+disclosure. It runs only after complete rename success, uses the original
+collection snapshot, and preserves operation outputs. It is limited to
+`Thumbs.db`, `.DS_Store`, `desktop.ini`, and empty descendant directories.
+Auto-Clear Trash is a separate default-off setting that runs only on normal
+exit. Startup recovery inspection is read-only and does not restore, move, or
+delete files. The Counter remains a UI option only; no counter analysis runs.
 
 ## Implemented foundations
 
@@ -77,9 +79,9 @@ not invoked by the GUI, startup, or application shutdown.
   not rescan folders or change collection membership. Parser errors invalidate
   every row; file-specific errors affect only their rows visually but invalidate
   the full rename batch. A valid preview is not permission or readiness to
-  rename files.
-  The Process, Deduplicate, and Repack controls remain disabled, and preview
-  evaluation neither opens file contents nor changes source files.
+  rename files. Process is available only for a current valid evaluation;
+  Deduplicate and Repack remain disabled. Preview evaluation neither opens
+  file contents nor changes source files.
 
 ## Destination planning observations
 
@@ -318,26 +320,24 @@ unrecognized root content, unresolved recovery dependencies, links, and
 inaccessible or failed entries. Manual Clear Trash requires explicit
 authorization; Auto-Clear Trash is an independent default-off setting intended
 only for normal exit while idle. Both use the same inspection and deletion
-safeguards. No ownership manifest was added. GUI confirmation, startup
-notification, Explorer actions, and normal-exit wiring remain unimplemented.
+safeguards. No ownership manifest was added. The GUI provides manual
+confirmation, startup recovery notification, Explorer access to recorded
+locations, and normal-exit invocation.
 
 ## Planned safety components
 
-The following are not implemented:
+The following remain unimplemented:
 
-- GUI confirmation of authorized rename scopes and collision-only subsets.
+- Duplicate analysis and confirmation.
 - Protected staging for other processing workflows.
-- Startup recovery notification, Explorer actions, and recovery UI.
 - Safe original retention and verified installation during repacking.
 - Duplicate verification before any deletion action.
-- Trash-clear confirmation UI and normal-exit invocation.
 - Operator-directed resolution of interrupted transactions.
 
 Future filesystem work must independently validate a complete destination plan,
 revalidate before mutation, avoid unauthorized overwrites and deletion, and use
 temporary isolated fixtures for destructive-operation tests. Logs must not be
-used as the sole recovery record. No automatic recovery is performed. The
-default-off cleanup settings have no startup or shutdown wiring yet.
+used as the sole recovery record. No automatic recovery is performed.
 
 Path-based discovery and count-acquisition checks do not provide a handle-based
 defense against an external process replacing a directory with a reparse point

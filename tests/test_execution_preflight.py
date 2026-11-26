@@ -408,6 +408,36 @@ def test_b36_incomplete_import_keeps_session_diagnostic(tmp_path):
     assert result.incomplete_imports[0].diagnostics[0].reason == "access_denied"
 
 
+def test_acknowledged_incomplete_import_can_pass_preflight(tmp_path):
+    collection = _collection(_files(tmp_path, "One.txt"), incomplete=True)
+    snapshot = collection.snapshot()
+    evaluation = evaluate_collection(snapshot, "<Name> renamed")
+    acknowledged = tuple(session.session_id for session in snapshot.incomplete_imports)
+    plan = capture_review_plan(
+        snapshot,
+        evaluation,
+        current_request_id=evaluation.request_id,
+        acknowledged_incomplete_import_ids=acknowledged,
+    )
+    request = PreflightRequest(
+        snapshot,
+        plan,
+        evaluation,
+        evaluation.request_id,
+        "<Name> renamed",
+        evaluation.settings,
+        plan.options,
+        tuple(entry.entry_id for entry in snapshot.entries),
+        acknowledged_incomplete_import_ids=acknowledged,
+    )
+
+    result = run_preflight(request)
+
+    assert result.state is PreflightState.PASSED
+    assert result.acknowledged_incomplete_import_ids == acknowledged
+    assert result.incomplete_imports == snapshot.incomplete_imports
+
+
 @pytest.mark.parametrize("stage", [PreflightStage.METADATA, PreflightStage.DESTINATIONS])
 def test_b37_b38_cancellation_during_read_only_preparation(tmp_path, stage):
     request = _request(_collection(_files(tmp_path, "One.txt")), "<Name>_<NumFiles>")

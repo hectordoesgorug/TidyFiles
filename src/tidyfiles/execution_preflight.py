@@ -79,9 +79,15 @@ class PreflightRequest:
     options: DestinationOptions
     intended_entry_ids: tuple[UUID, ...]
     request_id: UUID = field(default_factory=uuid4)
+    acknowledged_incomplete_import_ids: tuple[UUID, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "intended_entry_ids", tuple(self.intended_entry_ids))
+        object.__setattr__(
+            self,
+            "acknowledged_incomplete_import_ids",
+            tuple(self.acknowledged_incomplete_import_ids),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +119,7 @@ class PreflightResult:
     source_observations: tuple[tuple[UUID, PathObservation], ...] = ()
     candidate_changes: tuple[CandidateChange, ...] = ()
     destination_changes: tuple[DestinationChange, ...] = ()
+    acknowledged_incomplete_import_ids: tuple[UUID, ...] = ()
 
 
 class _Cancelled(Exception):
@@ -125,6 +132,7 @@ def capture_review_plan(
     *,
     current_request_id: UUID,
     options: DestinationOptions = DestinationOptions(),
+    acknowledged_incomplete_import_ids: tuple[UUID, ...] = (),
     observe: PathObserver | None = None,
 ) -> DestinationPlan:
     """Acquire the stronger baseline before showing a destination plan for review."""
@@ -133,6 +141,7 @@ def capture_review_plan(
         evaluation,
         current_request_id=current_request_id,
         options=options,
+        acknowledged_incomplete_import_ids=acknowledged_incomplete_import_ids,
         observe=observe if observe is not None else _native_observer(options),
     )
 
@@ -153,6 +162,7 @@ def _initial_result(request: PreflightRequest) -> PreflightResult:
         ),
         request.snapshot.incomplete_imports,
         PreflightDiagnostic("input_unvalidated"),
+        acknowledged_incomplete_import_ids=request.acknowledged_incomplete_import_ids,
     )
 
 
@@ -213,8 +223,17 @@ def run_preflight(
 
     try:
         progress(PreflightStage.INPUT)
-        if snapshot.has_incomplete_imports:
-            return stop(PreflightState.INCOMPLETE_IMPORT, "incomplete_import")
+        incomplete_ids = tuple(
+            session.session_id for session in snapshot.incomplete_imports
+        )
+        if (
+            incomplete_ids != request.acknowledged_incomplete_import_ids
+            or review.acknowledged_incomplete_import_ids != incomplete_ids
+        ):
+            return stop(
+                PreflightState.INCOMPLETE_IMPORT,
+                "incomplete_import_acknowledgment_required",
+            )
         if not _review_matches(request, check):
             return stop(PreflightState.STALE_INPUT, "review_context_mismatch")
         for entry, row in zip(snapshot.entries, review.entries, strict=True):
@@ -294,6 +313,7 @@ def run_preflight(
             fresh,
             current_request_id=request.request_id,
             options=request.options,
+            acknowledged_incomplete_import_ids=request.acknowledged_incomplete_import_ids,
             observe=observe,
         )
         check()
@@ -417,8 +437,13 @@ def run_preflight(
 
 def _review_matches(request: PreflightRequest, check: Callable[[], None]) -> bool:
     plan, snapshot, evaluated = request.reviewed_plan, request.snapshot, request.reviewed_evaluation
+    incomplete_ids = tuple(
+        session.session_id for session in snapshot.incomplete_imports
+    )
     if (
         snapshot.capabilities.is_importing
+        or request.acknowledged_incomplete_import_ids != incomplete_ids
+        or plan.acknowledged_incomplete_import_ids != incomplete_ids
         or plan.excluded_entry_ids
         or request.request_id == request.current_evaluation_id
         or (plan.collection_id, plan.collection_revision)
@@ -460,6 +485,7 @@ def _review_matches(request: PreflightRequest, check: Callable[[], None]) -> boo
             evaluated,
             current_request_id=request.current_evaluation_id,
             options=request.options,
+            acknowledged_incomplete_import_ids=request.acknowledged_incomplete_import_ids,
             observe=recorded,
         )
         == plan

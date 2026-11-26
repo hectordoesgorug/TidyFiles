@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 
+import tidyfiles.app as app_module
 from tidyfiles.app import _FORMAT_PRESETS, create_main_window
 from tidyfiles.config import default_config
 from tidyfiles.filename_evaluator import FileEvaluationContext, evaluate_batch
@@ -23,13 +24,20 @@ from tidyfiles.format_reference import (
 
 @pytest.fixture(scope="module")
 def runtime(tmp_path_factory):
-    config_path = tmp_path_factory.mktemp("filename-preview") / "config.json"
-    root = create_main_window(default_config(), config_path)
-    root.update()
-    app = root.application
-    yield root, app, config_path
-    if not app._closing:
-        app.close()
+    from tidyfiles.transaction_journal import JournalStore
+
+    directory = tmp_path_factory.mktemp("filename-preview")
+    (directory / "local").mkdir()
+    journals = JournalStore(app_dir=directory / "app", local_app_data=directory / "local")
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+        config_path = directory / "config.json"
+        root = create_main_window(default_config(), config_path)
+        root.update()
+        app = root.application
+        yield root, app, config_path
+        if not app._closing:
+            app.close()
 
 
 def _pump_until(root, predicate, timeout: float = 10) -> None:

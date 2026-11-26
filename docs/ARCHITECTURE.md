@@ -363,11 +363,10 @@ only changed row-number, preview, status, and tag cells. Preview filename and
 problem-row IDs avoid repeated full-row reads when clearing results. Identical
 selection restoration and already-applied preview clearing are skipped.
 
-The common status and progress area reports evaluation stages only when import
-work is idle. Processing controls remain disabled. A valid preview does not
-prove complete discovery, destination availability, collision safety, current
-source identity, duplicate-analysis readiness, or authorization to change
-files.
+The common status and progress area reports evaluation and processing stages.
+Process is enabled only for the current valid Bulk Rename evaluation. It opens
+destination review, then runs fresh preflight and the journaled rename executor
+in background workers. Deduplicate and Repack remain disabled.
 
 An evaluation marked valid establishes that the filename expression was
 evaluated and each filename component passed validation. Destination planning,
@@ -524,9 +523,9 @@ vacancies. Only fully verified outcomes retire the record. Results include
 per-entry outcomes, observed locations, and the transaction ID.
 
 The standalone service returns results without changing the working collection.
-It reports correlated progress without calling Tk. M3-G supplies confirmation,
-GUI scheduling, and completion updates. The M3-F recovery guard protects paths
-and identities needed by unresolved transactions.
+It reports correlated progress without calling Tk. The M3-G GUI supplies
+destination review, scheduling, and collection completion updates. The M3-F
+recovery guard protects paths and identities needed by unresolved transactions.
 
 ## Standalone managed Trash
 
@@ -555,15 +554,17 @@ outcomes, and the transaction ID. Journals retire only after verification
 of the complete scope. Recovery inspection distinguishes retained cross-volume
 copy identity from source identity. DD-087 defines Trash clearing by recognized
 batches under the dedicated managed Trash directory; per-file ownership
-records are not required. M3-G handles background invocation and collection
-updates. M4 supplies duplicate and Purge eligibility and authorization. The
-desktop processing controls remain disabled.
+records are not required. M3-G connects confirmed manual clearing and normal
+exit Auto-Clear Trash to the service. M4 supplies duplicate and Purge eligibility
+and authorization. Duplicate and Repack controls remain disabled.
 
 ## Recovery and cleanup services
 
 `RecoveryInspector` combines journal discovery with current no-follow
-observations while preserving recorded expectations. It is read-only and does
-not show a startup dialog or launch Explorer. `RecoveryGuard` protects
+observations while preserving recorded expectations. The service is read-only;
+the GUI displays unresolved transactions and relevant paths at startup and can
+open a selected location in File Explorer without resolving the transaction.
+`RecoveryGuard` protects
 unresolved source, destination, staging, temporary, Trash-copy, and filesystem
 identity dependencies at the rename and Trash boundaries.
 
@@ -595,10 +596,34 @@ timestamp batches; entries inside them need no separate ownership records.
 Files are deleted individually and directories are removed only after they are
 empty, deepest first. Unresolved recovery paths, links, failed or unverifiable
 entries, and unrecognized content directly under Trash are preserved. Manual
-clearing requires explicit authorization. Auto-Clear Trash remains a separate,
-default-off setting and can run only on normal exit while the coordinator is
-idle. No ownership manifest was added. Confirmation UI and normal-exit wiring
-remain deferred to M3-G.
+clearing requires explicit authorization. The GUI requests confirmation before
+manual clearing. Auto-Clear Trash remains a separate, default-off setting and
+runs only on normal exit while the coordinator is idle. No ownership manifest
+was added.
+
+## GUI rename integration
+
+The Process control consumes the current filename evaluation and collection
+snapshot, shows the complete destination plan, and asks for confirmation before
+preflight. A collision-only subset is offered only when independent operations
+remain valid; confirming it preserves the original reviewed candidate names.
+Fresh preflight changes return to destination review. Incomplete import sessions
+require explicit acknowledgment and remain visible in the plan. Filename-format
+errors block the complete batch.
+
+Preflight and the journaled Windows rename executor run outside Tk. Preparation
+can be canceled; active modification cannot. Conflicting collection and
+destination controls are disabled during processing, and normal close waits
+until filesystem changes finish. Successfully renamed and unchanged entries
+leave the working collection. Failed and excluded entries remain, with verified
+paths and diagnostics refreshed where available. Auto-clean receives the
+original snapshot and successful output paths and runs only after complete
+success.
+
+The GUI also connects read-only startup recovery inspection, confirmed manual
+Trash clearing, and the independent Auto-Clear Trash setting for normal exit.
+These controls do not implement duplicate analysis, repacking, or M4
+verification.
 
 ## Tests and CI
 
@@ -613,8 +638,7 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Startup recovery workflows, duplicate verification, and
-repacking are future components.
+Duplicate verification and repacking are future components.
 
 ## Deferred package restructuring
 

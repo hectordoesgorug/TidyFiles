@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import PureWindowsPath
-from typing import Sequence
+from typing import Mapping, Sequence
 from uuid import UUID, uuid4
 
 from tidyfiles.sorting import (
@@ -533,6 +533,58 @@ class WorkingCollection:
         ]
         self._revision += 1
         return removed
+
+    def update_entry_paths(self, paths: Mapping[UUID, str]) -> tuple[CollectionEntry, ...]:
+        """Refresh retained entries after an operation verified their current paths."""
+        self._require_idle("update entry paths")
+        if not paths:
+            return ()
+        replacements = {}
+        for entry_id, path in paths.items():
+            current = self._entries.get(entry_id)
+            if current is None:
+                raise CollectionError(f"Unknown collection entry: {entry_id}")
+            if not isinstance(path, str) or not path:
+                raise ValueError("updated paths must be nonempty strings")
+            filename = ntpath.basename(path.rstrip("\\/"))
+            if not filename:
+                raise ValueError("updated paths must identify files")
+            parent = ntpath.dirname(path.rstrip("\\/")) or None
+            replacements[entry_id] = replace(
+                current,
+                source_path=path,
+                normalized_path_key=normalize_windows_path(path),
+                original_filename=filename,
+                source_extension=ntpath.splitext(filename)[1],
+                parent_path=parent,
+                parent_name=_path_name(parent) if parent is not None else None,
+                parent_identity=normalize_windows_path(parent) if parent is not None else None,
+            )
+
+        occupied = {
+            entry.normalized_path_key
+            for entry_id, entry in self._entries.items()
+            if entry_id not in replacements
+        }
+        for entry in replacements.values():
+            if entry.normalized_path_key in occupied:
+                raise CollectionError(f"Updated path is already listed: {entry.source_path}")
+            occupied.add(entry.normalized_path_key)
+
+        changed = tuple(
+            entry for entry_id, entry in replacements.items()
+            if self._entries[entry_id] != entry
+        )
+        if not changed:
+            return ()
+        for entry in changed:
+            entry_id = entry.entry_id
+            current = self._entries[entry_id]
+            self._path_entries.pop(current.normalized_path_key)
+            self._entries[entry_id] = entry
+            self._path_entries[entry.normalized_path_key] = entry.entry_id
+        self._revision += 1
+        return changed
 
     def clear_all(self) -> bool:
         """Clear collection-owned in-memory state; retain sort preferences."""
