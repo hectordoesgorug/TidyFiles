@@ -64,8 +64,8 @@ not implemented.
 | `src/tidyfiles/transaction_record.py` | Versioned transaction records, Windows identity encoding, and finalization evidence validation. |
 | `src/tidyfiles/transaction_journal.py` | Pinned journal sessions, atomic persistence, the independent recovery locator, and read-only discovery. |
 | `src/tidyfiles/recovery.py` | Read-only current recovery observations and path/identity overlap protection for modifying services. |
-| `src/tidyfiles/cleanup.py` | Snapshot-scoped Auto-clean, temporary artifact cleanup, and conservative managed Trash inspection. |
-| `src/tidyfiles/windows_cleanup.py` | Identity-bound Windows deletion of a single file or a verified empty directory. |
+| `src/tidyfiles/cleanup.py` | Snapshot-scoped Auto-clean, temporary artifact cleanup, and guarded managed Trash clearing. |
+| `src/tidyfiles/windows_cleanup.py` | No-reparse directory enumeration and identity-bound deletion of files or verified empty directories. |
 | `src/tidyfiles/modifying_jobs.py` | Exclusive job reservation and preparation, modification, cancellation, and closure state. |
 | `src/tidyfiles/rename_executor.py` | Authorized scope binding, sequential dependency execution, journal checkpoints, and verified results. |
 | `src/tidyfiles/windows_rename.py` | Handle-relative, non-overwriting Windows rename and creation-time preservation. |
@@ -553,11 +553,11 @@ the original object identity.
 The service stops at the first failure and returns per-entry paths,
 outcomes, and the transaction ID. Journals retire only after verification
 of the complete scope. Recovery inspection distinguishes retained cross-volume
-copy identity from source identity. M3-F Trash inspection preserves content
-whose per-file ownership cannot be established after successful journals are
-retired. M3-G handles background invocation and collection updates. M4 supplies
-duplicate and Purge eligibility and authorization. The desktop processing
-controls remain disabled.
+copy identity from source identity. DD-087 defines Trash clearing by recognized
+batches under the dedicated managed Trash directory; per-file ownership
+records are not required. M3-G handles background invocation and collection
+updates. M4 supplies duplicate and Purge eligibility and authorization. The
+desktop processing controls remain disabled.
 
 ## Recovery and cleanup services
 
@@ -589,13 +589,16 @@ relationships are rechecked before native, nonrecursive deletion. The service
 can run inside its owning job; independent requests reserve the cleanup job
 slot.
 
-`TrashClearService` reports managed Trash contents but currently finds no
-eligible files. Successful M3-E Trash journals are retired and leave no
-per-file ownership record, so a batch name cannot authorize permanent
-deletion. Unresolved, retained, linked, unknown, and unverifiable contents
-remain untouched. No Trash ownership manifest was added. Auto-clean and
-Auto-Clear Trash settings are separate and default off; startup and normal-exit
-wiring, confirmation UI, and cleanup controls remain deferred to M3-G.
+`TrashClearService` clears files inside recognized batches under the dedicated
+managed Trash directory. It accepts M3-E timestamp-and-UUID batches and legacy
+timestamp batches; entries inside them need no separate ownership records.
+Files are deleted individually and directories are removed only after they are
+empty, deepest first. Unresolved recovery paths, links, failed or unverifiable
+entries, and unrecognized content directly under Trash are preserved. Manual
+clearing requires explicit authorization. Auto-Clear Trash remains a separate,
+default-off setting and can run only on normal exit while the coordinator is
+idle. No ownership manifest was added. Confirmation UI and normal-exit wiring
+remain deferred to M3-G.
 
 ## Tests and CI
 

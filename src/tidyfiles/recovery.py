@@ -273,8 +273,10 @@ class RecoveryGuard:
         observations: tuple[PathObservation, ...] = (),
         *,
         ignore_transaction_id: UUID | None = None,
+        inspection: RecoveryInspection | None = None,
     ) -> None:
-        inspection = RecoveryInspector(self.journals).inspect()
+        if inspection is None:
+            inspection = RecoveryInspector(self.journals).inspect()
         if inspection.has_incomplete_discovery():
             raise RecoveryConflict(
                 "Recovery evidence is incomplete, so independence cannot be verified."

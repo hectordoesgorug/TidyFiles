@@ -309,14 +309,17 @@ nonrecursive deletion, and reports cleanup failures separately. Callers provide
 the successful operation's output paths; matching outputs are preserved even
 when their names match the cleanup allowlist.
 
-Manual Clear Trash requires explicit authorization; Auto-Clear Trash is an
-independent default-off setting intended only for normal exit while idle. Both
-use the same read-only ownership inspection. Successful M3-E transactions retire
-their journals, so existing batches have no durable per-file ownership proof.
-The service therefore reports their contents as unverifiable and preserves
-them. It does not infer ownership from a batch name or add a manifest. GUI
-confirmation, startup notification, Explorer actions, and normal-exit wiring
-remain unimplemented.
+DD-087 defines eligible Trash ownership by the dedicated managed Trash
+directory and its recognized batch directories. Clear accepts the M3-E
+`YYYYMMDDTHHMMSSZ-<UUID>` batches and legacy `YYYYMMDD_HHMMSS` batches; contents
+inside those boundaries do not require per-file ownership records. It deletes
+files individually, then removes empty directories deepest first. It preserves
+unrecognized root content, unresolved recovery dependencies, links, and
+inaccessible or failed entries. Manual Clear Trash requires explicit
+authorization; Auto-Clear Trash is an independent default-off setting intended
+only for normal exit while idle. Both use the same inspection and deletion
+safeguards. No ownership manifest was added. GUI confirmation, startup
+notification, Explorer actions, and normal-exit wiring remain unimplemented.
 
 ## Planned safety components
 
@@ -327,7 +330,7 @@ The following are not implemented:
 - Startup recovery notification, Explorer actions, and recovery UI.
 - Safe original retention and verified installation during repacking.
 - Duplicate verification before any deletion action.
-- Verified manual and automatic cleanup of managed Trash.
+- Trash-clear confirmation UI and normal-exit invocation.
 - Operator-directed resolution of interrupted transactions.
 
 Future filesystem work must independently validate a complete destination plan,

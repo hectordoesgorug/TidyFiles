@@ -1,5 +1,12 @@
 # TidyFiles Development Guidelines
 
+## Standing Development Instruction
+
+Do not overengineer beyond what is specified. TidyFiles is primarily a refactor
+and redesign of a fully functional legacy application. Preserve established
+functionality, and do not introduce additional requirements, abstractions or
+safeguards without concrete justification.
+
 ## Project
 
 TidyFiles is a Windows desktop application for file organization. The approved

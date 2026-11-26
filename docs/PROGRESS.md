@@ -52,7 +52,7 @@ remain disabled.
 | M3-C | Complete | Durable journals, persistent recovery locator, recovery discovery, and modifying-job coordination. |
 | M3-D | Complete | Standalone, journaled, handle-relative rename and same-volume Single Folder execution. |
 | M3-E | Complete | Standalone recoverable deletion, guarded cross-volume copying, and managed Trash discovery exclusions. |
-| M3-F | Implemented | Read-only recovery observations, overlap guards, temporary artifact cleanup, Auto-clean, and conservative Trash-clear inspection. |
+| M3-F | Implemented | Read-only recovery observations, overlap guards, temporary artifact cleanup, Auto-clean, and guarded managed Trash clearing (DD-087). |
 | M4 | Planned | Duplicate analysis and verification. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
@@ -812,16 +812,20 @@ only case-insensitive exact matches for `Thumbs.db`, `.DS_Store`, and
 files, managed and protected system paths, links, and unresolved recovery
 dependencies. Callers must pass completed operation output paths; those paths
 remain protected even when they match the allowlist. Manual and automatic Trash
-clearing share a read-only inspection service. Since successful M3-E operations
-retire their journals and leave no per-file ownership evidence, existing batch
-contents are reported as unverifiable and remain in place. No manifest or
-batch-name deletion policy was introduced.
+clearing share an inspection service. DD-087 makes the dedicated managed Trash
+directory and recognized batch directories the deletion boundary, so eligible
+batch contents do not require per-file ownership records. M3-E and legacy
+timestamp batches are cleared by deleting files individually and removing empty
+directories deepest first. Unknown root contents, unresolved recovery
+dependencies, links, and failed entries remain. No ownership manifest was
+introduced.
 
 The two cleanup settings remain independent and default off. Cleanup errors
-are returned separately from primary-operation results. No GUI activation,
-startup recovery dialog, Explorer action, or normal-exit cleanup wiring was
-added; those integrations remain for M3-G. The desktop processing controls
-remain disabled.
+are returned separately from primary-operation results. Manual Clear Trash
+requires explicit authorization, while Auto-Clear Trash requires a normal exit
+and an idle coordinator. GUI confirmation, startup recovery dialog, Explorer
+action, and normal-exit invocation remain for M3-G. The desktop processing
+controls remain disabled.
 
 M3-G must pass successful output paths with the pre-operation snapshot when it
 invokes Auto-clean. This prevents a newly renamed file such as `Thumbs.db` from
@@ -841,7 +845,27 @@ launcher initially could not access its configured base interpreter
 denied). The same Python 3.13.17 environment ran the checks through the
 approved execution path; no dependencies or interpreters were installed or
 changed. These checks do not verify M3-G GUI integration or Trash deletion,
-which remains disabled without durable per-file ownership evidence.
+which has no GUI or normal-exit invocation yet.
+
+### M3-F1 — Managed Trash clearing under DD-087
+
+DD-087 supersedes M3-F's earlier per-file ownership restriction. Clear now
+accepts only recognized batches under the dedicated application Trash directory:
+M3-E timestamp-and-UUID batches and legacy timestamp batches. It deletes
+eligible files through identity-bound handles and removes empty directories
+deepest first. Unknown root entries, unresolved recovery dependencies, links,
+and failed or unverifiable items remain. The service reserves the existing
+cleanup job slot, requires explicit manual authorization, and gates automatic
+clearing on normal exit, the independent default-off setting, and an idle
+coordinator. GUI confirmation and normal-exit wiring remain M3-G work.
+
+Verification used Windows Python 3.13.17. The focused cleanup, recovery,
+managed Trash, rename executor, transaction journal, and configuration tests
+passed: 164 passed, zero skipped. The full suite passed 629 tests, zero skipped.
+Ruff, `compileall -q src tests`, `git diff --check`, and
+`git diff --cached --check` passed. The tests used isolated temporary fixtures;
+no real Trash contents were cleared. M3-G GUI confirmation and normal-exit
+integration were not verified.
 
 ## M6.1 — Package Restructuring and Architectural Cleanup
 

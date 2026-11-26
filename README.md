@@ -45,9 +45,10 @@ inspection with overlap guards for rename and Trash operations. Controlled
 callers can use the standalone Windows rename executor with an authorized
 scope and current preflight, or the managed Trash service with explicitly
 authorized source paths and current identity evidence. Cleanup services are
-available to controlled callers, but Trash clearing preserves files without
-per-file ownership evidence. Completed Trash files can be retrieved in
-Explorer. Duplicate analysis and repacking are not implemented, and the
+available to controlled callers. Trash clearing is limited to recognized
+application-managed batches and preserves unresolved recovery files, links and
+unrecognized content. GUI confirmation and normal-exit wiring remain
+unimplemented. Duplicate analysis and repacking are not implemented, and the
 desktop processing controls remain disabled.
 
 ## Run locally

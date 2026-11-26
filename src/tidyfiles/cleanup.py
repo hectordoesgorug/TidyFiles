@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import ntpath
 import os
+import re
 import stat
 from dataclasses import dataclass
 from enum import StrEnum
@@ -23,13 +25,17 @@ from tidyfiles.recovery import RecoveryConflict, RecoveryGuard
 from tidyfiles.storage import managed_trash_path
 from tidyfiles.transaction_journal import JournalSession, JournalStore
 from tidyfiles.transaction_record import EntryOutcome, OperationType, TransactionState
-from tidyfiles.windows_cleanup import remove_empty_directory, remove_file
+from tidyfiles.windows_cleanup import directory_entries, remove_empty_directory, remove_file
 
 _LOG = logging.getLogger(__name__)
 _REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_TRASH_BATCH_NAME = re.compile(
+    r"(?:[0-9]{8}_[0-9]{6}|[0-9]{8}T[0-9]{6}Z-[0-9a-f]{32})", re.I
+)
 
 
 class CleanupStatus(StrEnum):
+    ELIGIBLE = "eligible"
     DELETED = "deleted"
     SKIPPED = "skipped"
     FAILED = "failed"
@@ -453,43 +459,94 @@ class TrashClearResult:
     cleanup: CleanupResult
 
 
-class TrashClearService:
-    """Inspect and clear only Trash files with durable per-file ownership evidence."""
+@dataclass(frozen=True, slots=True)
+class _TrashCandidate:
+    path: str
+    observation: PathObservation
+    is_directory: bool
 
-    # shortcut: retired Trash journals leave no ownership proof; names alone are insufficient.
+
+class TrashClearService:
+    """Clear contents only within recognized application-managed Trash batches."""
 
     def __init__(self, coordinator: ModifyingJobCoordinator, journals: JournalStore) -> None:
         self.coordinator = coordinator
         self.journals = journals
 
     def inspect(self) -> TrashInspectionSummary:
+        summary, _ = self._inspect()
+        return summary
+
+    def _inspect(self) -> tuple[TrashInspectionSummary, tuple[_TrashCandidate, ...]]:
         root = managed_trash_path()
         if root is None or os.name != "nt":
-            return TrashInspectionSummary(0, 0, (), "The managed Trash location is unavailable")
+            return (
+                TrashInspectionSummary(0, 0, (), "The managed Trash location is unavailable"),
+                (),
+            )
         if is_protected_system_path(str(root)):
-            return TrashInspectionSummary(
-                0, 0, (), "Managed Trash is inside a protected system path"
+            return (
+                TrashInspectionSummary(0, 0, (), "Managed Trash is inside a protected system path"),
+                (),
             )
         observer = WindowsPathObserver(capture_identity=True, allow_managed_trash=True)
         root_observation = observer.observe_directory(str(root))
         if root_observation.occupancy is not PathOccupancy.DIRECTORY:
             if root_observation.occupancy is PathOccupancy.VACANT:
-                return TrashInspectionSummary(0, 0, (), "Managed Trash does not exist")
-            return TrashInspectionSummary(
-                0, 0, (), root_observation.reason or "Managed Trash is inaccessible or unsafe"
+                return TrashInspectionSummary(0, 0, (), "Managed Trash does not exist"), ()
+            return (
+                TrashInspectionSummary(
+                    0, 0, (), root_observation.reason or "Managed Trash is inaccessible or unsafe"
+                ),
+                (),
             )
-        retained = self.journals.inspect_recovery()
-        verified = set()
-        for transaction in retained.transactions:
-            for entry in transaction.entries:
-                for observation in entry.paths:
-                    if (
-                        observation.role == "verified_trash_copy"
-                        and observation.matches_recorded_identity
-                    ):
-                        verified.add(path_key(observation.path))
+        assert root_observation.object_metadata is not None
         items = []
-        stack = [(str(root), root_observation)]
+        files: list[_TrashCandidate] = []
+        directories: dict[str, _TrashCandidate] = {}
+        recovery = self.journals.inspect_recovery()
+        guard = RecoveryGuard(self.journals)
+        root_key = path_key(str(root))
+        try:
+            root_entries = directory_entries(observer, str(root), root_observation)
+        except OSError as error:
+            return TrashInspectionSummary(0, 0, (), str(error)), ()
+        if not _same_directory(root_observation, observer.observe_directory(str(root))):
+            return (
+                TrashInspectionSummary(
+                    0, 0, (CleanupItem(str(root), CleanupStatus.SKIPPED, "directory_changed"),)
+                ),
+                (),
+            )
+
+        stack = []
+        for name, attributes in root_entries:
+            path = ntpath.join(str(root), name)
+            if not is_within(path_key(path), root_key):
+                items.append(CleanupItem(path, CleanupStatus.SKIPPED, "outside_trash_boundary"))
+                continue
+            if attributes & _REPARSE:
+                items.append(CleanupItem(path, CleanupStatus.SKIPPED, "linked_entry"))
+                continue
+            if (
+                not attributes & stat.FILE_ATTRIBUTE_DIRECTORY
+                or not _TRASH_BATCH_NAME.fullmatch(name)
+            ):
+                items.append(
+                    CleanupItem(path, CleanupStatus.SKIPPED, "outside_recognized_batch")
+                )
+                continue
+            observed = observer.observe_directory(path)
+            if (
+                observed.occupancy is not PathOccupancy.DIRECTORY
+                or observed.parent_identity != root_observation.object_metadata.identity
+                or observed.volume_guid != root_observation.volume_guid
+            ):
+                items.append(CleanupItem(path, CleanupStatus.SKIPPED, "unsafe_batch"))
+                continue
+            directories[path_key(path)] = _TrashCandidate(path, observed, True)
+            stack.append((path, observed))
+
         while stack:
             directory, expected_directory = stack.pop()
             current_directory = observer.observe_directory(directory)
@@ -498,50 +555,92 @@ class TrashClearService:
                 continue
             assert current_directory.object_metadata is not None
             try:
-                with os.scandir(directory) as entries:
-                    for entry in entries:
-                        path = entry.path
-                        try:
-                            info = entry.stat(follow_symlinks=False)
-                        except OSError as error:
-                            items.append(CleanupItem(path, CleanupStatus.SKIPPED, str(error)))
-                            continue
-                        attributes = getattr(info, "st_file_attributes", 0)
-                        if stat.S_ISLNK(info.st_mode) or attributes & _REPARSE:
-                            items.append(CleanupItem(path, CleanupStatus.SKIPPED, "linked_entry"))
-                            continue
-                        if stat.S_ISDIR(info.st_mode):
-                            observed = observer.observe_directory(path)
-                            if (
-                                observed.occupancy is PathOccupancy.DIRECTORY
-                                and observed.parent_identity
-                                == current_directory.object_metadata.identity
-                                and observed.volume_guid == current_directory.volume_guid
-                            ):
-                                stack.append((path, observed))
-                            items.append(
-                                CleanupItem(
-                                    path, CleanupStatus.SKIPPED, "batch_ownership_unverifiable"
-                                )
-                            )
-                            continue
-                        observed = observer(path)
-                        if observed.parent_identity != current_directory.object_metadata.identity:
-                            items.append(
-                                CleanupItem(path, CleanupStatus.SKIPPED, "directory_changed")
-                            )
-                            continue
-                        reason = (
-                            "recovery_dependent"
-                            if path_key(path) in verified
-                            else "batch_ownership_unverifiable"
-                        )
-                        if observed.occupancy is not PathOccupancy.FILE:
-                            reason = observed.reason or "file_unverifiable"
-                        items.append(CleanupItem(path, CleanupStatus.SKIPPED, reason))
+                children = directory_entries(observer, directory, current_directory)
             except OSError as error:
                 items.append(CleanupItem(directory, CleanupStatus.FAILED, str(error)))
-        return TrashInspectionSummary(0, 0, tuple(items))
+                continue
+            if not _same_directory(expected_directory, observer.observe_directory(directory)):
+                items.append(CleanupItem(directory, CleanupStatus.SKIPPED, "directory_changed"))
+                continue
+            for name, attributes in children:
+                path = ntpath.join(directory, name)
+                if not is_within(path_key(path), root_key):
+                    items.append(CleanupItem(path, CleanupStatus.SKIPPED, "outside_trash_boundary"))
+                    continue
+                if attributes & _REPARSE:
+                    items.append(CleanupItem(path, CleanupStatus.SKIPPED, "linked_entry"))
+                    continue
+                if is_protected_system_path(path):
+                    items.append(CleanupItem(path, CleanupStatus.SKIPPED, "protected_system_path"))
+                    continue
+                if attributes & stat.FILE_ATTRIBUTE_DIRECTORY:
+                    observed = observer.observe_directory(path)
+                    if (
+                        observed.occupancy is not PathOccupancy.DIRECTORY
+                        or observed.parent_identity != current_directory.object_metadata.identity
+                        or observed.volume_guid != root_observation.volume_guid
+                    ):
+                        items.append(CleanupItem(path, CleanupStatus.SKIPPED, "unsafe_directory"))
+                        continue
+                    directories[path_key(path)] = _TrashCandidate(path, observed, True)
+                    stack.append((path, observed))
+                    continue
+                observed = observer(path)
+                if (
+                    observed.occupancy is not PathOccupancy.FILE
+                    or observed.parent_identity != current_directory.object_metadata.identity
+                    or observed.volume_guid != root_observation.volume_guid
+                    or observed.object_metadata is None
+                ):
+                    items.append(
+                        CleanupItem(path, CleanupStatus.SKIPPED, observed.reason or "unsafe_file")
+                    )
+                    continue
+                candidate = _TrashCandidate(path, observed, False)
+                try:
+                    guard.check((path,), (observed,), inspection=recovery)
+                except RecoveryConflict:
+                    reason = (
+                        "recovery_scope_unverifiable"
+                        if recovery.has_incomplete_discovery()
+                        else "recovery_dependent"
+                    )
+                    items.append(CleanupItem(path, CleanupStatus.SKIPPED, reason))
+                    continue
+                files.append(candidate)
+                items.append(CleanupItem(path, CleanupStatus.ELIGIBLE))
+
+        candidates = [*files, *directories.values()]
+        for candidate in directories.values():
+            try:
+                guard.check(
+                    (candidate.path,),
+                    (candidate.observation,),
+                    inspection=recovery,
+                )
+            except RecoveryConflict:
+                reason = (
+                    "recovery_scope_unverifiable"
+                    if recovery.has_incomplete_discovery()
+                    else "recovery_dependent"
+                )
+                items.append(CleanupItem(candidate.path, CleanupStatus.SKIPPED, reason))
+                candidates.remove(candidate)
+        summary = TrashInspectionSummary(
+            len(files),
+            sum(item.observation.object_metadata.size_bytes for item in files),
+            tuple(items),
+        )
+        ordered = tuple(
+            sorted(
+                candidates,
+                key=lambda item: (
+                    item.is_directory,
+                    -item.path.count("\\") if item.is_directory else 0,
+                ),
+            )
+        )
+        return summary, ordered
 
     def clear(
         self,
@@ -550,7 +649,7 @@ class TrashClearService:
         auto_clear_enabled: bool = False,
         normal_exit: bool = False,
     ) -> TrashClearResult:
-        inspection = self.inspect()
+        inspection, candidates = self._inspect()
         if normal_exit:
             if not auto_clear_enabled:
                 return TrashClearResult(
@@ -566,9 +665,87 @@ class TrashClearService:
                 inspection,
                 CleanupResult(detail="Explicit authorization is required to clear Trash"),
             )
-        result = CleanupResult(detail="No Trash items have verifiable per-file ownership")
-        _log_cleanup("Trash clear", result)
-        return TrashClearResult(inspection, result)
+        if inspection.detail:
+            return TrashClearResult(inspection, CleanupResult(detail=inspection.detail))
+        if not candidates:
+            return TrashClearResult(inspection, CleanupResult(detail="No eligible Trash items"))
+        try:
+            job_id = self.coordinator.reserve(OperationType.CLEANUP).job_id
+        except Exception as error:
+            return TrashClearResult(
+                inspection,
+                CleanupResult(detail=f"Trash clear could not reserve a cleanup job: {error}"),
+            )
+        try:
+            root = managed_trash_path()
+            if root is None:
+                return TrashClearResult(
+                    inspection, CleanupResult(detail="The managed Trash location is unavailable")
+                )
+            observer = WindowsPathObserver(capture_identity=True, allow_managed_trash=True)
+            items = []
+            guard = RecoveryGuard(self.journals)
+            for candidate in candidates:
+                if not is_within(path_key(candidate.path), path_key(str(root))):
+                    items.append(
+                        CleanupItem(candidate.path, CleanupStatus.SKIPPED, "outside_trash_boundary")
+                    )
+                    continue
+                try:
+                    current = (
+                        observer.observe_directory(candidate.path)
+                        if candidate.is_directory
+                        else observer(candidate.path)
+                    )
+                    matches = (
+                        _same_directory(candidate.observation, current)
+                        if candidate.is_directory
+                        else current == candidate.observation
+                    )
+                    if not matches:
+                        items.append(
+                            CleanupItem(candidate.path, CleanupStatus.SKIPPED, "entry_changed")
+                        )
+                        continue
+                    guard.check((candidate.path,), (current,))
+                    if candidate.is_directory:
+                        if directory_entries(observer, candidate.path, current):
+                            items.append(
+                                CleanupItem(
+                                    candidate.path,
+                                    CleanupStatus.SKIPPED,
+                                    "directory_not_empty",
+                                )
+                            )
+                            continue
+                        remove_empty_directory(observer, candidate.path, current)
+                    else:
+                        remove_file(observer, candidate.path, current)
+                    items.append(CleanupItem(candidate.path, CleanupStatus.DELETED))
+                except RecoveryConflict as error:
+                    items.append(
+                        CleanupItem(candidate.path, CleanupStatus.SKIPPED, str(error))
+                    )
+                except OSError as error:
+                    if candidate.is_directory and (
+                        getattr(error, "winerror", None) == 145 or error.errno in {39, 66}
+                    ):
+                        items.append(
+                            CleanupItem(
+                                candidate.path,
+                                CleanupStatus.SKIPPED,
+                                "directory_not_empty",
+                            )
+                        )
+                    else:
+                        items.append(CleanupItem(candidate.path, CleanupStatus.FAILED, str(error)))
+                except Exception as error:
+                    items.append(CleanupItem(candidate.path, CleanupStatus.FAILED, str(error)))
+            result = CleanupResult(tuple(items))
+            _log_cleanup("Trash clear", result)
+            return TrashClearResult(inspection, result)
+        finally:
+            self.coordinator.finish(job_id)
 
 
 def _same_directory(expected: PathObservation, current: PathObservation) -> bool:

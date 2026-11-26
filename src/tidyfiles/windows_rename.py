@@ -162,7 +162,12 @@ def _handle_name(observer: WindowsPathObserver, handle: int) -> str:
 
 
 def _open_parent(
-    observer: WindowsPathObserver, stack: ExitStack, path: str, expected: PathObservation
+    observer: WindowsPathObserver,
+    stack: ExitStack,
+    path: str,
+    expected: PathObservation,
+    *,
+    directory_access: int = _DIRECTORY_ACCESS,
 ) -> int:
     drive, _ = ntpath.splitdrive(path)
     volume = observer._volume(drive)
@@ -174,7 +179,7 @@ def _open_parent(
         raise OSError(f"Parent identity is unavailable: {path}")
     handle = observer._open(
         drive + "\\",
-        _DIRECTORY_ACCESS,
+        directory_access,
         _DIRECTORY_SHARE,
         None,
         _OPEN_EXISTING,
@@ -209,7 +214,7 @@ def _open_parent(
         child, status = _open_relative(
             handle,
             part,
-            _DIRECTORY_ACCESS,
+            directory_access,
             _DIRECTORY_SHARE,
             directory=True,
         )
