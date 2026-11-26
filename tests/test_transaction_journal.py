@@ -28,7 +28,12 @@ from tidyfiles.destination_observation import (
 from tidyfiles.execution_preflight import PreflightRequest, capture_review_plan, run_preflight
 from tidyfiles.filename_integration import evaluate_collection
 from tidyfiles.modifying_jobs import ModifyingJobCoordinator, ModifyingJobError
-from tidyfiles.transaction_journal import JournalError, JournalStore, RecoveryStatus
+from tidyfiles.recovery import RecoveryConflict, RecoveryGuard
+from tidyfiles.transaction_journal import (
+    JournalError,
+    JournalStore,
+    RecoveryStatus,
+)
 from tidyfiles.transaction_record import (
     EntryOutcome,
     EntryVerification,
@@ -81,6 +86,87 @@ def _found(store):
     (transaction,) = discovered.transactions
     (location,) = transaction.locations
     return location
+
+
+def test_explicit_recovery_record_clearing_removes_only_selected_journals(
+    locations, tmp_path
+):
+    _, local, store = locations
+    source = tmp_path / "before.txt"
+    destination = tmp_path / "after.txt"
+    source.write_bytes(b"source remains")
+    destination.write_bytes(b"destination remains")
+    staging = tmp_path / "staging.tmp"
+    staging.write_bytes(b"staging remains")
+
+    selected_record = _record(tmp_path)
+    staged_entry = replace(
+        selected_record.entries[0], stage="before_staging", staging_path=str(staging)
+    )
+    selected = store.prepare(selected_record)
+    selected.start()
+    selected.checkpoint(staged_entry)
+    duplicate = local / "TidyFiles" / "journals" / selected.path.name
+    duplicate.parent.mkdir(parents=True)
+    duplicate.write_bytes(selected.path.read_bytes())
+
+    unrelated_directory = tmp_path / "unrelated"
+    unrelated_directory.mkdir()
+    unrelated = store.prepare(_record(unrelated_directory))
+    unrelated.start()
+
+    with pytest.raises(RecoveryConflict):
+        RecoveryGuard(store).check((str(source),))
+
+    result = store.clear_recovery_records(
+        (selected.record.transaction_id,), manually_authorized=True
+    )
+
+    assert result.cleared_ids == (selected.record.transaction_id,)
+    assert result.failures == ()
+    assert not selected.path.exists()
+    assert not duplicate.exists()
+    assert unrelated.path.exists()
+    assert _index(store) == {str(unrelated.record.transaction_id): str(unrelated.path)}
+    assert source.read_bytes() == b"source remains"
+    assert destination.read_bytes() == b"destination remains"
+    assert staging.read_bytes() == b"staging remains"
+    RecoveryGuard(store).check((str(source),))
+
+
+def test_recovery_record_clearing_removes_stale_locator_for_missing_journal(
+    locations, tmp_path
+):
+    _, _, store = locations
+    source = tmp_path / "before.txt"
+    source.write_bytes(b"manually removed before record dismissal")
+    session = store.prepare(_record(tmp_path))
+    session.start()
+    identifier = session.record.transaction_id
+    session.path.unlink()
+    source.unlink()
+
+    result = store.clear_recovery_records((identifier,), manually_authorized=True)
+
+    assert result.cleared_ids == (identifier,)
+    assert result.failures == ()
+    assert _index(store) == {}
+    assert store.discover().transactions == ()
+    assert not source.exists()
+
+
+def test_recovery_record_clearing_requires_explicit_authorization(locations, tmp_path):
+    _, _, store = locations
+    session = store.prepare(_record(tmp_path))
+    session.start()
+    identifier = session.record.transaction_id
+
+    result = store.clear_recovery_records((identifier,))
+
+    assert result.cleared_ids == ()
+    assert result.failures == ("Explicit authorization is required.",)
+    assert session.path.exists()
+    assert _index(store) == {str(identifier): str(session.path)}
 
 
 def _evidence(entry, outcome=VerifiedOutcome.DESTINATION, artifacts=()):

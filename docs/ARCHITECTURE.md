@@ -62,7 +62,7 @@ not implemented.
 | `src/tidyfiles/execution_preflight.py` | Review-time identity capture, full-batch refresh, and read-only identity, destination and exact-set revalidation. |
 | `src/tidyfiles/preflight_service.py` | A bounded preflight worker with replacement, cancellation, progress, and current-result tracking. |
 | `src/tidyfiles/transaction_record.py` | Versioned transaction records, Windows identity encoding, and finalization evidence validation. |
-| `src/tidyfiles/transaction_journal.py` | Pinned journal sessions, atomic persistence, the independent recovery locator, and read-only discovery. |
+| `src/tidyfiles/transaction_journal.py` | Pinned journal sessions, atomic persistence, the independent recovery locator, read-only discovery, and explicitly authorized recovery-record dismissal. |
 | `src/tidyfiles/recovery.py` | Read-only current recovery observations and path/identity overlap protection for modifying services. |
 | `src/tidyfiles/cleanup.py` | Snapshot-scoped Auto-clean, temporary artifact cleanup, and guarded managed Trash clearing. |
 | `src/tidyfiles/windows_cleanup.py` | No-reparse directory enumeration and identity-bound deletion of files or verified empty directories. |
@@ -571,6 +571,10 @@ and authorization. Duplicate and Repack controls remain disabled.
 observations while preserving recorded expectations. The service is read-only;
 the GUI displays unresolved transactions and relevant paths at startup and can
 open a selected location in File Explorer without resolving the transaction.
+Users can explicitly clear selected journal records and their locator entries
+after confirmation. This discards recovery information only; it does not touch
+recorded source, destination, or staging paths. Clearing is disabled during
+active processing, and the next inspection refreshes the displayed warnings.
 `RecoveryGuard` protects
 unresolved source, destination, staging, temporary, Trash-copy, and filesystem
 identity dependencies at the rename and Trash boundaries.
@@ -632,7 +636,10 @@ dialogs show the aggregate result and error instead of listing every unprocessed
 path.
 
 The GUI also connects read-only startup recovery inspection, confirmed manual
-Trash clearing, and the independent Auto-Clear Trash setting for normal exit.
+recovery-record dismissal, manual Trash clearing, and the independent
+Auto-Clear Trash setting for normal exit. Settings windows are raised and
+deiconified when opened or reused. A delayed visibility restore handles the
+temporary withdrawal used by CustomTkinter's Windows titlebar update.
 These controls do not implement duplicate analysis, repacking, or M4
 verification.
 

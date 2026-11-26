@@ -911,6 +911,103 @@ def test_startup_recovery_notice_shows_paths_stages_and_explorer_location(
         _close_app(app, root)
 
 
+def test_recovery_record_clearing_confirms_selection_and_refreshes_warnings(
+    tmp_path, monkeypatch
+) -> None:
+    if _run_gui_test_in_isolated_process(
+        "test_recovery_record_clearing_confirms_selection_and_refreshes_warnings"
+    ):
+        return
+    from tidyfiles.transaction_journal import JournalStore, RecoveryClearResult
+
+    (tmp_path / "local").mkdir()
+    journals = JournalStore(app_dir=tmp_path / "app", local_app_data=tmp_path / "local")
+    transaction_ids = (uuid4(), uuid4())
+    transactions = tuple(
+        SimpleNamespace(
+            transaction_id=identifier,
+            operation=SimpleNamespace(value="rename"),
+            journal_status=SimpleNamespace(value="unresolved"),
+            journal_locations=(),
+            entries=(),
+        )
+        for identifier in transaction_ids
+    )
+    first = SimpleNamespace(transactions=transactions, storage_issues=())
+    empty = SimpleNamespace(transactions=(), storage_issues=())
+
+    class Inspector:
+        def __init__(self, *_args):
+            self.calls = 0
+
+        def inspect(self):
+            self.calls += 1
+            return first if self.calls == 1 else empty
+
+    inspector = Inspector()
+    clears = []
+    confirmations = []
+    warnings = []
+    infos = []
+
+    def clear_records(selected, *, manually_authorized):
+        clears.append((selected, manually_authorized))
+        return RecoveryClearResult(selected, ())
+
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    monkeypatch.setattr(app_module, "RecoveryInspector", lambda *_args: inspector)
+    monkeypatch.setattr(journals, "clear_recovery_records", clear_records)
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "askyesno",
+        lambda title, message, **_options: confirmations.append((title, message)) or True,
+    )
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "showwarning",
+        lambda title, message, **_options: warnings.append((title, message)),
+    )
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "showinfo",
+        lambda title, message, **_options: infos.append((title, message)),
+    )
+    root = create_main_window(default_config(), tmp_path / "config.json")
+    app = root.application
+    try:
+        root.update()
+        _wait_for(root, lambda: app._recovery_dialog is not None)
+        app._recovery_transaction_list.selection_set(0, 1)
+        app._recovery_transaction_list.event_generate("<<ListboxSelect>>")
+        root.update()
+        assert app._recovery_clear_button.cget("state") == "normal"
+
+        app._set_processing_phase("rename_preparing", "Preparing")
+        assert app._recovery_clear_button.cget("state") == "disabled"
+        app._clear_selected_recovery_records()
+        assert clears == [] and confirmations == []
+        assert "while processing is active" in warnings[-1][1]
+
+        app._set_processing_phase("idle", "Ready")
+        assert app._recovery_clear_button.cget("state") == "normal"
+        app._clear_selected_recovery_records()
+        _wait_for(root, lambda: inspector.calls >= 2 and app._recovery_after is None)
+
+        assert clears == [(transaction_ids, True)]
+        assert confirmations[0][0] == "Clear Recovery Records"
+        assert "recovery information only" in confirmations[0][1]
+        assert "does not move, restore, or delete" in confirmations[0][1]
+        assert infos == [
+            (
+                "Recovery Records Cleared",
+                "Cleared 2 recovery record(s). Affected files were not changed.",
+            )
+        ]
+        assert app._recovery_dialog is None
+    finally:
+        _close_app(app, root)
+
+
 def test_modifying_phase_disables_conflicting_actions_and_blocks_cancel_and_close(
     tmp_path, monkeypatch
 ) -> None:
@@ -1087,14 +1184,30 @@ def test_settings_opens_repeatedly_after_switching_light_and_dark(tmp_path, monk
     app = root.application
     try:
         root.update()
-        for mode in ("Light", "Dark", "Light", "Dark"):
+        for mode, next_mode in (("Light", "Dark"), ("Dark", "Light")):
             app._set_appearance_mode(mode)
             root.update()
             app.settings_button.invoke()
             root.update()
+            time.sleep(0.03)
+            root.update()
             dialog = app.settings_window
-            assert dialog is not None and dialog.winfo_exists()
+            assert dialog is not None and dialog.state() == "normal"
             assert app.appearance_mode == mode
+            app._set_appearance_mode(next_mode)
+            time.sleep(0.03)
+            root.update()
+            assert dialog.state() == "normal"
+            # Simulate the hidden-but-existing window state after a theme change.
+            dialog.withdraw()
+            assert dialog.state() == "withdrawn"
+            root.update()
+            app.settings_button.invoke()
+            time.sleep(0.03)
+            root.update()
+            assert app.settings_window is dialog
+            assert dialog.state() == "normal"
+            assert app.appearance_mode == next_mode
             dialog.destroy()
             root.update()
     finally:

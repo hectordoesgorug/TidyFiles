@@ -77,6 +77,12 @@ class RecoveryDiscovery:
     storage_issues: tuple[RecoveryLocation, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RecoveryClearResult:
+    cleared_ids: tuple[UUID, ...] = ()
+    failures: tuple[str, ...] = ()
+
+
 def _absolute(path: str | Path) -> Path:
     return Path(os.path.abspath(path))
 
@@ -387,6 +393,54 @@ class JournalStore:
             return RecoveryDiscovery(
                 transactions, tuple(sorted(issues, key=lambda item: item.path))
             )
+
+    def clear_recovery_records(
+        self,
+        transaction_ids: tuple[UUID, ...],
+        *,
+        manually_authorized: bool = False,
+    ) -> RecoveryClearResult:
+        """Discard selected recovery evidence without touching recorded file paths."""
+        if not manually_authorized:
+            return RecoveryClearResult(failures=("Explicit authorization is required.",))
+        selected = tuple(dict.fromkeys(transaction_ids))
+        if not selected:
+            return RecoveryClearResult(failures=("No recovery records were selected.",))
+
+        with _LOCK:
+            locator, locator_exists = self._locator()
+            discovery = self.discover()
+            transactions = {item.transaction_id: item for item in discovery.transactions}
+            updated_locator = dict(locator)
+            cleared = []
+            failures = []
+            for identifier in selected:
+                transaction = transactions.get(identifier)
+                if transaction is None and identifier not in locator:
+                    continue
+                failed = False
+                locations = transaction.locations if transaction is not None else ()
+                for location in locations:
+                    try:
+                        _regular_file(location.path)
+                        location.path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError as error:
+                        failed = True
+                        failures.append(f"{identifier} · {location.path}: {error}")
+                if not failed:
+                    cleared.append(identifier)
+                    updated_locator.pop(identifier, None)
+
+            if updated_locator != locator:
+                try:
+                    self._write_locator(updated_locator, overwrite=locator_exists)
+                except OSError as error:
+                    failures.append(f"Recovery locator could not be updated: {error}")
+                    cleared = [identifier for identifier in cleared if identifier not in locator]
+
+            return RecoveryClearResult(tuple(cleared), tuple(failures))
 
     def inspect_recovery(self) -> RecoveryInspection:
         """Report recorded recovery expectations alongside current path observations."""

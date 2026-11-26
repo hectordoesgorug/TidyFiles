@@ -48,8 +48,10 @@ application closure waits until it finishes. Processing status reports completed
 files and elapsed time, with an estimated remaining time after enough progress.
 
 Startup displays unresolved transaction recovery details without restoring,
-moving, or deleting files. Clear Trash requires confirmation and is limited to
-recognized managed batches. Auto-clean and Auto-Clear Trash are separate,
+moving, or deleting files. Clear Recovery Records requires confirmation and
+removes selected recovery information without changing affected files. Clear
+Trash requires confirmation and is limited to recognized managed batches.
+Auto-clean and Auto-Clear Trash are separate,
 default-off settings. Auto-clean runs only after complete rename success from
 explicit Add Folder roots; Auto-Clear Trash runs only after normal exit.
 Duplicate analysis and media repacking are not implemented, and their controls

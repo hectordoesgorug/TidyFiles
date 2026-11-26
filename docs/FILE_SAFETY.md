@@ -297,6 +297,11 @@ unresolved paths or identities. Damaged, missing, or inaccessible discovery
 evidence blocks modifications when it prevents establishing an independent
 scope. Unrelated operations remain available when independence can be checked.
 
+The recovery interface can discard selected journal records and locator
+entries after explicit confirmation. It removes recovery information only and
+does not inspect for operation success or change any recorded source,
+destination, or staging files. Clearing is blocked while processing is active.
+
 `TemporaryArtifactCleaner` only accepts a successful journal entry's exact
 `temporary_path`, the creation-time identity captured by its owning job, and
 the active modifying job. It rejects source identities, protected system paths,

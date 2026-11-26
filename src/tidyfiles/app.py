@@ -267,6 +267,9 @@ class _MainWindow:
         self._recovery_queue: queue.Queue[Any] = queue.Queue(maxsize=1)
         self._recovery_after: str | None = None
         self._recovery_dialog: ctk.CTkToplevel | None = None
+        self._recovery_transaction_ids: tuple[UUID, ...] = ()
+        self._recovery_transaction_list: tk.Listbox | None = None
+        self._recovery_clear_button: ctk.CTkButton | None = None
         self._geometry_after: str | None = None
         self._appearance_after: str | None = None
         self._resize_started = False
@@ -2134,10 +2137,15 @@ class _MainWindow:
         dialog = ctk.CTkToplevel(self.root)
         self._recovery_dialog = dialog
         dialog.title("Recovery requires attention")
-        dialog.geometry("800x560")
+        dialog.geometry("800x640")
         dialog.minsize(620, 420)
         dialog.transient(self.root)
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.bind(
+            "<Destroy>",
+            lambda event, window=dialog: self._on_recovery_dialog_destroy(event, window),
+            add="+",
+        )
         body = ctk.CTkFrame(dialog)
         body.pack(fill="both", expand=True, padx=12, pady=12)
         ctk.CTkLabel(
@@ -2152,6 +2160,36 @@ class _MainWindow:
             justify="left",
             wraplength=740,
         ).pack(fill="x", padx=8, pady=(8, 8))
+        ctk.CTkLabel(
+            body,
+            text="Select recovery records to clear (Ctrl or Shift selects multiple):",
+            anchor="w",
+        ).pack(fill="x", padx=8, pady=(0, 4))
+        transaction_frame = ctk.CTkFrame(body, fg_color="transparent")
+        transaction_frame.pack(fill="x", padx=8, pady=(0, 8))
+        self._recovery_transaction_list = tk.Listbox(
+            transaction_frame, height=4, selectmode="extended", exportselection=False
+        )
+        transaction_scrollbar = tk.Scrollbar(
+            transaction_frame, command=self._recovery_transaction_list.yview
+        )
+        self._recovery_transaction_list.configure(
+            yscrollcommand=transaction_scrollbar.set
+        )
+        self._recovery_transaction_list.pack(side="left", fill="both", expand=True)
+        transaction_scrollbar.pack(side="left", fill="y")
+        self._recovery_transaction_ids = tuple(
+            transaction.transaction_id for transaction in inspection.transactions
+        ) if inspection is not None else ()
+        if inspection is not None:
+            for transaction in inspection.transactions:
+                self._recovery_transaction_list.insert(
+                    "end",
+                    f"{transaction.transaction_id} · {transaction.journal_status.value}",
+                )
+        self._recovery_transaction_list.bind(
+            "<<ListboxSelect>>", self._update_recovery_clear_button
+        )
         details = ctk.CTkTextbox(body, wrap="word")
         details.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         lines: list[str] = []
@@ -2207,6 +2245,13 @@ class _MainWindow:
             self._recovery_path_list.insert("end", path)
         actions = ctk.CTkFrame(body, fg_color="transparent")
         actions.pack(fill="x", padx=8, pady=(0, 4))
+        self._recovery_clear_button = ctk.CTkButton(
+            actions,
+            text="Clear Recovery Records",
+            command=self._clear_selected_recovery_records,
+            state="disabled",
+        )
+        self._recovery_clear_button.pack(side="left", padx=(0, 8))
         ctk.CTkButton(
             actions,
             text="Open selected location in File Explorer",
@@ -2215,7 +2260,112 @@ class _MainWindow:
         ctk.CTkButton(actions, text="Close", width=90, command=dialog.destroy).pack(
             side="right"
         )
+        self._update_recovery_clear_button()
         dialog.grab_set()
+
+    def _on_recovery_dialog_destroy(
+        self, event: tk.Event[Any], dialog: ctk.CTkToplevel
+    ) -> None:
+        if event.widget is dialog and self._recovery_dialog is dialog:
+            self._recovery_dialog = None
+            self._recovery_transaction_ids = ()
+            self._recovery_transaction_list = None
+            self._recovery_clear_button = None
+
+    def _recovery_clear_available(self) -> bool:
+        return (
+            not self._closing
+            and not self._close_pending
+            and self._processing_phase == "idle"
+            and not self._collection_operation_pending
+            and self._maintenance_kind is None
+            and not self._import_is_busy()
+            and self.coordinator.current is None
+        )
+
+    def _update_recovery_clear_button(self, _event: tk.Event[Any] | None = None) -> None:
+        button = self._recovery_clear_button
+        transaction_list = self._recovery_transaction_list
+        if button is None or transaction_list is None:
+            return
+        try:
+            if button.winfo_exists():
+                button.configure(
+                    state=(
+                        "normal"
+                        if transaction_list.curselection() and self._recovery_clear_available()
+                        else "disabled"
+                    )
+                )
+        except tk.TclError:
+            pass
+
+    def _clear_selected_recovery_records(self) -> None:
+        transaction_list = self._recovery_transaction_list
+        if transaction_list is None:
+            return
+        if not self._recovery_clear_available():
+            messagebox.showwarning(
+                "Clear Recovery Records",
+                "Recovery records cannot be cleared while processing is active.",
+                parent=self._recovery_dialog or self.root,
+            )
+            return
+        selected = transaction_list.curselection()
+        if not selected:
+            return
+        transaction_ids = tuple(self._recovery_transaction_ids[index] for index in selected)
+        count = len(transaction_ids)
+        if not messagebox.askyesno(
+            "Clear Recovery Records",
+            f"Clear {count} selected recovery record(s)?\n\n"
+            "This removes recovery information only. It does not move, restore, "
+            "or delete any affected files. This action cannot be undone.",
+            parent=self._recovery_dialog or self.root,
+        ):
+            return
+        if not self._recovery_clear_available():
+            return
+        try:
+            result = self.journals.clear_recovery_records(
+                transaction_ids, manually_authorized=True
+            )
+        except Exception as error:
+            failures = (str(error),)
+            cleared_ids: tuple[UUID, ...] = ()
+        else:
+            failures = result.failures
+            cleared_ids = result.cleared_ids
+
+        dialog = self._recovery_dialog
+        if dialog is not None:
+            try:
+                dialog.grab_release()
+                dialog.destroy()
+            except tk.TclError:
+                pass
+        self._start_recovery_inspection()
+
+        if failures:
+            message = (
+                f"Cleared {len(cleared_ids)} recovery record(s).\n\n"
+                "Some records could not be fully cleared:\n"
+                + "\n".join(failures[:8])
+            )
+            messagebox.showwarning("Recovery record clearing", message, parent=self.root)
+        elif cleared_ids:
+            messagebox.showinfo(
+                "Recovery Records Cleared",
+                f"Cleared {len(cleared_ids)} recovery record(s). "
+                "Affected files were not changed.",
+                parent=self.root,
+            )
+        else:
+            messagebox.showinfo(
+                "Recovery Records Cleared",
+                "The selected recovery records were already absent.",
+                parent=self.root,
+            )
 
     def _open_selected_recovery_location(self) -> None:
         selection = self._recovery_path_list.curselection()
@@ -2430,6 +2580,7 @@ class _MainWindow:
     def _update_control_states(self) -> None:
         if not hasattr(self, "controls"):
             return
+        self._update_recovery_clear_button()
         importing = (
             getattr(self, "import_controller", None) is not None
             and self.import_controller.busy
@@ -3532,8 +3683,9 @@ class _MainWindow:
             self._store_column_preferences(mode, current.visible, widths)
 
     def open_settings(self) -> None:
-        if self.settings_window is not None and self.settings_window.winfo_exists():
-            self.settings_window.focus_force()
+        if self.settings_window is not None and self._show_settings_window(
+            self.settings_window
+        ):
             return
         dialog = ctk.CTkToplevel(self.root)
         self.settings_window = dialog
@@ -3578,6 +3730,30 @@ class _MainWindow:
         ctk.CTkButton(content, text="Done", width=85, command=dialog.destroy).pack(
             anchor="e", padx=10, pady=(0, 8)
         )
+        self._show_settings_window(dialog)
+
+    def _show_settings_window(self, dialog: ctk.CTkToplevel) -> bool:
+        if self.settings_window is not dialog:
+            return False
+        try:
+            if not dialog.winfo_exists():
+                return False
+            dialog.deiconify()
+            dialog.lift()
+            dialog.focus_force()
+            return True
+        except tk.TclError:
+            return False
+
+    def _restore_settings_visibility(self, dialog: ctk.CTkToplevel) -> None:
+        if self.settings_window is not dialog:
+            return
+        try:
+            if dialog.winfo_exists() and dialog.state() == "withdrawn":
+                dialog.deiconify()
+                dialog.lift()
+        except tk.TclError:
+            pass
 
     def _set_appearance_mode(self, value: str) -> None:
         if value not in {"System", "Light", "Dark"}:
@@ -3601,6 +3777,9 @@ class _MainWindow:
             self._apply_table_appearance()
             if previous == "System":
                 self._schedule_system_appearance_check()
+        if self.settings_window is not None:
+            dialog = self.settings_window
+            self.root.after(25, lambda: self._restore_settings_visibility(dialog))
 
     def _apply_table_appearance(self) -> None:
         _style_file_table(self.root)

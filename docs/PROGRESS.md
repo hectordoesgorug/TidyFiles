@@ -936,6 +936,20 @@ that returned the historical access-denied error could not be determined.
 Automated verification does not replace visible Light/Dark mode review or
 physical layout and DPI acceptance.
 
+### M3-G3 — Recovery record dismissal and Settings visibility
+
+The recovery interface allows explicit selection and confirmation before
+removing journal records and their locator entries. It preserves recorded file
+paths and refreshes recovery inspection after clearing. Recovery clearing is
+unavailable while processing is active. Settings windows are explicitly
+deiconified, raised, and focused when opened or reused. A delayed visibility
+restore handles CustomTkinter's temporary Windows titlebar withdrawal.
+
+Verification on Windows Python 3.13.17: the focused recovery and Settings run
+passed 7 tests; the complete suite passed 656 tests with zero skips. Ruff,
+compileall, and both Git whitespace checks passed. The retained journal's size,
+timestamp, and SHA-256 matched their pre-test values.
+
 ## M6.1 — Package Restructuring and Architectural Cleanup
 
 This planned maintenance checkpoint follows M6 (Complete GUI Integration) and
