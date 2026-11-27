@@ -362,6 +362,15 @@ Perceptual hashing reads active sources through identity-checked handles.
 A failed decode or incomplete video sample is reported as an analysis problem.
 The returned similarity, including 100%, provides no deletion authorization.
 
+**Delete Selected** in **Probable Duplicates** authorizes managed Trash
+transfer for the checked paths, including every member of a group if checked.
+Each selected file is excluded from processing immediately. The Trash worker
+checks the current source against the observation used for review and then
+uses the existing journaled transfer path. A failed transfer remains excluded
+and is reported in the status area and log. Transfer failures preserve the
+source or existing recovery evidence according to the managed Trash protocol.
+**Skip** retains the current processing collection.
+
 Locate and Import copies only the explicitly selected FFmpeg and FFprobe
 executables. Replacement approval applies to the two observed destination
 paths. Validation and staging precede installation. A failed installation

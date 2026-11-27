@@ -198,6 +198,7 @@ class WorkingCollection:
         self._collection_id = uuid4()
         self._entries: dict[UUID, CollectionEntry] = {}
         self._excluded_duplicates: dict[UUID, ExcludedDuplicate] = {}
+        self._excluded_probable: dict[UUID, CollectionEntry] = {}
         self._entry_order: list[UUID] = []
         self._path_entries: dict[str, UUID] = {}
         self._sessions: dict[UUID, ImportSessionSnapshot] = {}
@@ -285,7 +286,7 @@ class WorkingCollection:
         path_key = normalize_windows_path(path)
         existing_id = self._path_entries.get(path_key)
         if existing_id is not None:
-            existing = self._entries.get(existing_id)
+            existing = self._entries.get(existing_id) or self._excluded_probable.get(existing_id)
             if existing is None:
                 existing = self._excluded_duplicates[existing_id].entry
             return RegistrationResult(existing, added=False)
@@ -569,7 +570,9 @@ class WorkingCollection:
             self._revision += 1
         return changed
 
-    def remove_entries(self, entry_ids: Sequence[UUID]) -> tuple[CollectionEntry, ...]:
+    def remove_entries(
+        self, entry_ids: Sequence[UUID], *, exclude_probable: bool = False
+    ) -> tuple[CollectionEntry, ...]:
         """Remove selected entries from memory without touching source files."""
         self._require_idle("remove entries")
         selected = set(entry_ids)
@@ -578,7 +581,10 @@ class WorkingCollection:
             return ()
         removed = tuple(self._entries.pop(entry_id) for entry_id in removed_ids)
         for entry in removed:
-            self._path_entries.pop(entry.normalized_path_key)
+            if exclude_probable:
+                self._excluded_probable[entry.entry_id] = entry
+            else:
+                self._path_entries.pop(entry.normalized_path_key)
         removed_set = set(removed_ids)
         self._entry_order = [
             entry_id for entry_id in self._entry_order if entry_id not in removed_set
@@ -650,6 +656,14 @@ class WorkingCollection:
         if changed:
             self._revision += 1
 
+    def forget_trashed_probable(self, entry_ids: Sequence[UUID]) -> None:
+        self._require_idle("forget transferred probable duplicates")
+        for entry_id in entry_ids:
+            entry = self._excluded_probable.pop(entry_id, None)
+            if entry is not None:
+                self._path_entries.pop(entry.normalized_path_key)
+                self._revision += 1
+
     def clear_all(self) -> bool:
         """Clear collection-owned in-memory state; retain sort preferences."""
         self._require_idle("clear all")
@@ -657,6 +671,7 @@ class WorkingCollection:
             return False
         self._entries.clear()
         self._excluded_duplicates.clear()
+        self._excluded_probable.clear()
         self._entry_order.clear()
         self._path_entries.clear()
         self._sessions.clear()

@@ -101,6 +101,14 @@ class MediaTool:
     problem: str | None = None
     stamp: _FileStamp | None = None
 
+    def is_current(self) -> bool:
+        if self.version is None or self.path is None or self.stamp is None:
+            return False
+        try:
+            return _stamp(self.path) == self.stamp
+        except OSError:
+            return False
+
 
 @dataclass(frozen=True, slots=True)
 class MediaTools:
@@ -112,15 +120,7 @@ class MediaTools:
         return self.ffmpeg.version is not None and self.ffprobe.version is not None
 
     def is_current(self) -> bool:
-        if not self.video_ready:
-            return False
-        try:
-            return all(
-                tool.path is not None and tool.stamp is not None and _stamp(tool.path) == tool.stamp
-                for tool in (self.ffmpeg, self.ffprobe)
-            )
-        except OSError:
-            return False
+        return self.ffmpeg.is_current() and self.ffprobe.is_current()
 
 
 def _probe_tool(

@@ -13,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from tidyfiles.collection import CollectionSnapshot, FileSystemIdentitySnapshot
+from tidyfiles.collection import CollectionEntry, CollectionSnapshot, FileSystemIdentitySnapshot
 from tidyfiles.destination_observation import (
     PathObservation,
     PathOccupancy,
@@ -149,6 +149,38 @@ class TrashExecutor:
             result,
             state=TrashState.FAILED_SAFE if result.state is TrashState.SUCCEEDED else result.state,
             entries=tuple(outcomes[row.entry.entry_id] for row in authorized.excluded_duplicates),
+        )
+
+    def execute_reviewed(
+        self, selected: tuple[tuple[CollectionEntry, PathObservation], ...]
+    ) -> TrashResult:
+        """Validate the explicitly selected review rows and transfer only that scope."""
+        observer = WindowsPathObserver(self.journals.managed_paths, capture_identity=True)
+        sources = []
+        outcomes: dict[UUID, TrashEntryResult] = {}
+        for entry, reviewed in selected:
+            try:
+                current = _observe(observer, entry).observation
+                if current != reviewed or current.read_only_volume:
+                    raise OSError("Selected file changed after review or is on a read-only volume")
+            except OSError as error:
+                outcomes[entry.entry_id] = TrashEntryResult(
+                    entry.entry_id, entry.source_path, TrashOutcome.NOT_PROCESSED, detail=str(error)
+                )
+            else:
+                sources.append(TrashSource(entry.entry_id, entry.source_path, current))
+        result = (
+            self.execute(authorized=TrashScope(tuple(sources))) if sources
+            else TrashResult(TrashState.FAILED_SAFE, None, ())
+        )
+        state = (
+            TrashState.FAILED_SAFE
+            if outcomes and result.state is TrashState.SUCCEEDED else result.state
+        )
+        outcomes.update((item.entry_id, item) for item in result.entries)
+        return replace(
+            result, state=state,
+            entries=tuple(outcomes[entry.entry_id] for entry, _ in selected),
         )
 
     def execute(self, *, authorized: TrashScope | None) -> TrashResult:

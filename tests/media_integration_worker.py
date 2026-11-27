@@ -10,6 +10,7 @@ import pytest
 from test_perceptual_analysis import _SETTINGS, _collection
 
 import tidyfiles.media_tools as media
+from tidyfiles.media_metadata import MediaCells, MediaMetadataProbe
 from tidyfiles.media_tools import MediaCancelled, MediaToolError
 from tidyfiles.perceptual_analysis import (
     SAMPLE_PERCENTAGES,
@@ -127,3 +128,21 @@ def test_real_import_into_disposable_portable_root_preserves_supplied_executable
     assert imported.ffprobe.version == original.ffprobe.version
     assert original.is_current()
     assert sorted(path.name for path in target.iterdir()) == ["ffmpeg.exe", "ffprobe.exe"]
+
+
+def test_real_video_resolution_and_audio_duration(local_tools, tmp_path):
+    _, tools = local_tools
+    ffmpeg = tools.ffmpeg.path
+    assert ffmpeg is not None
+    video, audio = tmp_path / "video.mp4", tmp_path / "audio.wav"
+    _create_video(ffmpeg, video, "testsrc2=s=96x64:r=10:d=2")
+    media.run_media_command(
+        ffmpeg, ("-v", "error", "-f", "lavfi", "-i", "sine=duration=3", str(audio)), timeout=10,
+    )
+    rows = {}
+    MediaMetadataProbe().read(
+        _collection(video, audio).snapshot().entries, tools.ffprobe,
+        cancelled=lambda: False,
+        publish=lambda entry, cells: rows.__setitem__(entry.original_filename, cells),
+    )
+    assert rows == {video.name: MediaCells("96x64", "0:02"), audio.name: MediaCells("", "0:03")}

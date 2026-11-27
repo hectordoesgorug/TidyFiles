@@ -248,6 +248,180 @@ def _run_gui_test_in_isolated_process(test_name: str) -> bool:
     return True
 
 
+@pytest.mark.parametrize(
+    "scenario",
+    ["ok", "deduplicate", "direct", "partial", "none", "disabled", "stale", "unique",
+     "cumulative", "cancel"],
+)
+def test_perceptual_import_and_review(tmp_path, monkeypatch, scenario):
+    if _run_gui_test_in_isolated_process(f"test_perceptual_import_and_review[{scenario}]"):
+        return
+    from dataclasses import replace
+
+    from test_perceptual_analysis import _pattern
+
+    import tidyfiles.storage as storage
+    from tidyfiles.transaction_journal import JournalStore
+
+    app_path, local = tmp_path / "app", tmp_path / "local"
+    app_path.mkdir()
+    local.mkdir()
+    journals = JournalStore(app_dir=app_path, local_app_data=local)
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    monkeypatch.setattr(storage, "application_directory", lambda: app_path)
+    storage.managed_trash_path.cache_clear()
+    config = default_config()
+    config["global_settings"].update(
+        perceptual_hashing=scenario != "none", duplicate_checker=scenario != "disabled"
+    )
+    root = create_main_window(config)
+    app = root.application
+    a, b, keep, exact = (tmp_path / name for name in ("a.png", "b.png", "keep.txt", "z.png"))
+    keep.write_bytes(b"other file")
+    with _pattern() as image:
+        image.save(a, compress_level=0)
+        image.save(b, compress_level=9)
+    if scenario in {"ok", "deduplicate", "cancel"}:
+        exact.write_bytes(a.read_bytes())
+    paths = (a, b, keep, exact) if exact.exists() else (a, b, keep)
+    calls = []
+    popups = []
+    metadata_entered = threading.Event()
+    metadata_release = threading.Event()
+    release = threading.Event()
+    entered = threading.Event()
+    analyze = app._perceptual_analyzer.analyze
+    read = app._metadata_probe.read
+
+    def capture(snapshot, *args, **kwargs):
+        calls.append(snapshot)
+        if scenario == "cumulative" and len(calls) == 1:
+            return analyze(snapshot, *args, **kwargs)
+        entered.set()
+        assert release.wait(10)
+        result = analyze(snapshot, *args, **kwargs)
+        return replace(result, revision=result.revision - 1) if scenario == "stale" else result
+
+    def delay_metadata(*args, **kwargs):
+        metadata_entered.set()
+        assert metadata_release.wait(10)
+        return read(*args, **kwargs)
+
+    def invoke(dialog, label):
+        next(
+            widget for widget in _descendants(dialog)
+            if isinstance(widget, ctk.CTkButton) and widget.cget("text") == label
+        ).invoke()
+
+    monkeypatch.setattr(app._perceptual_analyzer, "analyze", capture)
+    monkeypatch.setattr(app._metadata_probe, "read", delay_metadata)
+    for popup in ("askyesno", "showinfo", "showwarning", "showerror"):
+        monkeypatch.setattr(app_module.messagebox, popup, lambda *args, **_: popups.append(args))
+    try:
+        root.update()
+        app.rename_format.set("<Name> renamed")
+        if scenario in {"unique", "cumulative"}:
+            _import_files(app, root, monkeypatch, a, keep)
+        if scenario == "cumulative":
+            _wait_for(root, app._process_ready)
+            assert app._probable_dialog is None
+            assert len(calls) == 1
+            _import_files(app, root, monkeypatch, b)
+        elif scenario != "unique":
+            _import_files(app, root, monkeypatch, *paths)
+        if scenario in {"none", "disabled"}:
+            _wait_for(root, metadata_entered.is_set)
+            _wait_for(root, app._process_ready)
+            assert not calls
+            assert app._probable_dialog is None
+            metadata_release.set()
+            row = next(
+                item for item in app.collection.snapshot().entries if str(a) == item.source_path
+            )
+            _wait_for(root, lambda: app.tree.set(str(row.entry_id), "resolution") == "96x96")
+            assert not popups
+            return
+
+        if exact.exists():
+            assert app._files_excluded_dialog is not None and not entered.is_set()
+            assert app.process_button.cget("state") == "disabled"
+            action = "Deduplicate" if scenario in {"deduplicate", "cancel"} else "OK"
+            invoke(app._files_excluded_dialog, action)
+        _wait_for(root, entered.is_set)
+        assert app.process_button.cget("state") == "disabled"
+        assert all(entry.original_filename != exact.name for entry in calls[-1].entries)
+        assert exact.exists() == (scenario == "ok")
+        if scenario == "cancel":
+            app.cancel_current_work()
+        release.set()
+        metadata_release.set()
+        if scenario in {"stale", "unique", "cancel"}:
+            _wait_for(root, lambda: app._processing_phase == "idle")
+            assert app._probable_dialog is None
+            notice = {"stale": "discarded", "unique": "complete", "cancel": "canceled"}
+            assert notice[scenario] in app.status.cget("text")
+            if scenario == "cancel":
+                assert exact.name not in {
+                    entry.original_filename for entry in app.collection.snapshot().entries
+                }
+                assert exact.name in {
+                    item.name for item in (app_path / "trash").glob("*/*.png")
+                }
+        else:
+            _wait_for(root, lambda: app._probable_dialog is not None)
+            dialog = app._probable_dialog
+            assert dialog is not None and dialog.title() == "Probable Duplicates Found"
+            assert app.process_button.cget("state") == "disabled"
+            assert not dialog.selected_ids()
+            by_name = {entry.original_filename: entry.entry_id for entry in calls[-1].entries}
+            ids = (by_name[a.name], by_name[b.name])
+            invoke(dialog, "Auto-select")
+            assert dialog.selected_ids() == ids[1:]
+            invoke(dialog, "Select None")
+            assert not dialog.selected_ids()
+            invoke(dialog, "Select All")
+            assert dialog.selected_ids() == ids
+            assert sum(
+                isinstance(widget, ctk.CTkLabel) and isinstance(widget.cget("image"), ctk.CTkImage)
+                for widget in _descendants(dialog)
+            ) == 2
+            if scenario in {"partial", "direct"}:
+                if scenario == "partial":
+                    b.write_bytes(b"changed after review")
+                invoke(dialog, "Delete Selected")
+                assert app._probable_dialog is None
+                assert app._processing_phase == "probable_trash"
+                assert not app._process_ready()
+                _wait_for(root, lambda: app._processing_phase == "idle")
+                assert not a.exists()
+                if scenario == "partial":
+                    assert b.read_bytes() == b"changed after review"
+                    assert "moved 1 to Trash" in app.status.cget("text")
+                    assert "changed" in app.status.cget("text")
+                else:
+                    assert not b.exists()
+                    assert "moved 2 to Trash" in app.status.cget("text")
+                assert {entry.original_filename for entry in app.collection.snapshot().entries} == {
+                    keep.name
+                }
+                if scenario == "partial":
+                    _import_files(app, root, monkeypatch, b)
+                    _wait_for(root, lambda: app._processing_phase == "idle")
+                    assert {entry.original_filename
+                            for entry in app.collection.snapshot().entries} == {keep.name}
+            else:
+                invoke(dialog, "Skip")
+                assert a.exists() and b.exists()
+        _wait_for(root, app._process_ready)
+        assert len(app.tree.get_children("")) == len(app.collection.snapshot().entries)
+        assert keep.exists() and not popups
+    finally:
+        release.set()
+        metadata_release.set()
+        _close_app(app, root)
+        storage.managed_trash_path.cache_clear()
+
+
 def test_portable_media_settings_do_not_block_rename_and_refresh_after_import(
     tmp_path, monkeypatch
 ):

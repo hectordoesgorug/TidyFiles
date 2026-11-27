@@ -21,9 +21,8 @@ previews, three built-in formats, token insertion, a scrollable token reference,
 and an explicit refresh for physical directory-count metadata. The format is
 session-only. Expression and file-specific errors are shown in the preview;
 Process uses the live filename preview as the review interface and runs fresh
-preflight before renaming. The perceptual hashing engine and its settings are
-implemented. Import integration, probable-duplicate review, verification, and
-repacking are planned.
+preflight before renaming. Duplicate checking includes exact exclusion and
+optional perceptual review. Media verification, Purge, and repacking are planned.
 The application is not production-ready.
 
 Use Ctrl+A in the table to select all rows and Delete to remove selected
@@ -37,10 +36,24 @@ analyze the cumulative processing collection in the background. The first
 verified copy in collection order stays in processing. **Files Excluded**
 reports the redundant copies and the number of files remaining for processing.
 Choose **OK** to keep those copies on disk or **Deduplicate** to authorize a
-managed Trash transfer and return to the main window. Progress and results
+managed Trash transfer. Progress and results
 appear in the main window's status area. The **Duplicate Finder** tab lists
 excluded copies with their original filenames for later review and Deduplicate. Use
 **Clear All** to clear the session's collection and exclusions.
+
+With **Perceptual Hashing** also enabled, the import checks the remaining files
+for similar images and videos after any exact-duplicate action finishes. Process
+becomes available after review and preview preparation. The **Probable
+Duplicates** dialog shows groups with the largest file first. **Auto-select**
+checks every file except the largest in each group. **Delete Selected**
+excludes the checked files from processing and sends them to managed Trash.
+Transfer failures appear in the status area and log. **Skip** keeps the files
+in the processing collection.
+
+The shared table fills in image and video resolutions and video and audio
+lengths as background reads finish. Applicable values that could not be read
+show as unavailable. The preview and Process can be ready while these reads
+continue.
 
 Bulk Rename labels individually valid filename results **Valid preview**; it
 does not check destination collisions, source identity or execution readiness.
@@ -72,7 +85,8 @@ warns only if it encounters errors or leaves content behind.
 ## Optional media tools
 
 Video perceptual hashing requires local `ffmpeg.exe` and `ffprobe.exe`. The
-recommended Windows x64 reference is Gyan's FFmpeg 9.1 Essentials ZIP. Other
+video and audio metadata columns use `ffprobe.exe`. The recommended Windows
+x64 reference is Gyan's FFmpeg 9.1 Essentials ZIP. Other
 compatible versions are accepted. [FFmpeg downloads](https://ffmpeg.org/download.html)
 [Gyan Windows builds](https://www.gyan.dev/ffmpeg/builds/)
 [Essentials ZIP](https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip)

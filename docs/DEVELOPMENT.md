@@ -47,12 +47,23 @@ transfers in the main window. Check the layout at the supported display scales
 and exercise Clear Trash and normal-exit Auto-Clear Trash only against
 disposable batches.
 
+For probable duplicates, use two differently encoded copies of a test image.
+Enable both duplicate settings and check the review after an import with and
+without exact exclusions. Exercise Skip and the four selection or transfer
+controls. Check largest-first ordering, thumbnails, and dialog resizing under
+light and dark themes. With a clone, verify that Select All can transfer an
+entire group and that a path changed during review is excluded from processing
+and reported as a failed transfer. Switch tabs after review and verify the
+shared rows and filename preview. Compare media columns with and without
+FFprobe and confirm Process becomes available independently of those reads.
+
 ## Local checks
 
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check .
 .\.venv\Scripts\python.exe -m pytest
 .\.venv\Scripts\python.exe -m compileall -q src tests
+.\.venv\Scripts\python.exe -m pip check
 git diff --check
 ```
 

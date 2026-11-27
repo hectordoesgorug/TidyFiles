@@ -105,6 +105,10 @@ class ImportController:
         self._discovery_duration_seconds: float | None = None
 
     @property
+    def import_duplicate_preferences(self) -> DuplicatePreferences | None:
+        return self._import_duplicate_preferences
+
+    @property
     def busy(self) -> bool:
         return self._phase != "idle"
 

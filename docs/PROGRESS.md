@@ -9,9 +9,9 @@ pure filename-engine components; M2-D and M2-E4 connect them to read-only
 evaluation and GUI previews. M3-G connects reviewed, journaled Bulk Rename and
 managed Trash cleanup to the desktop interface. M4-A implements exact duplicate
 analysis, and M4-B connects processing exclusions, the Duplicate Finder view,
-and explicit Deduplicate. M4-C adds the standalone perceptual engine and
-portable media-tool settings. Probable duplicate review, media verification,
-and repacking remain pending.
+and explicit Deduplicate. M4-C adds the perceptual engine and portable
+media-tool settings. M4-D connects probable duplicate review and progressive
+media columns to import. Media verification, Purge, and repacking remain pending.
 See `docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-decision audit and
 historical verification record.
 
@@ -62,6 +62,7 @@ controls remain disabled.
 | M4-A | Implemented | Read-only exact duplicate detection, deterministic keepers, and session-scoped evidence. |
 | M4-B | Implemented | Import-time exact duplicate exclusion, flat review, and explicit managed Trash transfer. |
 | M4-C | Implemented | Perceptual hashing, probable grouping, and portable media dependencies. |
+| M4-D | Implemented | Import-integrated probable duplicate review, authorized managed Trash transfers, and progressive media metadata. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
 | M6.1 | Planned | Targeted maintainability review after M6 and before M7. Use implemented features and their dependencies to determine which changes are justified. |
@@ -1125,9 +1126,29 @@ tests, 103 existing regressions, and the Settings GUI case. The full rerun
 passed the import cancellation regression after redundant control redraws
 were removed. Ruff, compileall, and Git whitespace checks passed.
 
-M4-D will invoke the engine on the current post-exclusion snapshot and present
-the probable groups for manual review. The engine cannot authorize deletion.
-Verification, Purge, and repacking remain separate work.
+## M4-D — Probable duplicate review and media metadata
+
+When both duplicate settings are enabled, import analyzes eligible images and
+videos after exact exclusions are settled. Process stays disabled while a
+required stage or manual review is active. Probable review starts with no
+selections and offers Auto-select, Select All, Select None, Delete Selected,
+and Skip. A selected path leaves processing even if the managed Trash transfer
+fails. Image resolution and FFprobe-derived video resolution and media length
+appear as background observations arrive.
+
+In a disposable clone of the supplied test folder, 71 media candidates reached
+perceptual analysis. Three exact exclusions affected other files. Three damaged
+images and one broken video could not be hashed. The configured 70%, 80%, 90%,
+and 100% thresholds produced 15, 9, 5, and 4 groups respectively. The four
+edited-photo fixtures each had a 100% perceptual match with a different
+source image and appeared at every threshold. Their mutual scores ranged
+from 46.875% to 65.625%. The reference CSV was unavailable, so expected pairings
+could not be confirmed independently.
+
+On Windows with Python 3.13.17, all 770 default tests, 10 focused GUI scenarios,
+and nine opt-in tests with Gyan's FFmpeg and FFprobe 9.1 Essentials passed.
+Ruff, compileall, pip check, and Git whitespace checks passed. Visual desktop
+acceptance across themes and display scales remains pending.
 
 ## M6.1 — Targeted maintainability review
 

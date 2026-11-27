@@ -19,7 +19,7 @@ from pillow_heif import register_heif_opener
 
 from tidyfiles.collection import CollectionEntry, CollectionSnapshot
 from tidyfiles.config import PERCEPTUAL_THRESHOLDS, DuplicatePreferences
-from tidyfiles.destination_observation import WindowsPathObserver
+from tidyfiles.destination_observation import PathObservation, WindowsPathObserver
 from tidyfiles.duplicate_analysis import _FileFailure, _observe, _read_source, _Source
 from tidyfiles.media_tools import MediaCancelled, MediaToolError, MediaTools, run_media_command
 
@@ -59,6 +59,7 @@ class PerceptualFile:
     image_hash: int | None = None
     frames: tuple[FrameSample, ...] = ()
     problem: str | None = None
+    observation: PathObservation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,7 +213,7 @@ def _hash_file(
 ) -> PerceptualFile:
     if cancel_check is not None and cancel_check():
         raise MediaCancelled
-    file = PerceptualFile(source.entry, kind, source.size)
+    file = PerceptualFile(source.entry, kind, source.size, observation=source.observation)
     try:
         with _read_source(observer, source) as stream:
             if kind is MediaKind.IMAGE:
@@ -329,7 +330,9 @@ class PerceptualAnalyzer:
                     if _observe(fresh, source.entry) != source:
                         raise OSError("Source changed during perceptual analysis")
                 except OSError as error:
-                    files[entry_id] = replace(file, image_hash=None, frames=(), problem=str(error))
+                    files[entry_id] = replace(
+                        file, image_hash=None, frames=(), problem=str(error), observation=None
+                    )
                 else:
                     tool_key = verified_tools if file.kind is MediaKind.VIDEO else None
                     cache[entry_id] = _Evidence(source, tool_key, file)

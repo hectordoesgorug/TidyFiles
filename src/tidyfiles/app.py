@@ -52,6 +52,7 @@ from tidyfiles.config import (
     set_duplicate_preferences,
     set_sorting_preferences,
 )
+from tidyfiles.destination_observation import WindowsPathObserver
 from tidyfiles.destination_planning import (
     DestinationOptions,
     DestinationPlan,
@@ -83,14 +84,31 @@ from tidyfiles.filename_integration import (
 from tidyfiles.format_reference import FORMAT_REFERENCE, TOKEN_GROUPS
 from tidyfiles.import_controller import ImportController
 from tidyfiles.managed_trash import TrashExecutor, TrashOutcome, TrashResult, TrashState
+from tidyfiles.media_metadata import (
+    PENDING,
+    MediaCells,
+    MediaMetadataProbe,
+    default_media_cells,
+    image_thumbnail,
+    media_category,
+)
 from tidyfiles.media_tools import (
+    MediaCancelled,
+    MediaTool,
     MediaTools,
     check_media_tools,
     import_media_tools,
     plan_media_import,
 )
 from tidyfiles.modifying_jobs import ModifyingJobCoordinator
+from tidyfiles.perceptual_analysis import (
+    MediaKind,
+    PerceptualAnalyzer,
+    PerceptualResult,
+    PerceptualState,
+)
 from tidyfiles.preflight_service import PreflightService
+from tidyfiles.probable_dialog import ProbableDuplicatesDialog
 from tidyfiles.recovery import RecoveryInspection, RecoveryInspector
 from tidyfiles.rename_executor import (
     RenameExecutor,
@@ -116,6 +134,10 @@ from tidyfiles.ui_preferences import (
 
 _DEFAULT_MODE = MODES[0]
 _LOG = logging.getLogger(__name__)
+_MEDIA_WRITE_PHASES = {
+    "planning", "review", "preflight", "rename_preparing", "rename_modifying",
+    "auto_cleaning", "deduplicating", "probable_trash",
+}
 _FORMAT_PRESETS = (
     "<DirName> <IncNr>",
     "<SubDirName> <IncNr>",
@@ -268,6 +290,17 @@ class _MainWindow:
         self.auto_clean_service = AutoCleanService(self.coordinator, self.journals)
         self.trash_clear_service = TrashClearService(self.coordinator, self.journals)
         self.trash_executor = TrashExecutor(self.coordinator, self.journals)
+        self._perceptual_analyzer = PerceptualAnalyzer(managed_paths=self.journals.managed_paths)
+        self._pending_perceptual: DuplicatePreferences | None = None
+        self._probable_dialog: ProbableDuplicatesDialog | None = None
+        self._metadata_probe = MediaMetadataProbe(self.journals.managed_paths)
+        self._metadata_key: tuple[int, MediaTool | None] | None = None
+        self._metadata_cancel = threading.Event()
+        self._metadata_done: threading.Event | None = None
+        self._metadata_updates: queue.Queue[
+            tuple[tuple[int, MediaTool | None], CollectionEntry, MediaCells]
+        ] = queue.Queue(maxsize=128)
+        self._metadata_cells: dict[UUID, tuple[CollectionEntry, MediaCells]] = {}
         self._files_excluded_dialog: ctk.CTkToplevel | None = None
         self._deduplicate_status_revision: int | None = None
         self._active_view_selection: tuple[UUID, ...] = ()
@@ -1248,6 +1281,7 @@ class _MainWindow:
         self._preview_after = None
         if self._closing:
             return
+        self._poll_media_metadata()
         request_id = self._preview_request_id
         latest_update: EvaluationProgress | None = None
         for _ in range(64):
@@ -1548,10 +1582,13 @@ class _MainWindow:
             self._finish_processing("The collection changed before destination review.")
             return
         self._set_processing_phase("planning", "Checking destination paths…", cancellable=True)
+        metadata_done = self._pause_media_metadata()
         self._start_processing_poll()
 
         def work() -> None:
             try:
+                if metadata_done is not None:
+                    metadata_done.wait()
                 plan = capture_review_plan(
                     snapshot,
                     evaluation,
@@ -1766,9 +1803,13 @@ class _MainWindow:
                 self._handle_trash_clear(payload)
             elif kind == "deduplicate":
                 self._handle_deduplicate(*payload)
+            elif kind == "perceptual":
+                self._handle_perceptual(*payload)
+            elif kind == "probable_trash":
+                self._handle_probable_trash(*payload)
             elif kind == "exit_trash_clear":
                 self._handle_exit_trash_clear(payload)
-        if self._processing_phase not in {"idle", "review"}:
+        if self._processing_phase not in {"idle", "review", "probable_review"}:
             self._start_processing_poll()
 
     def _show_processing_progress(
@@ -1818,6 +1859,10 @@ class _MainWindow:
             self.status.configure(text=label)
         elif isinstance(update, tuple) and update[0] == "stage":
             self._set_processing_phase(update[1], update[2])
+        elif isinstance(update, tuple) and self._processing_phase == "perceptual":
+            self.status.configure(text=f"Checking perceptual similarity… {update[1]}/{update[2]}")
+            if total := int(update[2]):
+                self.progress.set(int(update[1]) / total)
 
     def _handle_preflight_result(self, result: PreflightResult) -> None:
         self._active_preflight_result = None
@@ -2078,9 +2123,12 @@ class _MainWindow:
         if phase == "review":
             self._finish_processing("Rename review canceled.")
             return
+        if phase == "probable_review":
+            self._skip_probable()
+            return
         if phase in {
             "rename_modifying", "auto_cleaning", "trash_clearing", "exit_trash_clear",
-            "deduplicating",
+            "deduplicating", "probable_trash",
         }:
             self.status.configure(text="The current filesystem changes cannot be canceled safely.")
             return
@@ -2154,14 +2202,15 @@ class _MainWindow:
         dialog.grab_set()
         self._update_control_states()
 
-    def _dismiss_files_excluded(self) -> None:
+    def _dismiss_files_excluded(self, *, continue_review: bool = True) -> None:
         dialog = self._files_excluded_dialog
         if dialog is None:
             return
         self._files_excluded_dialog = None
         dialog.grab_release()
         dialog.destroy()
-        self._update_control_states()
+        if not continue_review or not self._start_perceptual():
+            self._update_control_states()
 
     def start_deduplicate(self, authorized: CollectionSnapshot | None = None) -> bool:
         if (
@@ -2176,13 +2225,16 @@ class _MainWindow:
         self._set_processing_phase(
             "deduplicating", "Validating and moving exact duplicates into managed Trash…"
         )
-        self._dismiss_files_excluded()
+        metadata_done = self._pause_media_metadata()
+        self._dismiss_files_excluded(continue_review=False)
         self.progress.configure(mode="indeterminate")
         self.progress.start()
         self._start_processing_poll()
 
         def work() -> None:
             try:
+                if metadata_done is not None:
+                    metadata_done.wait()
                 result = self.trash_executor.execute_duplicates(snapshot)
                 payload = (result, None)
             except Exception as error:
@@ -2228,7 +2280,189 @@ class _MainWindow:
             self.refresh_collection()
         if moved:
             self._notify_collection_changed()
-        elif self.active_mode == "Bulk Rename" and self._preview_result is None:
+        if self._start_perceptual():
+            return
+        if not moved and self.active_mode == "Bulk Rename" and self._preview_result is None:
+            self._invalidate_filename_preview(schedule=True)
+
+    def _start_perceptual(self) -> bool:
+        preferences, self._pending_perceptual = self._pending_perceptual, None
+        if preferences is None or self._close_pending or self._closing:
+            return False
+        snapshot = self.collection.snapshot()
+        self._processing_cancel = threading.Event()
+        cancelled = self._processing_cancel
+        tools, tool_check = self.media_tools, self._media_future
+        analyzer = self._perceptual_analyzer
+        managed_paths = self.journals.managed_paths
+        self._set_processing_phase(
+            "perceptual", "Checking perceptual similarity…", cancellable=True
+        )
+        self._start_processing_poll()
+
+        def work() -> None:
+            try:
+                available = tools
+                if tool_check is not None:
+                    while not tool_check.done():
+                        if cancelled.wait(0.05):
+                            raise MediaCancelled
+                    available, _notice = tool_check.result()
+                result = analyzer.analyze(
+                    snapshot, preferences, tools=available, cancel_check=cancelled.is_set,
+                    progress_callback=lambda done, total: self._queue_processing_progress(
+                        ("perceptual", str(done), str(total))
+                    ),
+                )
+                thumbnails = {}
+                if result.groups:
+                    observer = WindowsPathObserver(managed_paths, capture_identity=True)
+                    for group in result.groups:
+                        for match in group.members:
+                            if cancelled.is_set():
+                                raise MediaCancelled
+                            file = match.file
+                            if file.kind is MediaKind.IMAGE:
+                                data = image_thumbnail(observer, file.entry, file.observation)
+                                if data is not None:
+                                    thumbnails[file.entry.entry_id] = data
+                payload = (result, thumbnails, None)
+            except MediaCancelled:
+                payload = (None, {}, None)
+            except Exception as error:
+                payload = (None, {}, error)
+            self._processing_done.put(("perceptual", payload))
+
+        threading.Thread(target=work, name="TidyFiles-perceptual", daemon=True).start()
+        return True
+
+    def _handle_perceptual(
+        self, result: PerceptualResult | None, thumbnails: dict[UUID, bytes],
+        error: Exception | None,
+    ) -> None:
+        if self._processing_cancel.is_set() or (
+            result is not None and result.state is PerceptualState.CANCELLED
+        ):
+            self._finish_perceptual("Perceptual check canceled · imported files retained.")
+            return
+        if error is not None:
+            _LOG.error("Perceptual check: %s", error)
+            self._finish_perceptual(f"Perceptual check failed: {error}")
+            return
+        if result is None:
+            self._finish_perceptual("Perceptual check canceled · imported files retained.")
+            return
+        snapshot = self.collection.snapshot()
+        if (result.collection_id, result.revision) != (snapshot.collection_id, snapshot.revision):
+            self._finish_perceptual("Perceptual results discarded because the collection changed.")
+            return
+        issues = tuple(file for file in result.files if file.problem)
+        for file in issues:
+            _LOG.warning("Perceptual check %s: %s", file.entry.source_path, file.problem)
+        summary = f"Perceptual check complete · {len(result.files)} media file(s)"
+        if issues:
+            summary += f" · {len(issues)} issue(s): {issues[0].problem}"
+        if not result.groups:
+            self._finish_perceptual(summary)
+            return
+        self._set_processing_phase("probable_review", "Review probable duplicates.")
+        self.cancel_button.grid_remove()
+        self._probable_dialog = ProbableDuplicatesDialog(
+            self.root, result.groups, thumbnails, format_size=format_size,
+            on_delete=lambda selected: self._delete_probable(snapshot, result, selected),
+            on_skip=self._skip_probable,
+        )
+
+    def _close_probable_dialog(self) -> None:
+        dialog, self._probable_dialog = self._probable_dialog, None
+        if dialog is not None:
+            dialog.grab_release()
+            dialog.destroy()
+
+    def _skip_probable(self) -> None:
+        self._close_probable_dialog()
+        self._finish_perceptual("Probable duplicate review skipped · files retained.")
+
+    def _delete_probable(
+        self, snapshot: CollectionSnapshot, result: PerceptualResult, selected: tuple[UUID, ...]
+    ) -> None:
+        if self._processing_phase != "probable_review":
+            return
+        if not self.collection.is_current(snapshot):
+            self._close_probable_dialog()
+            self._finish_perceptual("Probable selection discarded because the collection changed.")
+            return
+        checked = set(selected)
+        reviewed = tuple(
+            (match.file.entry, match.file.observation)
+            for group in result.groups for match in group.members
+            if match.file.entry.entry_id in checked and match.file.observation is not None
+        )
+        if not reviewed:
+            self._skip_probable()
+            return
+        self._set_processing_phase(
+            "probable_trash", "Moving selected probable duplicates to Trash…"
+        )
+        metadata_done = self._pause_media_metadata()
+        self._close_probable_dialog()
+        self.collection.remove_entries(
+            tuple(entry.entry_id for entry, _ in reviewed), exclude_probable=True
+        )
+        self._render_collection_snapshot(set(self.tree.selection()))
+        self._notify_collection_changed()
+        self.progress.configure(mode="indeterminate")
+        self.progress.start()
+        self._start_processing_poll()
+
+        def work() -> None:
+            try:
+                if metadata_done is not None:
+                    metadata_done.wait()
+                payload = (self.trash_executor.execute_reviewed(reviewed), None, len(reviewed))
+            except Exception as error:
+                payload = (None, error, len(reviewed))
+            self._processing_done.put(("probable_trash", payload))
+
+        threading.Thread(target=work, name="TidyFiles-probable-trash", daemon=True).start()
+
+    def _handle_probable_trash(
+        self, result: TrashResult | None, error: Exception | None, selected_count: int
+    ) -> None:
+        moved = []
+        problems = []
+        if result is not None:
+            for row in result.entries:
+                if row.outcome is TrashOutcome.TRASHED:
+                    moved.append(row.entry_id)
+                else:
+                    detail = row.detail or result.detail or row.outcome.value.replace("_", " ")
+                    problems.append(f"{Path(row.source_path).name}: {detail}")
+            if result.detail and not problems:
+                problems.append(result.detail)
+        if error is not None:
+            problems.append(str(error))
+        self.collection.forget_trashed_probable(moved)
+        message = (
+            f"Excluded {selected_count} probable duplicate(s) · moved {len(moved)} to Trash."
+        )
+        if result is not None and result.state is TrashState.RECOVERY_REQUIRED:
+            message += " Recovery information was retained."
+        _LOG.info("Probable duplicates: %s", message)
+        for problem in problems:
+            _LOG.warning("Probable duplicates: %s", problem)
+        if problems:
+            message += f" {' '.join(problems[0].splitlines())}"
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
+        if moved:
+            self._notify_collection_changed()
+        self._finish_perceptual(message)
+
+    def _finish_perceptual(self, message: str) -> None:
+        self._deduplicate_status_revision = self.collection.revision
+        self._finish_processing(message)
+        if not self._closing and self.active_mode == "Bulk Rename":
             self._invalidate_filename_preview(schedule=True)
 
     def _handle_trash_inspection(self, payload: Any) -> None:
@@ -2745,17 +2979,16 @@ class _MainWindow:
         self._update_summary()
         self._update_import_warnings(snapshot.import_sessions)
 
-    @staticmethod
     def _entry_values(
-        index: int, entry: CollectionEntry, *, status: str | None = None, duplicate_of: str = ""
+        self, index: int, entry: CollectionEntry, *, status: str | None = None,
+        duplicate_of: str = "",
     ) -> tuple[str, ...]:
         metadata = entry.metadata
         media_type, _encoding = mimetypes.guess_type(entry.original_filename, strict=False)
-        applicable_resolution = bool(
-            media_type and (media_type.startswith("image/") or media_type.startswith("video/"))
-        )
-        applicable_length = bool(
-            media_type and (media_type.startswith("audio/") or media_type.startswith("video/"))
+        cached = self._metadata_cells.get(entry.entry_id)
+        cells = (
+            cached[1] if cached is not None and cached[0].source_path == entry.source_path
+            else default_media_cells(media_category(entry), PENDING)
         )
         values = {
             "row_number": str(index),
@@ -2768,8 +3001,8 @@ class _MainWindow:
             if status is not None
             else ("Imported" if entry.is_finalized else "Scanning"),
             "duplicate_of": duplicate_of,
-            "resolution": "— (not probed)" if applicable_resolution else "",
-            "length": "— (not probed)" if applicable_length else "",
+            "resolution": cells.resolution,
+            "length": cells.length,
             "extension": entry.source_extension,
             "file_type": media_type or "—",
             "date_created": _format_timestamp(
@@ -2836,6 +3069,7 @@ class _MainWindow:
             or self._closing
             or self._close_pending
             or self._files_excluded_dialog is not None
+            or self._pending_perceptual is not None
         )
         if busy or self._unsynced_selection is not None:
             for control in self.controls.values():
@@ -2935,6 +3169,7 @@ class _MainWindow:
             self.active_mode == "Bulk Rename"
             and self._unsynced_selection is None
             and self._files_excluded_dialog is None
+            and self._pending_perceptual is None
             and self._entries_by_id
             and result is not None
             and result.state is EvaluationState.VALID
@@ -3332,6 +3567,9 @@ class _MainWindow:
 
         if not self._preview_import_invalidated:
             self._preview_import_invalidated = True
+            preferences = self.import_controller.import_duplicate_preferences
+            if preferences is not None and preferences.enabled and preferences.perceptual_enabled:
+                self._pending_perceptual = preferences
             self._invalidate_filename_preview(
                 schedule=False, invalidate_metadata=True
             )
@@ -3511,6 +3749,8 @@ class _MainWindow:
         else:
             message = "Import failed · previous collection restored"
         successful = report.state in {DiscoveryState.COMPLETE, DiscoveryState.INCOMPLETE}
+        if not successful or self._close_pending:
+            self._pending_perceptual = None
         result = self.import_controller.duplicate_result if successful else None
         newly_excluded = 0
         if result is not None:
@@ -3541,6 +3781,8 @@ class _MainWindow:
         self._notify_collection_changed()
         if newly_excluded and not self._close_pending:
             self._show_files_excluded(snapshot, newly_excluded)
+        elif successful:
+            self._start_perceptual()
 
     def _update_import_warnings(
         self, sessions: tuple[ImportSessionSnapshot, ...] | None = None
@@ -4235,6 +4477,73 @@ class _MainWindow:
             summary += f"\n{self._media_notice}"
         self._media_label.configure(text=summary)
 
+    def _pause_media_metadata(self) -> threading.Event | None:
+        done = self._metadata_done
+        if done is not None and not done.is_set():
+            self._metadata_cancel.set()
+            self._metadata_key = None
+            return done
+        return None
+
+    def _poll_media_metadata(self) -> None:
+        tool = self.media_tools.ffprobe if self.media_tools is not None else None
+        key = (self.collection.revision, tool)
+        paused = self._import_is_busy() or self._processing_phase in _MEDIA_WRITE_PHASES
+        for _ in range(32):
+            try:
+                observed_key, entry, cells = self._metadata_updates.get_nowait()
+            except queue.Empty:
+                break
+            if paused or observed_key != key:
+                continue
+            self._metadata_cells[entry.entry_id] = entry, cells
+            visible = self._entries_by_id.get(entry.entry_id)
+            if visible is not None and visible.source_path == entry.source_path:
+                item_id = str(entry.entry_id)
+                if self.tree.exists(item_id):
+                    self.tree.set(item_id, "resolution", cells.resolution)
+                    self.tree.set(item_id, "length", cells.length)
+        if self._metadata_done is not None and not self._metadata_done.is_set():
+            if paused or key != self._metadata_key:
+                self._metadata_cancel.set()
+            return
+        if paused or key == self._metadata_key:
+            return
+        self._metadata_key = key
+        snapshot = self.collection.snapshot()
+        entries = (*snapshot.entries, *(row.entry for row in snapshot.excluded_duplicates))
+        self._metadata_cells = {
+            entry.entry_id: cached
+            for entry in entries
+            if (cached := self._metadata_cells.get(entry.entry_id)) is not None
+            and cached[0] == entry
+        }
+        if not entries:
+            return
+        self._metadata_cancel = cancelled = threading.Event()
+        self._metadata_done = done = threading.Event()
+        updates, reader = self._metadata_updates, self._metadata_probe
+
+        def publish(entry: CollectionEntry, cells: MediaCells) -> None:
+            while not cancelled.is_set():
+                try:
+                    updates.put((key, entry, cells), timeout=0.1)
+                except queue.Full:
+                    continue
+                return
+
+        def work() -> None:
+            try:
+                reader.read(entries, tool, cancelled=cancelled.is_set, publish=publish)
+            except MediaCancelled:
+                pass
+            except Exception as error:
+                _LOG.warning("Media metadata probing stopped: %s", error)
+            finally:
+                done.set()
+
+        threading.Thread(target=work, name="TidyFiles-metadata", daemon=True).start()
+
     def _on_settings_window_destroy(
         self, event: tk.Event[Any], dialog: ctk.CTkToplevel
     ) -> None:
@@ -4372,7 +4681,7 @@ class _MainWindow:
             or self._processing_phase
             in {
                 "rename_modifying", "auto_cleaning", "trash_clearing", "exit_trash_clear",
-                "deduplicating",
+                "deduplicating", "probable_trash",
             }
         ):
             self.status.configure(
@@ -4409,7 +4718,7 @@ class _MainWindow:
     def _finish_close(self) -> None:
         if self._closing:
             return
-        self._dismiss_files_excluded()
+        self._dismiss_files_excluded(continue_review=False)
         if not self._exit_cleanup_done:
             self._exit_cleanup_done = True
             if get_auto_clear_trash_on_exit(self.config):
@@ -4435,6 +4744,7 @@ class _MainWindow:
                 return
         self._closing = True
         self._media_cancel.set()
+        self._metadata_cancel.set()
         self.import_controller.dispose()
         self.preflight_service.close(wait=False)
         for name in (

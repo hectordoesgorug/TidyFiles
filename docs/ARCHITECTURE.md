@@ -64,6 +64,8 @@ not implemented.
 | `src/tidyfiles/preflight_service.py` | A bounded preflight worker with replacement, cancellation, progress, and current-result tracking. |
 | `src/tidyfiles/duplicate_analysis.py` | Read-only exact duplicate analysis of finalized collection snapshots, with bounded hashing, byte confirmation, ordered results, progress, and session-scoped evidence. |
 | `src/tidyfiles/perceptual_analysis.py` | Read-only 64-bit image and sampled video perceptual hashing, session-scoped evidence, and deterministic probable-duplicate grouping. |
+| `src/tidyfiles/media_metadata.py` | Background media cell values and review thumbnail preparation, with source observation checks. |
+| `src/tidyfiles/probable_dialog.py` | Modal group review, checkbox controls, and routing of the user's choice. |
 | `src/tidyfiles/media_tools.py` | Portable FFmpeg and FFprobe resolution, bounded subprocesses, and explicitly authorized import. |
 | `src/tidyfiles/transaction_record.py` | Versioned transaction records, Windows identity encoding, and finalization evidence validation. |
 | `src/tidyfiles/transaction_journal.py` | Pinned journal sessions, atomic persistence, the independent recovery locator, read-only discovery, and explicitly authorized recovery-record dismissal. |
@@ -705,8 +707,7 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Media verification, Purge, probable duplicate review, and repacking are future
-components.
+Media verification, Purge, and repacking are future components.
 
 ## Perceptual analysis and portable media tools
 
@@ -733,8 +734,25 @@ checks the approved destination observations, and validates the installed
 copies. If installation fails, it restores the prior pair where possible and
 reports any retained backups. The implementation uses the portable directory
 for all tools, independent of the working directory and PATH. Import and
-probable-duplicate review integration with **Add Files** and **Add Folder**
-belongs to M4-D.
+metadata use the same portable resolver. Video hashing needs a validated pair,
+while table metadata needs only FFprobe.
+
+**Add Files** and **Add Folder** capture duplicate preferences for the import.
+When both checks are enabled, the application schedules perceptual analysis
+after finalizing exact exclusions and after any exact Trash transfer from
+**Files Excluded**. Process stays disabled through probable review and any
+authorized Trash transfer. Canceling perceptual analysis keeps the finalized
+collection and any already completed exact transfers. Probable selections are
+tracked as session exclusions before Trash starts. Failed paths stay reserved
+until the collection is cleared. The application checks the collection revision
+before presenting results or accepting a selection.
+
+The metadata worker reads image dimensions with Pillow and video or audio
+stream data with FFprobe. It caches successful observations and streams
+revision- and tool-scoped results into the corresponding Treeview cells.
+Preview readiness is independent of these display values. Before a modifying
+operation needs a file, its worker waits for canceled metadata reads to release
+their handles.
 
 ## Deferred maintainability review
 
