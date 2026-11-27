@@ -752,9 +752,11 @@ before presenting results or accepting a selection.
 The metadata worker reads image dimensions with Pillow and video or audio
 stream data with FFprobe. It caches successful observations and streams
 revision- and tool-scoped results into the corresponding Treeview cells.
-Preview readiness is independent of these display values. Before a modifying
-operation needs a file, its worker waits for canceled metadata reads to release
-their handles.
+Preview readiness is independent of these display values. Before preparing a
+rename or transferring files to Trash, the operation gives a canceled metadata
+worker up to three seconds to release its handles. If the worker is still
+active, the attempt ends safely. Metadata probing can resume after the canceled
+worker exits.
 
 ## Integrity verification and Purge
 

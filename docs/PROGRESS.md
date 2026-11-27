@@ -1191,6 +1191,20 @@ Local Windows verification on Python 3.13.17 passed all 796 default tests,
 27 focused GUI scenarios, 80 service regressions, and ten opt-in real-media
 tests. Ruff, compileall, pip check, and Git whitespace checks passed.
 
+The Windows CI run for M4-E at `5cf4808` reported 791 passing tests and two
+GUI timeouts. The metadata fixture waited for perceptual analysis while
+Deduplicate waited for the fixture to stop. The updated tests start with
+metadata probing active, let cancellation release the fixture, and invoke OK
+before waiting for perceptual analysis. A stalled metadata reader now causes
+a bounded, fail-safe transfer attempt. Pending exclusions stay available for
+retry after the reader exits.
+
+Amendment verification passed all 797 tests in the final local Windows run,
+28 focused GUI cases, 80 service regressions, and ten opt-in real-media tests.
+Both CI cases passed three final isolated repetitions. Two earlier full runs
+each hit a different intermittent Tk check. Both passed in isolation and in
+the final complete run.
+
 ## M6.1 — Targeted maintainability review
 
 After M6 and before M7, review the implemented modules and dependency boundaries

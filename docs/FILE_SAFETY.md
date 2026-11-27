@@ -395,6 +395,10 @@ explicit actions. It locks the dialog during a transfer, and OK leaves
 remaining exclusions physically untouched. Post-verify reports findings on
 successful outputs and leaves their contents and resulting paths in place.
 
+If a canceled metadata reader exceeds the stop deadline, Purge and
+Deduplicate report the timeout and retain the pending exclusion evidence.
+Trash transfer begins only after the reader has stopped.
+
 ## Planned safety components
 
 The following remain unimplemented:

@@ -67,6 +67,7 @@ def _close_app(app, root) -> None:
 @pytest.mark.parametrize("scenario", [
     "disabled", "independent", "ok", "purge", "deduplicate", "changed", "unavailable",
     "cancel", "stale", "purge_then_deduplicate", "deduplicate_then_purge", "purge_partial",
+    "purge_stalled",
 ])
 def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
     if _run_gui_test_in_isolated_process(f"test_pre_verification_and_purge_workflow[{scenario}]"):
@@ -112,11 +113,31 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
     verifies, exact, perceptual, popups = [], [], [], []
     entered, release = threading.Event(), threading.Event()
     transfer_release = threading.Event()
+    metadata_entered, metadata_cancelled = threading.Event(), threading.Event()
+    metadata_release, metadata_resumed = threading.Event(), threading.Event()
+    stalled = scenario == "purge_stalled"
     verify = app._integrity_verifier.verify
     analyze_exact = app.import_controller._duplicate_analyzer.analyze
     analyze_perceptual = app._perceptual_analyzer.analyze
     execute_purge = app.trash_executor.execute_reviewed
     execute_deduplicate = app.trash_executor.execute_duplicates
+    read_metadata = app._metadata_probe.read
+    transfer_calls = []
+
+    def delay_metadata(entries, probe, *, cancelled, publish):
+        if not metadata_entered.is_set():
+            metadata_entered.set()
+            if stalled:
+                assert metadata_release.wait(10)
+            else:
+                while not cancelled() and not metadata_release.wait(0.01):
+                    pass
+            if cancelled():
+                metadata_cancelled.set()
+                return
+        else:
+            metadata_resumed.set()
+        return read_metadata(entries, probe, cancelled=cancelled, publish=publish)
 
     def check(entries, tool, **options):
         verifies.append(entries)
@@ -143,6 +164,9 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
     def hold_transfer(execute):
         def transfer(scope):
             assert transfer_release.wait(5)
+            transfer_calls.append(execute)
+            if execute is execute_purge and scenario in {"purge", "purge_stalled"}:
+                assert metadata_cancelled.is_set()
             return execute(scope)
 
         return transfer
@@ -151,11 +175,18 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
     monkeypatch.setattr(
         app.trash_executor, "execute_duplicates", hold_transfer(execute_deduplicate)
     )
+    if scenario in {"purge", "purge_stalled"}:
+        monkeypatch.setattr(app._metadata_probe, "read", delay_metadata)
+    stop_timeout = app_module._METADATA_STOP_TIMEOUT
+    if stalled:
+        monkeypatch.setattr(app_module, "_METADATA_STOP_TIMEOUT", 0)
     for popup in ("askyesno", "showinfo", "showwarning", "showerror"):
         monkeypatch.setattr(app_module.messagebox, popup, lambda *args, **_: popups.append(args))
 
     try:
         root.update()
+        if scenario in {"purge", "purge_stalled"}:
+            _wait_for(root, lambda: app._media_future is None)
         app.rename_format.set("<IncNr>")
         files = (good, duplicate, bad, unsupported, *((second_bad,) if partial else ()))
         monkeypatch.setattr(app_module.filedialog, "askopenfilenames", lambda **_: tuple(
@@ -192,6 +223,7 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
             "purge": ("Purge",), "independent": ("Purge",), "changed": ("Purge",),
             "unavailable": ("Purge",),
             "purge_partial": ("Purge",), "deduplicate": ("Deduplicate",),
+            "purge_stalled": ("Purge", "Purge"),
             "purge_then_deduplicate": ("Purge", "Deduplicate"),
             "deduplicate_then_purge": ("Deduplicate", "Purge"),
         }.get(scenario, ())
@@ -207,7 +239,10 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
         close_protocol = dialog.protocol("WM_DELETE_WINDOW")
         dialog.tk.call(close_protocol)
         assert dialog.winfo_exists()
-        for action in actions:
+        if scenario in {"purge", "purge_stalled"}:
+            _wait_for(root, metadata_entered.is_set)
+            assert app._metadata_done is not None and not app._metadata_done.is_set()
+        for attempt, action in enumerate(actions):
             transfer_release.clear()
             buttons[action].invoke()
             assert app._files_excluded_dialog is dialog
@@ -236,6 +271,16 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
                 if label in buttons:
                     assert buttons[label].cget("state") == ("normal" if pending else "disabled")
             message = labels[1].cget("text")
+            if stalled and attempt == 0:
+                assert "Purged 0" in message and "1 remain excluded" in message
+                assert "Media metadata reading is still stopping" in message
+                assert not transfer_calls and not metadata_cancelled.is_set()
+                assert bad.read_bytes() == original and not perceptual
+                monkeypatch.setattr(app_module, "_METADATA_STOP_TIMEOUT", stop_timeout)
+                metadata_release.set()
+                _wait_for(root, metadata_resumed.is_set)
+                assert metadata_cancelled.is_set() and not app._process_ready()
+                continue
             if partial:
                 assert "Purged 1" in message and "1 remain excluded" in message
                 assert "1 issue(s)" in message and "identity changed" in message
@@ -246,6 +291,10 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
                 assert "0 remain excluded" in message
             assert not popups and not perceptual and not app._process_ready()
             assert app.process_button.cget("state") == "disabled"
+        if scenario in {"purge", "purge_stalled"}:
+            _wait_for(root, metadata_resumed.is_set)
+            assert metadata_cancelled.is_set()
+            assert transfer_calls == [execute_purge] and not perceptual
         buttons["OK"].invoke()
         assert not dialog.winfo_exists()
         if scenario not in {"disabled", "independent"}:
@@ -262,10 +311,10 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
         if scenario not in {"disabled", "independent"}:
             assert len(perceptual) == 1
             assert {row.original_filename for row in perceptual[0]} == {good.name, unsupported.name}
-        if scenario in {"purge", "independent"} or len(actions) == 2:
-            assert not bad.exists() and duplicate.exists() == (len(actions) == 1)
+        if scenario in {"purge", "independent", "purge_stalled"} or len(actions) == 2:
+            assert not bad.exists() and duplicate.exists() == ("Deduplicate" not in actions)
             assert not snapshot.excluded_corruption
-            assert bool(snapshot.excluded_duplicates) == (scenario == "purge")
+            assert bool(snapshot.excluded_duplicates) == (scenario in {"purge", "purge_stalled"})
             assert [path.read_bytes() for path in (app_dir / "trash").glob("*/*.png")] == [original]
         elif scenario in {"changed", "unavailable", "purge_partial"}:
             assert bad.read_bytes() == original and duplicate.exists()
@@ -289,6 +338,7 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
     finally:
         release.set()
         transfer_release.set()
+        metadata_release.set()
         _close_app(app, root)
         storage.managed_trash_path.cache_clear()
 
@@ -655,6 +705,7 @@ def test_perceptual_import_and_review(tmp_path, monkeypatch, scenario):
         monkeypatch.setattr(app_module.messagebox, popup, lambda *args, **_: popups.append(args))
     try:
         root.update()
+        _wait_for(root, lambda: app._media_future is None)
         app.rename_format.set("<Name> renamed")
         if scenario in {"unique", "cumulative"}:
             _import_files(app, root, monkeypatch, a, keep)
@@ -668,6 +719,7 @@ def test_perceptual_import_and_review(tmp_path, monkeypatch, scenario):
         if scenario in {"none", "disabled"}:
             _wait_for(root, metadata_entered.is_set)
             _wait_for(root, app._process_ready)
+            assert app._metadata_done is not None and not app._metadata_done.is_set()
             assert not calls
             assert app._probable_dialog is None
             metadata_release.set()
@@ -685,6 +737,7 @@ def test_perceptual_import_and_review(tmp_path, monkeypatch, scenario):
             action = "Deduplicate" if scenario in {"deduplicate", "cancel"} else "OK"
             if action == "Deduplicate":
                 _wait_for(root, metadata_entered.is_set)
+                assert app._metadata_done is not None and not app._metadata_done.is_set()
                 invoke(dialog, action)
                 _wait_for(root, lambda: app._processing_phase == "idle")
                 assert app._files_excluded_dialog is dialog and not entered.is_set()
