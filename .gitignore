@@ -39,6 +39,10 @@ junit.xml
 /trash/
 /journals
 
+# Tools
+/ffmpeg.exe
+/ffprobe.exe
+
 # Local environment values and credentials
 .env
 .env.*
