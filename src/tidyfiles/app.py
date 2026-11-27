@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 import os
 import queue
@@ -37,13 +38,16 @@ from tidyfiles.collection import (
 )
 from tidyfiles.config import (
     ConfigError,
+    DuplicatePreferences,
     default_config,
     get_auto_clean_enabled,
     get_auto_clear_trash_on_exit,
+    get_duplicate_preferences,
     get_sorting_preferences,
     save_config,
     set_auto_clean_enabled,
     set_auto_clear_trash_on_exit,
+    set_duplicate_preferences,
     set_sorting_preferences,
 )
 from tidyfiles.destination_planning import (
@@ -52,10 +56,12 @@ from tidyfiles.destination_planning import (
     PlanState,
 )
 from tidyfiles.discovery import (
+    DiscoveryDisposition,
     DiscoveryReport,
     DiscoverySession,
     DiscoveryState,
 )
+from tidyfiles.duplicate_analysis import DuplicateAnalyzer, HashAlgorithm
 from tidyfiles.execution_preflight import (
     PreflightProgress,
     PreflightRequest,
@@ -74,6 +80,7 @@ from tidyfiles.filename_integration import (
 )
 from tidyfiles.format_reference import FORMAT_REFERENCE, TOKEN_GROUPS
 from tidyfiles.import_controller import ImportController
+from tidyfiles.managed_trash import TrashExecutor, TrashOutcome, TrashResult, TrashState
 from tidyfiles.modifying_jobs import ModifyingJobCoordinator
 from tidyfiles.preflight_service import PreflightService
 from tidyfiles.recovery import RecoveryInspection, RecoveryInspector
@@ -100,6 +107,7 @@ from tidyfiles.ui_preferences import (
 )
 
 _DEFAULT_MODE = MODES[0]
+_LOG = logging.getLogger(__name__)
 _FORMAT_PRESETS = (
     "<DirName> <IncNr>",
     "<SubDirName> <IncNr>",
@@ -251,6 +259,12 @@ class _MainWindow:
         self.recovery_inspector = RecoveryInspector(self.journals)
         self.auto_clean_service = AutoCleanService(self.coordinator, self.journals)
         self.trash_clear_service = TrashClearService(self.coordinator, self.journals)
+        self.trash_executor = TrashExecutor(self.coordinator, self.journals)
+        self._files_excluded_dialog: ctk.CTkToplevel | None = None
+        self._deduplicate_status_revision: int | None = None
+        self._active_view_selection: tuple[UUID, ...] = ()
+        self._import_view_switched = False
+        self._duplicate_issues: tuple[tuple[str, str], ...] = ()
         self.active_mode = _DEFAULT_MODE
         self.column_preferences = {
             mode: get_column_preferences(self.config, mode) for mode in MODES
@@ -288,6 +302,9 @@ class _MainWindow:
         self.settings_window: ctk.CTkToplevel | None = None
         self.appearance_choice: tk.StringVar | None = None
         self.auto_clear_trash_switch: ctk.CTkSwitch | None = None
+        self._duplicate_settings_widgets: tuple[
+            ctk.CTkSwitch, ctk.CTkOptionMenu, ctk.CTkOptionMenu
+        ] | None = None
         self._entries_by_id: dict[UUID, CollectionEntry] = {}
         self._display_order: list[UUID] = []
         self._display_positions: dict[UUID, int] = {}
@@ -366,6 +383,8 @@ class _MainWindow:
             on_finished=self._on_import_finished,
             on_error=self._on_import_error,
             on_shutdown=self._finish_close,
+            duplicate_preferences=lambda: get_duplicate_preferences(self.config),
+            duplicate_analyzer=DuplicateAnalyzer(managed_paths=self.journals.managed_paths),
         )
         self._preview_service = FilenameEvaluationService()
         self.rename_format.trace_add("write", self._on_format_changed)
@@ -429,7 +448,7 @@ class _MainWindow:
         self._build_bulk_rename_panel(self.mode_panels["Bulk Rename"])
         self._build_placeholder_panel(
             self.mode_panels["Duplicate Finder"],
-            "Duplicate analysis controls will be added with duplicate verification.",
+            "Exact duplicates excluded from processing appear below.",
         )
         self._build_placeholder_panel(
             self.mode_panels["Repacker"],
@@ -769,12 +788,15 @@ class _MainWindow:
                 "Bulk Rename": "Process",
                 "Duplicate Finder": "Deduplicate",
                 "Repacker": "Repack",
-            }[mode]
+            }[mode],
+            command=(
+                self.start_deduplicate if mode == "Duplicate Finder" else self.start_rename_review
+            ),
         )
 
     def _on_mode_change(self) -> None:
         mode = self.tabs.get()
-        if self._processing_phase != "idle":
+        if self._processing_phase != "idle" or self._files_excluded_dialog is not None:
             self.tabs.set(self.active_mode)
             return
         if mode in self.mode_panels:
@@ -782,10 +804,16 @@ class _MainWindow:
             if mode != previous:
                 self._close_columns()
                 self._persist_column_widths()
+                if mode == "Duplicate Finder":
+                    self._active_view_selection = self._selected_entry_ids()
                 self._apply_mode(mode)
                 if previous == "Bulk Rename":
                     self._leave_bulk_rename()
-                elif mode == "Bulk Rename":
+                if "Duplicate Finder" in (previous, mode):
+                    self._import_view_switched = self._import_is_busy()
+                    selected = self._active_view_selection if previous == "Duplicate Finder" else ()
+                    self._render_collection_snapshot({str(entry_id) for entry_id in selected})
+                if mode == "Bulk Rename":
                     self._return_to_bulk_rename()
             else:
                 self._apply_mode(mode)
@@ -932,6 +960,7 @@ class _MainWindow:
     def _on_format_changed(self, *_args: Any) -> None:
         if self._closing or self._unsynced_selection is not None:
             return
+        self._deduplicate_status_revision = None
         self._set_format_diagnostic(None)
         self._invalidate_filename_preview(schedule=True)
         if not self.rename_format.get() and self._entries_by_id:
@@ -946,6 +975,13 @@ class _MainWindow:
         if not self.rename_format.get() and not self._entries_by_id:
             self._set_format_diagnostic(None)
         self._update_control_states()
+
+    def _set_preview_status(self, message: str) -> None:
+        if (
+            self._processing_phase != "deduplicating"
+            and self._deduplicate_status_revision != self.collection.revision
+        ):
+            self.status.configure(text=message)
 
     def _set_format_diagnostic(self, diagnostic: Any | None) -> None:
         if diagnostic is None:
@@ -1012,14 +1048,14 @@ class _MainWindow:
         )
         status = "Pending" if should_schedule else None
         if self.active_mode == "Bulk Rename" and should_schedule:
-            self.status.configure(text="Filename preview pending")
+            self._set_preview_status("Filename preview pending")
         elif (
             self.active_mode == "Bulk Rename"
             and expression
             and not busy
             and has_entries
         ):
-            self.status.configure(text="Filename preview pending")
+            self._set_preview_status("Filename preview pending")
         elif self.active_mode == "Bulk Rename" and not expression:
             if has_entries and not busy:
                 self.format_diagnostic.configure(text="A rename format is required.")
@@ -1041,6 +1077,9 @@ class _MainWindow:
         status: str | None,
         baseline: bool,
     ) -> None:
+        if self.active_mode == "Duplicate Finder":
+            self._cancel_preview_after("_preview_clear_after")
+            return
         target_status = status or "Imported"
         same_target = (
             self._preview_clear_status == target_status
@@ -1154,7 +1193,7 @@ class _MainWindow:
                 except queue.Full:
                     pass
 
-        self.status.configure(text="Evaluating filenames")
+        self._set_preview_status("Evaluating filenames")
         self.progress.set(0)
         try:
             self._preview_future = self._preview_service.submit(
@@ -1164,7 +1203,7 @@ class _MainWindow:
                 progress_callback=progress,
             )
         except RuntimeError as error:
-            self.status.configure(text=f"Filename preview could not start: {error}")
+            self._set_preview_status(f"Filename preview could not start: {error}")
             return
         self._preview_request_id = self._preview_future.request_id
         self._preview_request_generation = generation
@@ -1224,7 +1263,7 @@ class _MainWindow:
                 EvaluationStage.CONTEXTS: "Preparing filename context",
                 EvaluationStage.EVALUATING: "Evaluating filenames",
             }
-            self.status.configure(text=labels[latest_update.stage])
+            self._set_preview_status(labels[latest_update.stage])
             if latest_update.total > 0:
                 self.progress.set(min(1.0, latest_update.completed / latest_update.total))
 
@@ -1235,7 +1274,7 @@ class _MainWindow:
                 result = future.result()
             except Exception as error:
                 if request_id == self._preview_request_id and not self._import_is_busy():
-                    self.status.configure(text=f"Filename preview failed: {error}")
+                    self._set_preview_status(f"Filename preview failed: {error}")
             else:
                 if (
                     request_id == self._preview_request_id
@@ -1277,7 +1316,7 @@ class _MainWindow:
         )
         self._set_format_diagnostic(parse_error)
         self._index_preview_diagnostics(result)
-        self.status.configure(text="Updating filename preview rows")
+        self._set_preview_status("Updating filename preview rows")
         if result.entries:
             self._preview_render_after = self.root.after(0, self._render_preview_chunk)
         else:
@@ -1390,15 +1429,13 @@ class _MainWindow:
         self._preview_render_result = None
         self.progress.set(0)
         if result.is_valid:
-            self.status.configure(
-                text=(
-                    f"Preview complete · {len(result.entries)} filenames · "
-                    "destination review available"
-                )
+            self._set_preview_status(
+                f"Preview complete · {len(result.entries)} filenames · "
+                "destination review available"
             )
         else:
-            self.status.configure(
-                text="Preview contains errors · the complete batch cannot be processed"
+            self._set_preview_status(
+                "Preview contains errors · the complete batch cannot be processed"
             )
         self._update_control_states()
 
@@ -1440,6 +1477,7 @@ class _MainWindow:
     def refresh_filename_preview(self) -> None:
         if self._closing or self._import_is_busy() or self._collection_operation_pending:
             return
+        self._deduplicate_status_revision = None
         if self._unsynced_selection is not None:
             try:
                 self.refresh_collection()
@@ -1708,6 +1746,8 @@ class _MainWindow:
                 self._handle_trash_inspection(payload)
             elif kind == "trash_clear":
                 self._handle_trash_clear(payload)
+            elif kind == "deduplicate":
+                self._handle_deduplicate(*payload)
             elif kind == "exit_trash_clear":
                 self._handle_exit_trash_clear(payload)
         if self._processing_phase not in {"idle", "review"}:
@@ -2020,7 +2060,10 @@ class _MainWindow:
         if phase == "review":
             self._finish_processing("Rename review canceled.")
             return
-        if phase in {"rename_modifying", "auto_cleaning", "trash_clearing", "exit_trash_clear"}:
+        if phase in {
+            "rename_modifying", "auto_cleaning", "trash_clearing", "exit_trash_clear",
+            "deduplicating",
+        }:
             self.status.configure(text="The current filesystem changes cannot be canceled safely.")
             return
         if phase == "rename_preparing":
@@ -2060,6 +2103,115 @@ class _MainWindow:
         threading.Thread(
             target=inspect, name="TidyFiles-trash-inspection", daemon=True
         ).start()
+
+    def _show_files_excluded(self, snapshot: CollectionSnapshot, newly_excluded: int) -> None:
+        dialog = ctk.CTkToplevel(self.root)
+        self._files_excluded_dialog = dialog
+        dialog.title("Files Excluded")
+        dialog.geometry("455x225")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.protocol("WM_DELETE_WINDOW", self._dismiss_files_excluded)
+        body = ctk.CTkFrame(dialog)
+        body.pack(fill="both", expand=True, padx=12, pady=12)
+        ctk.CTkLabel(
+            body,
+            text=(
+                f"{newly_excluded} file(s) excluded as exact duplicates.\n"
+                f"{len(snapshot.entries)} file(s) remain for processing.\n\n"
+                f"Deduplicate moves {len(snapshot.excluded_duplicates)} excluded file(s) "
+                "into managed Trash. OK leaves them on disk."
+            ),
+            justify="left", anchor="w", wraplength=400,
+        ).pack(fill="x", padx=12, pady=12)
+        actions = ctk.CTkFrame(body, fg_color="transparent")
+        actions.pack(side="bottom", anchor="e", padx=12, pady=12)
+        ctk.CTkButton(
+            actions, text="Deduplicate", width=115,
+            command=lambda: self.start_deduplicate(snapshot),
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            actions, text="OK", width=75, command=self._dismiss_files_excluded
+        ).pack(side="left")
+        dialog.grab_set()
+        self._update_control_states()
+
+    def _dismiss_files_excluded(self) -> None:
+        dialog = self._files_excluded_dialog
+        if dialog is None:
+            return
+        self._files_excluded_dialog = None
+        dialog.grab_release()
+        dialog.destroy()
+        self._update_control_states()
+
+    def start_deduplicate(self, authorized: CollectionSnapshot | None = None) -> bool:
+        if (
+            self._closing or self._close_pending or self._collection_operation_pending
+            or self._import_is_busy()
+            or (authorized is None and self.active_mode != "Duplicate Finder")
+        ):
+            return False
+        snapshot = self.collection.snapshot() if authorized is None else authorized
+        if not snapshot.excluded_duplicates or not self.collection.is_current(snapshot):
+            return False
+        self._set_processing_phase(
+            "deduplicating", "Validating and moving exact duplicates into managed Trash…"
+        )
+        self._dismiss_files_excluded()
+        self.progress.configure(mode="indeterminate")
+        self.progress.start()
+        self._start_processing_poll()
+
+        def work() -> None:
+            try:
+                result = self.trash_executor.execute_duplicates(snapshot)
+                payload = (result, None)
+            except Exception as error:
+                payload = (None, error)
+            self._processing_done.put(("deduplicate", payload))
+
+        threading.Thread(target=work, name="TidyFiles-deduplicate", daemon=True).start()
+        return True
+
+    def _handle_deduplicate(self, result: TrashResult | None, error: Exception | None) -> None:
+        moved = []
+        problems = []
+        if result is not None:
+            for item in result.entries:
+                if item.outcome is TrashOutcome.TRASHED:
+                    moved.append(item.entry_id)
+                    self._processing_diagnostics_by_id.pop(item.entry_id, None)
+                else:
+                    detail = item.detail or result.detail or item.outcome.value.replace("_", " ")
+                    self._processing_diagnostics_by_id[item.entry_id] = detail
+                    problems.append(f"{Path(item.source_path).name}: {detail}")
+            if result.detail and not problems:
+                problems.append(result.detail)
+        if error is not None:
+            problems.append(str(error))
+        self.collection.forget_trashed_duplicates(moved)
+        remaining = len(self.collection.snapshot().excluded_duplicates)
+        message = f"Moved {len(moved)} duplicate(s) to Trash. {remaining} remain excluded."
+        if result is not None and result.state is TrashState.RECOVERY_REQUIRED:
+            message += " Recovery information was retained."
+        if problems:
+            message += f" {len(problems)} issue(s)."
+        _LOG.info("Deduplicate: %s", message)
+        for problem in problems:
+            _LOG.warning("Deduplicate: %s", problem)
+        if problems:
+            message += f" {' '.join(problems[0].splitlines())}"
+        self._deduplicate_status_revision = self.collection.revision
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
+        self._finish_processing(message)
+        if self.active_mode == "Duplicate Finder":
+            self.refresh_collection()
+        if moved:
+            self._notify_collection_changed()
+        elif self.active_mode == "Bulk Rename" and self._preview_result is None:
+            self._invalidate_filename_preview(schedule=True)
 
     def _handle_trash_inspection(self, payload: Any) -> None:
         summary, error = payload
@@ -2523,13 +2675,24 @@ class _MainWindow:
             if self._unsynced_selection is None
             else {str(entry_id) for entry_id in self._unsynced_selection}
         )
-        for item in self.tree.get_children(""):
-            self.tree.delete(item)
+        self._render_collection_snapshot(selected)
+        self._unsynced_selection = None
+
+    def _render_collection_snapshot(self, selected: set[str]) -> None:
+        rows = set(self.tree.get_children(""))
+        rows.update(
+            str(entry_id) for entry_id in self._entries_by_id if self.tree.exists(str(entry_id))
+        )
+        if rows:
+            self.tree.delete(*rows)
         snapshot = self.collection.snapshot()
-        entries = snapshot.entries
+        duplicates = {item.entry.entry_id: item for item in snapshot.excluded_duplicates}
+        finder = self.active_mode == "Duplicate Finder"
+        entries = tuple(item.entry for item in duplicates.values()) if finder else snapshot.entries
         self._entries_by_id.clear()
         self._display_order.clear()
         self._display_positions.clear()
+        self._collection_render_previous_positions = {}
         self._preview_filename_ids.clear()
         self._preview_problem_ids.clear()
         self._known_size_bytes = 0
@@ -2540,11 +2703,21 @@ class _MainWindow:
             self._display_order.append(entry.entry_id)
             self._display_positions[entry.entry_id] = index - 1
             self._account_size(entry, 1)
+            duplicate = duplicates.get(entry.entry_id)
+            values = (
+                self._entry_values(
+                    index, entry,
+                    status="Trash failed" if entry.entry_id in self._processing_diagnostics_by_id
+                    else "Duplicate",
+                    duplicate_of=duplicate.keeper.original_filename,
+                )
+                if duplicate is not None else self._entry_values(index, entry)
+            )
             self.tree.insert(
                 "",
                 "end",
                 iid=item_id,
-                values=self._entry_values(index, entry),
+                values=values,
                 tags=("normal",),
             )
         self._preview_clear_applied = ("Imported", True)
@@ -2553,11 +2726,10 @@ class _MainWindow:
             self.tree.selection_set(surviving)
         self._update_summary()
         self._update_import_warnings(snapshot.import_sessions)
-        self._unsynced_selection = None
 
     @staticmethod
     def _entry_values(
-        index: int, entry: CollectionEntry, *, status: str | None = None
+        index: int, entry: CollectionEntry, *, status: str | None = None, duplicate_of: str = ""
     ) -> tuple[str, ...]:
         metadata = entry.metadata
         media_type, _encoding = mimetypes.guess_type(entry.original_filename, strict=False)
@@ -2577,7 +2749,7 @@ class _MainWindow:
             "status": status
             if status is not None
             else ("Imported" if entry.is_finalized else "Scanning"),
-            "group": "",
+            "duplicate_of": duplicate_of,
             "resolution": "— (not probed)" if applicable_resolution else "",
             "length": "— (not probed)" if applicable_length else "",
             "extension": entry.source_extension,
@@ -2596,7 +2768,8 @@ class _MainWindow:
 
     def _update_summary(self, _event: tk.Event[Any] | None = None) -> None:
         selected_count = len(self.tree.selection())
-        manual = self.collection.ordering_mode is OrderingMode.MANUAL
+        finder = self.active_mode == "Duplicate Finder"
+        manual = not finder and self.collection.ordering_mode is OrderingMode.MANUAL
         if self._unknown_size_count:
             size_text = (
                 f"Known size: {format_size(self._known_size_bytes)} · "
@@ -2607,7 +2780,7 @@ class _MainWindow:
         manual_text = f"Manual order · {len(self._entries_by_id)} files  " if manual else ""
         self.summary.configure(
             text=(
-                f"{manual_text}Files: {len(self._entries_by_id)}  "
+                f"{manual_text}{'Excluded' if finder else 'Files'}: {len(self._entries_by_id)}  "
                 f"Selected: {selected_count}  {size_text}"
             )
         )
@@ -2644,6 +2817,7 @@ class _MainWindow:
             or self._collection_operation_pending
             or self._closing
             or self._close_pending
+            or self._files_excluded_dialog is not None
         )
         if busy or self._unsynced_selection is not None:
             for control in self.controls.values():
@@ -2670,11 +2844,12 @@ class _MainWindow:
 
         self.controls["add_files"].configure(state="normal")
         self.controls["add_folder"].configure(state="normal")
+        finder = self.active_mode == "Duplicate Finder"
         has_entries = bool(self._entries_by_id)
         selected = self._selected_entry_ids()
         selected_set = set(selected)
         self.controls["remove"].configure(
-            state="normal" if selected else "disabled"
+            state="normal" if selected and not finder else "disabled"
         )
         clearable = has_entries
         if not clearable:
@@ -2683,8 +2858,8 @@ class _MainWindow:
         self.controls["clear_all"].configure(
             state="normal" if clearable else "disabled"
         )
-        self.sort_dropdown.configure(state="normal")
-        self.sort_direction_button.configure(state="normal")
+        self.sort_dropdown.configure(state="disabled" if finder else "normal")
+        self.sort_direction_button.configure(state="disabled" if finder else "normal")
         self.refresh_preview_button.configure(
             state=(
                 "normal"
@@ -2692,7 +2867,7 @@ class _MainWindow:
                 else "disabled"
             )
         )
-        self._configure_process_button(self._process_ready())
+        self._configure_process_button(has_entries if finder else self._process_ready())
         self.trash_clear_button.configure(state="normal")
         self.settings_button.configure(state="normal")
         self.format_field.configure(state="normal")
@@ -2701,7 +2876,7 @@ class _MainWindow:
         if (switch := self._live_trash_switch()) is not None:
             switch.configure(state="normal")
         positions = [self._display_positions[entry_id] for entry_id in selected]
-        can_move = bool(positions)
+        can_move = bool(positions) and not finder
         movement = {
             "move_top": can_move and min(positions) > 0 if positions else False,
             "move_up": can_move
@@ -2741,6 +2916,7 @@ class _MainWindow:
         return bool(
             self.active_mode == "Bulk Rename"
             and self._unsynced_selection is None
+            and self._files_excluded_dialog is None
             and self._entries_by_id
             and result is not None
             and result.state is EvaluationState.VALID
@@ -2888,6 +3064,11 @@ class _MainWindow:
         notify: bool,
     ) -> bool:
         self._invalidate_filename_preview(schedule=False)
+        if self.active_mode == "Duplicate Finder":
+            self._finish_collection_work()
+            if notify:
+                self._notify_collection_changed()
+            return False
         if not self._collection_operation_pending:
             self._collection_operation_pending = True
         self._collection_render_order = order
@@ -2927,6 +3108,11 @@ class _MainWindow:
     def _render_collection_order_chunk(self) -> None:
         self._collection_after = None
         if self._closing or not self._collection_operation_pending:
+            return
+        if self.active_mode == "Duplicate Finder":
+            self._finish_collection_work()
+            if self._collection_render_notify:
+                self._notify_collection_changed()
             return
         order = self._collection_render_order
         start = self._collection_render_offset
@@ -2979,7 +3165,8 @@ class _MainWindow:
 
     def _move_selected(self, operation: str) -> None:
         if (
-            self._collection_operation_pending
+            self.active_mode == "Duplicate Finder"
+            or self._collection_operation_pending
             or self.import_controller.busy
             or self.collection.capabilities.is_importing
         ):
@@ -3009,7 +3196,8 @@ class _MainWindow:
 
     def remove_selected(self) -> None:
         if (
-            self._unsynced_selection is not None
+            self.active_mode == "Duplicate Finder"
+            or self._unsynced_selection is not None
             or self._collection_operation_pending
             or self.import_controller.busy
             or self.collection.capabilities.is_importing
@@ -3055,6 +3243,7 @@ class _MainWindow:
         self._known_size_bytes = 0
         self._unknown_size_count = 0
         self._last_import_report = None
+        self._duplicate_issues = ()
         self._display_positions.clear()
         self._preview_filename_ids.clear()
         self._preview_problem_ids.clear()
@@ -3066,10 +3255,16 @@ class _MainWindow:
         self._notify_collection_changed()
 
     def _capture_import_view_state(self) -> tuple[tuple[UUID, ...], tuple[UUID, ...]]:
+        if self.active_mode == "Duplicate Finder":
+            snapshot = self.collection.snapshot()
+            return tuple(entry.entry_id for entry in snapshot.entries), self._active_view_selection
         return tuple(self._display_order), tuple(UUID(item) for item in self.tree.selection())
 
     def add_files(self) -> None:
-        if self._closing or self.import_controller.busy or self._collection_operation_pending:
+        if (
+            self._closing or self.import_controller.busy or self._collection_operation_pending
+            or self._files_excluded_dialog is not None
+        ):
             return
         try:
             selected = filedialog.askopenfilenames(
@@ -3084,7 +3279,10 @@ class _MainWindow:
             self.import_controller.start_files(selected)
 
     def add_folder(self) -> None:
-        if self._closing or self.import_controller.busy or self._collection_operation_pending:
+        if (
+            self._closing or self.import_controller.busy or self._collection_operation_pending
+            or self._files_excluded_dialog is not None
+        ):
             return
         try:
             selected = filedialog.askdirectory(
@@ -3158,24 +3356,32 @@ class _MainWindow:
                 )
             )
         elif session is not None and phase == "preparing":
-            self.status.configure(
-                text=f"Preparing final collection order · {session.counters.accepted} added"
+            progress = self.import_controller.duplicate_progress
+            message = (
+                f"Checking exact duplicates · {progress.stage.value.capitalize()} "
+                f"{progress.completed}/{progress.total}"
+                if progress is not None
+                else f"Preparing final collection order · {session.counters.accepted} added"
             )
+            self.status.configure(text=message)
         elif session is not None and phase == "rendering":
             rendered = min(
                 self.import_controller._render_offset,
-                len(self.import_controller._prepared_order.entry_ids)
-                if self.import_controller._prepared_order is not None
-                else 0,
+                len(self.import_controller._render_order),
             )
             self.status.configure(
                 text=f"Applying final order · {rendered} rows updated"
             )
 
     def _render_discovery_items(self, items: tuple[Any, ...]) -> None:
+        if self.active_mode == "Duplicate Finder":
+            return
         for item in items:
             entry = item.entry
-            if entry is None or entry.entry_id in self._entries_by_id:
+            if (
+                item.disposition is not DiscoveryDisposition.ACCEPTED
+                or entry is None or entry.entry_id in self._entries_by_id
+            ):
                 continue
             item_id = str(entry.entry_id)
             if self.tree.exists(item_id):
@@ -3197,7 +3403,9 @@ class _MainWindow:
     def _apply_order_chunk(
         self, order: tuple[UUID, ...], start: int, end: int, finalized: bool
     ) -> None:
-        if start == 0:
+        if self.active_mode == "Duplicate Finder":
+            return
+        if start == 0 or not self._collection_render_previous_positions:
             self.tree.set_children("", *(str(entry_id) for entry_id in order))
             self._collection_render_previous_positions = self._display_positions
             self._set_display_order(order)
@@ -3234,6 +3442,8 @@ class _MainWindow:
         removed_ids: tuple[UUID, ...],
         previous_view: tuple[tuple[UUID, ...], tuple[UUID, ...]],
     ) -> None:
+        if self.active_mode == "Duplicate Finder":
+            return
         for entry_id in removed_ids:
             entry = self._entries_by_id.pop(entry_id, None)
             if entry is not None:
@@ -3280,9 +3490,37 @@ class _MainWindow:
             message = "Import canceled · previous collection restored"
         else:
             message = "Import failed · previous collection restored"
+        successful = report.state in {DiscoveryState.COMPLETE, DiscoveryState.INCOMPLETE}
+        result = self.import_controller.duplicate_result if successful else None
+        newly_excluded = 0
+        if result is not None:
+            removed = tuple(entry_id for group in result.groups for entry_id in group.redundant_ids)
+            newly_excluded = len(removed)
+            self._remove_rows_chunk(removed)
+            for entry_id in removed:
+                self._processing_diagnostics_by_id.pop(entry_id, None)
+                entry = self._entries_by_id.pop(entry_id, None)
+                if entry is not None:
+                    self._account_size(entry, -1)
+            paths = {entry.entry_id: entry.source_path for entry in snapshot.entries}
+            self._duplicate_issues = tuple(
+                (paths[failure.entry_id], failure.reason) for failure in result.failures
+            )
+            if self._duplicate_issues:
+                message += f" · {len(self._duplicate_issues)} exact duplicate check error(s)"
+        elif successful:
+            self._duplicate_issues = ()
+        if self._import_view_switched or (
+            newly_excluded and self.active_mode == "Duplicate Finder"
+        ):
+            self.refresh_collection()
+        self._import_view_switched = False
+        self._update_import_warnings(snapshot.import_sessions)
         self.status.configure(text=message)
         self._update_summary()
         self._notify_collection_changed()
+        if newly_excluded and not self._close_pending:
+            self._show_files_excluded(snapshot, newly_excluded)
 
     def _update_import_warnings(
         self, sessions: tuple[ImportSessionSnapshot, ...] | None = None
@@ -3294,9 +3532,10 @@ class _MainWindow:
             for session in sessions
             if session.state in {ImportSessionState.INCOMPLETE, ImportSessionState.FAILED}
         )
-        if self._import_issue_sessions:
+        issue_count = len(self._import_issue_sessions) + len(self._duplicate_issues)
+        if issue_count:
             self.import_warnings_button.configure(
-                text=f"Import issues ({len(self._import_issue_sessions)})"
+                text=f"Import issues ({issue_count})"
             )
             self.import_warnings_button.grid()
         else:
@@ -3304,7 +3543,7 @@ class _MainWindow:
 
     def open_import_details(self) -> None:
         sessions = self._import_issue_sessions
-        if not sessions:
+        if not sessions and not self._duplicate_issues:
             return
         dialog = ctk.CTkToplevel(self.root)
         dialog.title("Import issues")
@@ -3316,9 +3555,7 @@ class _MainWindow:
         ctk.CTkLabel(
             body,
             text=(
-                "Some imports did not complete successfully. Review the affected paths "
-                "and discovery reasons below. These warnings remain until the collection "
-                "is cleared."
+                "Review affected paths and the reported discovery or exact duplicate check errors."
             ),
             anchor="w",
             justify="left",
@@ -3337,6 +3574,8 @@ class _MainWindow:
                 details.insert(
                     "end", f"  {diagnostic.path}\n    {diagnostic.reason}\n"
                 )
+        for path, reason in self._duplicate_issues:
+            details.insert("end", f"Exact duplicate check\n  {path}\n    {reason}\n")
             details.insert("end", "\n")
         details.configure(state="disabled")
 
@@ -3469,6 +3708,7 @@ class _MainWindow:
         item_id = self.tree.identify_row(event.y)
         if (
             not item_id
+            or self.active_mode == "Duplicate Finder"
             or self._unsynced_selection is not None
             or self._collection_operation_pending
             or self.import_controller.busy
@@ -3758,7 +3998,7 @@ class _MainWindow:
             add="+",
         )
         dialog.title("Settings")
-        dialog.geometry("470x350")
+        dialog.geometry("470x475")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         content = ctk.CTkFrame(dialog)
@@ -3795,10 +4035,56 @@ class _MainWindow:
             anchor="w",
             wraplength=420,
         ).pack(fill="x", padx=10, pady=(4, 10))
+        duplicate_options = ctk.CTkFrame(content, fg_color="transparent")
+        duplicate_options.pack(fill="x", padx=10, pady=(2, 12))
+        preferences = get_duplicate_preferences(self.config)
+        enabled = ctk.CTkSwitch(
+            duplicate_options, text="Duplicate Checker", command=self._save_duplicate_settings,
+        )
+        enabled.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ctk.CTkLabel(duplicate_options, text="Hash algorithm").grid(row=1, column=0, sticky="w")
+        algorithm = ctk.CTkOptionMenu(
+            duplicate_options, values=["xxHash128", "xxHash64"],
+            command=self._save_duplicate_settings,
+        )
+        algorithm.grid(row=1, column=1, sticky="w", padx=(12, 0))
+        ctk.CTkLabel(duplicate_options, text="Hash workers").grid(row=2, column=0, sticky="w")
+        workers = ctk.CTkOptionMenu(
+            duplicate_options, values=[str(number) for number in range(1, 11)],
+            command=self._save_duplicate_settings,
+        )
+        workers.grid(row=2, column=1, sticky="w", padx=(12, 0), pady=(4, 0))
+        self._duplicate_settings_widgets = enabled, algorithm, workers
+        self._show_duplicate_settings(preferences)
         ctk.CTkButton(content, text="Done", width=85, command=dialog.destroy).pack(
             anchor="e", padx=10, pady=(0, 8)
         )
         self._show_settings_window(dialog)
+
+    def _show_duplicate_settings(self, preferences: DuplicatePreferences) -> None:
+        widgets = self._duplicate_settings_widgets
+        if widgets is not None:
+            enabled, algorithm, workers = widgets
+            enabled.set(preferences.enabled)
+            algorithm.set(
+                "xxHash128" if preferences.algorithm is HashAlgorithm.XXHASH128 else "xxHash64"
+            )
+            workers.set(str(preferences.workers))
+
+    def _save_duplicate_settings(self, _value: str | None = None) -> None:
+        widgets = self._duplicate_settings_widgets
+        if widgets is None:
+            return
+        previous = get_duplicate_preferences(self.config)
+        enabled, algorithm, workers = widgets
+        preferences = DuplicatePreferences(
+            bool(enabled.get()), HashAlgorithm(algorithm.get().lower()), int(workers.get())
+        )
+        set_duplicate_preferences(self.config, preferences)
+        self._save_preferences()
+        if self._last_save_error is not None:
+            set_duplicate_preferences(self.config, previous)
+            self._show_duplicate_settings(previous)
 
     def _on_settings_window_destroy(
         self, event: tk.Event[Any], dialog: ctk.CTkToplevel
@@ -3807,6 +4093,7 @@ class _MainWindow:
             self.settings_window = None
             self.appearance_choice = None
             self.auto_clear_trash_switch = None
+            self._duplicate_settings_widgets = None
 
     def _live_trash_switch(self) -> ctk.CTkSwitch | None:
         dialog = self.settings_window
@@ -3929,7 +4216,10 @@ class _MainWindow:
         if (
             (job is not None and job.modifying)
             or self._processing_phase
-            in {"rename_modifying", "auto_cleaning", "trash_clearing", "exit_trash_clear"}
+            in {
+                "rename_modifying", "auto_cleaning", "trash_clearing", "exit_trash_clear",
+                "deduplicating",
+            }
         ):
             self.status.configure(
                 text="Wait for the active filesystem changes to finish before closing."
@@ -3965,6 +4255,7 @@ class _MainWindow:
     def _finish_close(self) -> None:
         if self._closing:
             return
+        self._dismiss_files_excluded()
         if not self._exit_cleanup_done:
             self._exit_cleanup_done = True
             if get_auto_clear_trash_on_exit(self.config):

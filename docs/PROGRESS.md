@@ -7,9 +7,9 @@ The M1 parser, evaluator, extension resolution, and pure filename validation
 include M1-D.12's DD-061 parser diagnostic correction. They remain
 pure filename-engine components; M2-D and M2-E4 connect them to read-only
 evaluation and GUI previews. M3-G connects reviewed, journaled Bulk Rename and
-managed Trash cleanup to the desktop interface. M4-A implements standalone exact
-duplicate analysis. Desktop integration for duplicate analysis and media
-repacking remains pending.
+managed Trash cleanup to the desktop interface. M4-A implements exact duplicate
+analysis, and M4-B connects processing exclusions, the Duplicate Finder view,
+and explicit Deduplicate. Media verification and repacking remain pending.
 See `docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-decision audit and
 historical verification record.
 
@@ -58,6 +58,7 @@ controls remain disabled.
 | M3-G | Complete | Confirmed Bulk Rename execution, startup recovery notice, Auto-clean, manual Trash clearing, and normal-exit Auto-Clear Trash. |
 | M4 | In progress | Duplicate analysis and verification. |
 | M4-A | Implemented | Read-only exact duplicate detection, deterministic keepers, and session-scoped evidence. |
+| M4-B | Implemented | Import-time exact duplicate exclusion, flat review, and explicit managed Trash transfer. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
 | M6.1 | Planned | Targeted maintainability review after M6 and before M7. Use implemented features and their dependencies to determine which changes are justified. |
@@ -1047,6 +1048,56 @@ allocation peaks of 5.31 and 8.19 MiB. Reordering took 0.120 s with no content
 reads. Adding four matching files took 0.219 s and hashed only those four new
 files. Cancellation after the first content read submitted four of 16 possible
 hash tasks and returned no groups. These measurements are local observations.
+
+## M4-B — Exact duplicate exclusions and Deduplicate
+
+The revised workflow supersedes earlier exact-group review plans. The import
+controller runs Duplicate Checker against the cumulative processing collection
+before finalizing an enabled import. Redundant entries remain in the session's
+path index and appear in the flat Duplicate Finder view. They are excluded
+from processing, numbering, and active totals as soon as the import commits.
+OK closes Files Excluded and leaves the files on disk. Deduplicate authorizes
+the managed Trash transfer without a second confirmation.
+
+DD-088 treats distinct hard-linked paths as ordinary exact duplicates.
+Deduplicate checks both paths and confirms their bytes again. Existing Trash
+execution provides collision protection, verified cross-volume transfer,
+journaling, and recovery. Failed transfers retain their exclusion records.
+An exclusion remains visible after its keeper leaves the collection, and its
+transfer is blocked. A later import can update an exclusion's keeper when its
+existing keeper is confirmed as redundant. Changes to Duplicate Checker
+settings apply on the next import, and Clear All ends the exclusion list.
+
+Local verification on Windows with Python 3.13.17 passed all 716 tests with
+zero failures or skips. Focused coverage included cancellation, numbering,
+hash collisions, and native same-volume and cross-volume Trash transfers.
+Ruff, compileall, and Git whitespace checks passed.
+
+The owner reported 19 of 20 manual acceptance checks passed on November 27,
+2026. All functional checks passed, including the deferred manual Trash
+acceptance. The remaining finding was the extra OK click after Deduplicate.
+Verification, Purge, perceptual similarity, and repacking remain later
+milestones.
+
+### M4-B1 — Deduplicate completion
+
+Deduplicate closes Files Excluded on authorization and reports progress and
+results in the main window. The same status and log reporting applies to
+the Duplicate Finder action. Failed transfers remain visible in the
+exclusion list, with available failure details in the status area and log.
+
+Six filename evaluator diagnostics reproduced in the live VS Code editor and
+cleared after restarting Pylance. The existing dataclass constructors and
+`dataclasses.replace` passed runtime inspection. The evaluator and integration
+source declarations remain unchanged. Six test files now narrow optional
+fixtures and the validation-error subtype explicitly. The live Problems panel
+showed zero diagnostics with the affected files open under Basic checking.
+
+Local verification on Windows with Python 3.13.17 passed all 717 tests with
+zero failures or skips. The GUI regression covers progress, operation locks,
+successful and failed transfers, partial success, and the return to the
+Treeview without a completion popup. Ruff, compileall, and Git whitespace
+checks passed. Owner acceptance of the revised interaction is pending.
 
 ## M6.1 — Targeted maintainability review
 

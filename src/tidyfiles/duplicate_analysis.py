@@ -136,19 +136,66 @@ def _observe(observer: WindowsPathObserver, entry: CollectionEntry) -> _Source:
 @contextmanager
 def _read_source(observer: WindowsPathObserver, source: _Source) -> Iterator[BinaryIO]:
     path, expected = source.entry.source_path, source.observation
-    assert expected.actual_name is not None
     try:
         with ExitStack() as stack:
-            parent = _open_parent(observer, stack, path, expected)
-            handle, status = _open_relative(parent, expected.actual_name, _READ_ACCESS, _SHARE_READ)
-            if handle is None:
-                _raise_status(status)
-            stream = stack.enter_context(_stream(observer, handle, False))
-            _check_open_source(observer, handle, expected)
+            stream, handle = _open_read_path(observer, stack, path, expected, _SHARE_READ)
             yield stream
             _check_open_source(observer, handle, expected)
     except OSError as error:
         raise _FileFailure(source.entry_id, error) from error
+
+
+def _open_read_path(
+    observer: WindowsPathObserver, stack: ExitStack, path: str, expected: PathObservation,
+    share: int,
+) -> tuple[BinaryIO, int]:
+    assert expected.actual_name is not None
+    parent = _open_parent(observer, stack, path, expected)
+    handle, status = _open_relative(parent, expected.actual_name, _READ_ACCESS, share)
+    if handle is None:
+        _raise_status(status)
+    stream = stack.enter_context(_stream(observer, handle, False))
+    _check_open_source(observer, handle, expected)
+    return stream, handle
+
+
+def _equal_chunks(size: int, first: Callable[[int], bytes], second: Callable[[int], bytes]) -> bool:
+    while size:
+        count = min(size, _CHUNK_SIZE)
+        left, right = first(count), second(count)
+        if len(left) != count or left != right:
+            return False
+        size -= count
+    return True
+
+
+@contextmanager
+def hold_exact_duplicate(
+    observer: WindowsPathObserver,
+    path: str,
+    source: PathObservation,
+    keeper_path: str,
+    keeper: PathObservation,
+) -> Iterator[None]:
+    """Confirm current bytes and hold read handles through the Trash transfer."""
+    original, retained = source.object_metadata, keeper.object_metadata
+    if original is None or retained is None or original.size_bytes != retained.size_bytes:
+        raise OSError("Duplicate and keeper no longer have the same verified size")
+    shared_object = original.identity == retained.identity
+    share_delete = 0x04
+    with ExitStack() as stack:
+        first, source_handle = _open_read_path(
+            observer, stack, path, source, _SHARE_READ | share_delete
+        )
+        second, keeper_handle = _open_read_path(
+            observer, stack, keeper_path, keeper,
+            _SHARE_READ | share_delete if shared_object else _SHARE_READ,
+        )
+        if not _equal_chunks(original.size_bytes, first.read, second.read):
+            raise OSError("Duplicate and keeper contents differ")
+        _check_open_source(observer, source_handle, source)
+        _check_open_source(observer, keeper_handle, keeper)
+        yield
 
 
 def _read_chunk(
@@ -187,15 +234,11 @@ def _matches(
 ) -> bool:
     check()
     with _read_source(observer, left) as first, _read_source(observer, right) as second:
-        remaining = left.size
-        while remaining:
-            size = min(remaining, _CHUNK_SIZE)
-            original = _read_chunk(first, left, check, size)
-            copy = _read_chunk(second, right, check, size)
-            if original != copy:
-                return False
-            remaining -= size
-        return True
+        return _equal_chunks(
+            left.size,
+            lambda size: _read_chunk(first, left, check, size),
+            lambda size: _read_chunk(second, right, check, size),
+        )
 
 
 def _hash_candidates(

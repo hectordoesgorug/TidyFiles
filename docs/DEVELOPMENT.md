@@ -30,10 +30,21 @@ well as pytest and Ruff.
 
 The window opens with an empty file table. Add Files and Add Folder populate
 the shared collection. Bulk Rename supports live previews, background preflight,
-and journaled execution, including Single Folder. Duplicate Finder integration
-and repacking are planned. In a source checkout, writable repository storage is
-preferred for the log. Git ignores configuration and log files. Close the
-window normally to release the single-instance guard.
+and journaled execution, including Single Folder. Duplicate Checker is on by
+default and uses xxHash128 with four hash workers. Changes in Settings apply
+to the next import. Repacking is planned. In a source checkout, writable
+repository storage is preferred for the log. Git ignores configuration and
+log files. Close the window normally to release the single-instance guard.
+
+For desktop acceptance, use disposable folders with equal files and same-size
+files with different contents. Import across Add Files and Add Folder, check
+the active counts and numbered rename previews, then exercise both Files
+Excluded buttons and the flat Duplicate Finder list. Check Cancel during
+analysis and retry Deduplicate with a missing keeper or changed copy. Confirm
+Deduplicate closes Files Excluded and reports both successful and failed
+transfers in the main window. Check the layout at the supported display scales
+and exercise Clear Trash and normal-exit Auto-Clear Trash only against
+disposable batches.
 
 ## Local checks
 

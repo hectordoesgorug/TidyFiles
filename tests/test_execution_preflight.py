@@ -271,6 +271,7 @@ def test_b18_absent_review_or_import_identity_is_unverifiable(tmp_path):
 def test_b22_b23_b25_b26_b41_observation_failures_are_terminal(tmp_path, fault):
     request = _request(_collection(_files(tmp_path, "One.txt")))
     original = request.reviewed_plan.entries[0].source_observation
+    assert original is not None
 
     def factory(_options):
         def observe(_path):

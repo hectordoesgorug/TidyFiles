@@ -15,8 +15,8 @@ readiness. For an ordinary, conflict-free plan, clicking Process authorizes the
 displayed scope and starts mandatory fresh preflight; a passing unchanged plan
 proceeds to journaled Windows renaming. Collision-only subsets and changed
 plans require review, and incomplete imports require acknowledgment. Clear
-Trash requires explicit permanent-deletion confirmation. Deduplicate and
-Repack remain disabled.
+Trash requires explicit permanent-deletion confirmation. Deduplicate authorizes
+managed Trash transfer of verified redundant paths. Repack remains disabled.
 
 Auto-clean is an optional default-off setting with a permanent-deletion
 disclosure. It runs only after complete rename success, uses the original
@@ -86,8 +86,8 @@ UI option only; no counter analysis runs.
   every row; file-specific errors affect only their rows visually but invalidate
   the full rename batch. A valid preview is not permission or readiness to
   rename files. Process is available only for a current valid evaluation;
-  Deduplicate and Repack remain disabled. Preview evaluation neither opens
-  file contents nor changes source files.
+  Repack remains disabled. Preview evaluation leaves file contents and source
+  files untouched.
 
 ## Destination planning observations
 
@@ -345,14 +345,16 @@ recorded locations, and normal-exit invocation.
 
 ## Exact duplicate analysis
 
-The standalone engine opens only read handles, compares full content in bounded
+The engine opens only read handles, compares full content in bounded
 chunks where hashes match, and reports files that cannot be validated. It
 rechecks discovery identity, current object metadata, and the selected path
-before accepting evidence. The collection and source locations are left intact.
-Results are scoped to the analyzed collection revision and reflect observations
-made during analysis. Deduplicate must independently revalidate identity and
-byte equality before moving any file. Hard-linked paths can appear in exact
-groups. Their eligibility for a Trash transfer needs an execution decision.
+before accepting evidence. Import finalization excludes redundant copies from
+processing, and the Files Excluded dialog offers an explicit Trash action.
+OK leaves the excluded files on disk. Deduplicate revalidates the designated
+keeper and the redundant path, confirms current byte equality, and checks the
+keeper again at the move or source-removal boundary. Distinct hard-linked paths
+are eligible when the keeper path can be preserved. Failed or unverifiable
+entries stay excluded, with recovery records retained when required.
 
 ## Planned safety components
 
@@ -360,7 +362,6 @@ The following remain unimplemented:
 
 - Protected staging for other processing workflows.
 - Safe original retention and verified installation during repacking.
-- Duplicate revalidation and managed Trash transfer on explicit Deduplicate.
 - Operator-directed resolution of interrupted transactions.
 
 Future filesystem work must independently validate a complete destination plan,

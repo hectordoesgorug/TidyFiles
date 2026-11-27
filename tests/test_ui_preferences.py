@@ -26,7 +26,7 @@ def test_each_mode_has_the_approved_default_columns() -> None:
         "row_number",
         "filename",
         "size",
-        "group",
+        "duplicate_of",
         "status",
     )
     assert default_column_preferences("Repacker").visible == (

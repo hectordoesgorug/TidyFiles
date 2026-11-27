@@ -63,6 +63,167 @@ def _close_app(app, root) -> None:
         root.destroy()
 
 
+@pytest.mark.parametrize(
+    "choice", ["ok", "dialog_deduplicate", "finder_deduplicate", "failed", "finder_partial"]
+)
+def test_exact_duplicate_workflow(tmp_path, monkeypatch, caplog, choice):
+    if _run_gui_test_in_isolated_process(f"test_exact_duplicate_workflow[{choice}]"):
+        return
+    import tidyfiles.duplicate_analysis as duplicate_module
+    import tidyfiles.storage as storage
+    from tidyfiles.transaction_journal import JournalStore
+
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    local = tmp_path / "local"
+    local.mkdir()
+    journals = JournalStore(app_dir=app_dir, local_app_data=local)
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    monkeypatch.setattr(storage, "application_directory", lambda: app_dir)
+    monkeypatch.setattr(duplicate_module, "_hash_source", lambda *_: b"forced hash collision")
+    storage.managed_trash_path.cache_clear()
+    root = create_main_window(default_config(), tmp_path / "config.json")
+    app = root.application
+    folder = tmp_path / "import"
+    folder.mkdir()
+    keeper, different, excluded = (
+        folder / "a-keeper.txt", folder / "m-different.txt", tmp_path / "z-copy.txt"
+    )
+    keeper.write_bytes(b"copy")
+    excluded.write_bytes(b"copy")
+    different.write_bytes(b"else")
+    partial = choice == "finder_partial"
+    changed = choice == "failed" or partial
+    verified_copy = folder / "z-verified-copy.txt"
+    if partial:
+        verified_copy.write_bytes(b"copy")
+    release = threading.Event()
+    execute_duplicates = app.trash_executor.execute_duplicates
+    popups = []
+
+    def transfer(snapshot):
+        assert release.wait(5), "Test did not release the authorized Trash transfer"
+        return execute_duplicates(snapshot)
+
+    monkeypatch.setattr(app.trash_executor, "execute_duplicates", transfer)
+
+    def invoke(dialog, label):
+        next(
+            widget for widget in _descendants(dialog)
+            if isinstance(widget, ctk.CTkButton) and widget.cget("text") == label
+        ).invoke()
+
+    def finish_deduplicate():
+        assert app._files_excluded_dialog is None
+        assert app._processing_phase == "deduplicating"
+        assert app.progress.cget("mode") == "indeterminate"
+        assert "Validating and moving exact duplicates" in app.status.cget("text")
+        assert app.controls["add_files"].cget("state") == "disabled"
+        assert app.process_button.cget("state") == "disabled"
+        assert app.cancel_button.cget("state") == "disabled"
+        if choice == "failed":
+            app._invalidate_filename_preview(schedule=True)
+        app.close()
+        assert not app._closing
+        release.set()
+        _wait_for(root, lambda: app._processing_phase == "idle")
+        assert app.progress.cget("mode") == "determinate"
+        assert app._files_excluded_dialog is None
+        assert not popups
+
+    try:
+        root.update()
+        _import_files(app, root, monkeypatch, excluded)
+        assert app._files_excluded_dialog is None
+        app.rename_format.set("<IncNr>")
+        monkeypatch.setattr(app_module.filedialog, "askdirectory", lambda **_: str(folder))
+        app.add_folder()
+        _wait_for(root, lambda: not app.import_controller.busy)
+        snapshot = app.collection.snapshot()
+        assert [row.source_path for row in snapshot.entries] == [str(keeper), str(different)]
+        excluded_count = 2 if partial else 1
+        assert len(snapshot.excluded_duplicates) == excluded_count
+        duplicate = next(
+            row for row in snapshot.excluded_duplicates if row.entry.source_path == str(excluded)
+        )
+        assert duplicate.keeper == snapshot.entries[0]
+        assert app.tree.get_children("") == tuple(str(row.entry_id) for row in snapshot.entries)
+        assert "Files: 2" in app.summary.cget("text")
+        assert "Total size: 8 B" in app.summary.cget("text")
+        dialog = app._files_excluded_dialog
+        assert dialog is not None and dialog.title() == "Files Excluded"
+        summary = next(
+            widget.cget("text") for widget in _descendants(dialog)
+            if isinstance(widget, ctk.CTkLabel)
+        )
+        assert f"{excluded_count} file(s) excluded as exact duplicates" in summary
+        assert "2 file(s) remain for processing" in summary
+        assert not app._process_ready()
+        assert excluded.read_bytes() == b"copy"
+        for popup in ("askyesno", "showinfo", "showwarning", "showerror"):
+            monkeypatch.setattr(
+                app_module.messagebox, popup, lambda *args, **kwargs: popups.append(args)
+            )
+
+        if changed:
+            excluded.write_bytes(b"changed")
+        if choice in {"dialog_deduplicate", "failed"}:
+            invoke(dialog, "Deduplicate")
+            assert not dialog.winfo_exists()
+            finish_deduplicate()
+        else:
+            invoke(dialog, "OK")
+        assert app._files_excluded_dialog is None
+        _wait_for(root, app._process_ready)
+        if choice == "dialog_deduplicate":
+            assert "Moved 1 duplicate(s) to Trash. 0 remain excluded." in app.status.cget("text")
+        elif choice == "failed":
+            assert "Moved 0 duplicate(s) to Trash. 1 remain excluded." in app.status.cget("text")
+            assert "changed since discovery" in app.status.cget("text")
+        assert [
+            app.tree.set(str(entry.entry_id), "new_filename") for entry in snapshot.entries
+        ] == ["01.txt", "02.txt"]
+
+        app.tabs.set("Duplicate Finder")
+        app._on_mode_change()
+        assert "group" not in app.tree.cget("displaycolumns")
+        if choice != "dialog_deduplicate":
+            entry_id = str(duplicate.entry.entry_id)
+            assert len(app.tree.get_children("")) == (2 if partial else 1)
+            assert app.tree.set(entry_id, "duplicate_of") == keeper.name
+            status = "Trash failed" if choice == "failed" else "Duplicate"
+            assert app.tree.set(entry_id, "status") == status
+        if choice == "finder_deduplicate" or partial:
+            app.process_button.invoke()
+            finish_deduplicate()
+            expected_remaining = 1 if partial else 0
+            assert f"Moved 1 duplicate(s) to Trash. {expected_remaining} remain excluded." in (
+                app.status.cget("text")
+            )
+        if partial:
+            assert not verified_copy.exists()
+            assert app.tree.get_children("") == (str(duplicate.entry.entry_id),)
+            assert app.tree.set(str(duplicate.entry.entry_id), "status") == "Trash failed"
+            assert "changed since discovery" in app.status.cget("text")
+        if choice.endswith("deduplicate"):
+            assert not excluded.exists()
+            assert not app.tree.get_children("")
+            assert [path.read_bytes() for path in (app_dir / "trash").glob("*/*.txt")] == [b"copy"]
+            assert not app.collection.snapshot().excluded_duplicates
+        else:
+            assert excluded.read_bytes() == (b"changed" if changed else b"copy")
+            assert app.collection.snapshot().excluded_duplicates == (duplicate,)
+        if changed:
+            assert "changed since discovery" in caplog.text
+        assert not popups
+        assert keeper.read_bytes() == b"copy" and different.read_bytes() == b"else"
+        assert app.collection.snapshot().entries == snapshot.entries
+    finally:
+        release.set()
+        _close_app(app, root)
+        storage.managed_trash_path.cache_clear()
+
+
 def _run_gui_test_in_isolated_process(test_name: str) -> bool:
     marker = "TIDYFILES_ISOLATED_GUI_TEST"
     if os.environ.get(marker) == test_name:
@@ -111,7 +272,7 @@ def test_main_window_collection_columns_import_and_persistence(
     config = default_config()
     config["global_settings"]["appearance_mode"] = "Dark"
     config["global_settings"]["window_geometry"] = "1400x900+5000+5000"
-    config["global_settings"]["auto_clean"] = True
+    config["global_settings"].update(auto_clean=True, duplicate_checker=False)
     root = create_main_window(config, config_path)
     app = root.application
     closed = False
@@ -188,29 +349,31 @@ def test_main_window_collection_columns_import_and_persistence(
         column_ids = (column.identifier for column in COLUMNS)
         video_cells = dict(zip(column_ids, app._entry_values(2, video)))
         assert photo_cells["new_filename"] == ""
-        assert photo_cells["group"] == ""
+        assert photo_cells["duplicate_of"] == ""
         assert photo_cells["status"] == "Scanning"
         assert photo_cells["resolution"] == "— (not probed)"
         assert photo_cells["length"] == ""
         assert video_cells["resolution"] == "— (not probed)"
         assert video_cells["length"] == "— (not probed)"
+        assert app.tree.exists(photo_id) and app.tree.exists(video_id)
+        assert "1 unavailable" in app.summary.cget("text")
+        assert "Known size: 2.0 KiB" in app.summary.cget("text")
 
         app.tabs.set("Duplicate Finder")
         app._on_mode_change()
         assert app.collection is root.working_collection
         assert app.tree is tree
-        assert app.tree.exists(photo_id) and app.tree.exists(video_id)
-        assert app.tree.selection() == (photo_id,)
+        assert not app.tree.get_children("")
+        assert not app.tree.selection()
         assert app.tree.cget("displaycolumns") == (
             "row_number",
             "filename",
             "size",
-            "group",
+            "duplicate_of",
             "status",
         )
         assert app.tree.heading("filename", "text") == "Filename"
-        assert "1 unavailable" in app.summary.cget("text")
-        assert "Known size: 2.0 KiB" in app.summary.cget("text")
+        assert "Excluded: 0" in app.summary.cget("text")
 
         app._set_column_visible("extension", True)
         app.tree.column("filename", width=440)
@@ -221,7 +384,7 @@ def test_main_window_collection_columns_import_and_persistence(
             "row_number",
             "filename",
             "size",
-            "group",
+            "duplicate_of",
             "status",
         )
         assert int(app.tree.column("filename", "width")) == 320
@@ -483,7 +646,7 @@ def test_main_window_collection_columns_import_and_persistence(
         "row_number",
         "filename",
         "size",
-        "group",
+        "duplicate_of",
         "status",
     ]
     assert preferences["duplicate_finder"]["widths"]["filename"] == 320
@@ -1197,7 +1360,7 @@ def test_movement_button_geometry_stays_stable_during_collection_updates(
     root_folder = tmp_path / "scan"
     root_folder.mkdir()
     for index in range(120):
-        (root_folder / f"scan-{index:03d}.txt").touch()
+        (root_folder / f"scan-{index:03d}.txt").write_text(str(index))
     (tmp_path / "local").mkdir()
     journals = JournalStore(app_dir=tmp_path / "app", local_app_data=tmp_path / "local")
     monkeypatch.setattr(app_module, "JournalStore", lambda: journals)

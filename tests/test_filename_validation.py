@@ -166,12 +166,14 @@ def test_batch_validation_failure_retains_candidate_and_structured_error() -> No
     assert item.candidate_filename == "CON.jpg"
     assert item.validated_filename is None
     assert item.error is None
-    assert item.validation_error is result.errors[0]
-    assert result.errors[0].file_identifier == "CON.jpg"
-    assert result.errors[0].candidate_filename == "CON.jpg"
-    assert result.errors[0].sanitized_candidate == "CON.jpg"
-    assert result.errors[0].token is None
-    assert result.errors[0].position is None
+    error = result.errors[0]
+    assert isinstance(error, FilenameValidationError)
+    assert item.validation_error is error
+    assert error.file_identifier == "CON.jpg"
+    assert error.candidate_filename == "CON.jpg"
+    assert error.sanitized_candidate == "CON.jpg"
+    assert error.token is None
+    assert error.position is None
 
 
 def test_batch_collects_evaluation_and_validation_errors_without_losing_valid_rows() -> None:

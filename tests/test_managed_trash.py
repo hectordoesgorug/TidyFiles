@@ -17,13 +17,14 @@ import tidyfiles.managed_trash as trash_module
 import tidyfiles.storage as storage
 import tidyfiles.transaction_journal as journal_module
 import tidyfiles.windows_trash as native
-from tidyfiles.collection import WorkingCollection
+from tidyfiles.collection import ExcludedDuplicate, WorkingCollection
 from tidyfiles.destination_observation import (
     _INVALID_HANDLE,
     PathOccupancy,
     WindowsPathObserver,
 )
 from tidyfiles.discovery import FilesystemDiscovery
+from tidyfiles.duplicate_analysis import DuplicateAnalyzer
 from tidyfiles.managed_trash import TrashExecutor, TrashOutcome, TrashScope, TrashSource, TrashState
 from tidyfiles.modifying_jobs import ModifyingJobCoordinator
 from tidyfiles.transaction_journal import JournalSession, JournalStore, RecoveryStatus
@@ -106,6 +107,109 @@ def _retired(store, coordinator):
 def _times(path):
     facts = path.stat()
     return facts.st_birthtime_ns, facts.st_mtime_ns
+
+
+def _duplicate_scope(keeper, *sources):
+    collection = WorkingCollection()
+    _complete(FilesystemDiscovery(collection).begin_files((keeper, *sources)))
+    before = collection.snapshot()
+    entries = {entry.entry_id: entry for entry in before.entries}
+    result = DuplicateAnalyzer().analyze(before)
+    (group,) = result.groups
+    original = entries[group.keeper_id]
+    assert original.source_path == str(keeper)
+    return replace(
+        before,
+        entries=(original,),
+        excluded_duplicates=tuple(
+            ExcludedDuplicate(entries[entry_id], original) for entry_id in group.redundant_ids
+        ),
+    )
+
+
+@pytest.mark.parametrize("hard_link", [False, True])
+def test_duplicate_scope_moves_only_redundant_paths(runtime, tmp_path, hard_link):
+    _, store, coordinator, executor = runtime
+    keeper = _file(tmp_path, "a.bin")
+    sources = (tmp_path / "b.bin", tmp_path / "c.bin")
+    for path in sources:
+        if hard_link:
+            os.link(keeper, path)
+        else:
+            path.write_bytes(keeper.read_bytes())
+    before = keeper.stat()
+
+    result = executor.execute_duplicates(_duplicate_scope(keeper, *sources))
+
+    assert result.state is TrashState.SUCCEEDED, result
+    assert all(entry.outcome is TrashOutcome.TRASHED for entry in result.entries)
+    assert not any(path.exists() for path in sources)
+    assert keeper.stat().st_ino == before.st_ino
+    assert all(
+        entry.trash_path is not None and Path(entry.trash_path).read_bytes() == keeper.read_bytes()
+        for entry in result.entries
+    )
+    _retired(store, coordinator)
+
+
+def test_duplicate_scope_cross_volume_keeps_original(runtime, other_volume, tmp_path):
+    _, store, coordinator, executor = runtime
+    keeper = _file(other_volume, "a.bin")
+    source = other_volume / "b.bin"
+    os.link(keeper, source)
+
+    result = executor.execute_duplicates(_duplicate_scope(keeper, source))
+
+    assert result.state is TrashState.SUCCEEDED, result
+    (entry,) = result.entries
+    assert entry.trash_path is not None
+    assert Path(entry.trash_path).read_bytes() == keeper.read_bytes()
+    assert not source.exists()
+    assert keeper.exists() and keeper.stat().st_dev != tmp_path.stat().st_dev
+    _retired(store, coordinator)
+
+
+@pytest.mark.parametrize("change", ["replace_candidate", "modify_keeper", "remove_keeper"])
+def test_duplicate_scope_rejects_changed_or_missing_paths(runtime, tmp_path, change):
+    _, store, coordinator, executor = runtime
+    keeper = _file(tmp_path, "a.bin")
+    candidate = _file(tmp_path, "b.bin")
+    scope = _duplicate_scope(keeper, candidate)
+    if change == "replace_candidate":
+        _file(tmp_path, "replacement.bin").replace(candidate)
+    elif change == "modify_keeper":
+        keeper.write_bytes(b"different")
+    else:
+        keeper.unlink()
+
+    result = executor.execute_duplicates(scope)
+
+    assert result.state is TrashState.FAILED_SAFE
+    assert result.entries[0].outcome is TrashOutcome.NOT_PROCESSED
+    assert result.entries[0].detail
+    assert candidate.read_bytes() == b"original contents"
+    _retired(store, coordinator)
+
+
+def test_duplicate_transfer_reconfirms_bytes_even_with_authorized_observations(runtime, tmp_path):
+    _, store, coordinator, executor = runtime
+    keeper = _file(tmp_path, "a.bin", b"aaaa")
+    candidate = _file(tmp_path, "b.bin", b"bbbb")
+    collection = WorkingCollection()
+    _complete(FilesystemDiscovery(collection).begin_files((keeper, candidate)))
+    before = collection.snapshot()
+    original, excluded = before.entries
+    authorized = replace(
+        before, entries=(original,), excluded_duplicates=(ExcludedDuplicate(excluded, original),)
+    )
+
+    result = executor.execute_duplicates(authorized)
+
+    assert result.state is TrashState.FAILED_SAFE, result
+    assert result.entries[0].outcome is TrashOutcome.FAILED_SAFE
+    assert "contents differ" in (result.entries[0].detail or result.detail or "")
+    assert keeper.read_bytes() == b"aaaa" and candidate.read_bytes() == b"bbbb"
+    _retired(store, coordinator)
 
 
 def test_e01_e16_same_volume_preserves_identity_and_retires(runtime, tmp_path, caplog):

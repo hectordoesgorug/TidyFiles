@@ -217,7 +217,12 @@ def test_d07_d08_independent_single_folder_roots(runtime):
         assert [path.read_bytes() for path in targets] == [b"original One.txt", b"original Two.txt"]
         assert not any(child.iterdir()) and not any(other_child.iterdir())
         plan = result.fresh_plan
-        volumes = {row.source_observation.volume_guid for row in plan.entries}
+        assert plan is not None
+        volumes = set()
+        for row in plan.entries:
+            source_observation = row.source_observation
+            assert source_observation is not None
+            volumes.add(source_observation.volume_guid)
         print(f"Independent fixture roots used {len(volumes)} physical volumes")
         _assert_no_journals(store)
 

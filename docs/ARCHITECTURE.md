@@ -78,8 +78,8 @@ not implemented.
 The GUI imports selected files and recursively selected folders by reading
 metadata, without opening file contents. Import updates the shared collection
 and table progressively. After the import is finalized, Bulk Rename can evaluate
-the complete ordered collection without reading file contents. Duplicate Finder
-and Repacker currently share the collection controls and table.
+the complete ordered processing collection without reading file contents.
+Duplicate Finder uses the same table for the session's flat exclusion list.
 `collection.py` stores the selected path spelling and a separate
 case-insensitive, normalized Windows path key without resolving paths or
 accessing the filesystem. Filesystem object identity is optional metadata and
@@ -368,7 +368,7 @@ The common status and progress area reports evaluation and processing stages.
 Process is enabled only for the current valid Bulk Rename evaluation. It opens
 background destination planning and fresh preflight, then runs the journaled
 rename executor when a conflict-free plan passes unchanged. Exceptional plans
-require review. Deduplicate and Repack remain disabled.
+require review. Repack remains disabled.
 
 An evaluation marked valid establishes that the filename expression was
 evaluated and each filename component passed validation. Destination planning,
@@ -563,8 +563,8 @@ of the complete scope. Recovery inspection distinguishes retained cross-volume
 copy identity from source identity. DD-087 defines Trash clearing by recognized
 batches under the dedicated managed Trash directory; per-file ownership
 records are not required. M3-G connects confirmed manual clearing and normal
-exit Auto-Clear Trash to the service. M4 supplies duplicate and Purge eligibility
-and authorization. Duplicate and Repack controls remain disabled.
+exit Auto-Clear Trash to the service. The Deduplicate action authorizes its
+captured exclusion scope. Purge and Repack controls remain disabled.
 
 ## Recovery and cleanup services
 
@@ -643,7 +643,7 @@ recovery-record dismissal, manual Trash clearing, and the independent
 Auto-Clear Trash setting for normal exit. Settings windows are raised and
 deiconified when opened or reused. A delayed visibility restore handles the
 temporary withdrawal used by CustomTkinter's Windows titlebar update.
-The Duplicate Finder and Repacker processing controls remain disabled.
+The Repacker processing control remains disabled.
 
 ## Exact duplicate analysis
 
@@ -671,10 +671,24 @@ It preserves valid hashes and known content partitions across cumulative
 imports and reorderings. Removed entries leave the cache on the next completed
 analysis. Distinct hard-link paths remain distinct collection entries.
 
-GUI integration must check the result against the current collection revision.
-Deduplicate will need fresh identity and content validation before transferring
-files to Trash. The engine currently uses the supported local Windows paths and
-metadata from the existing Windows observer.
+During import preparation, the controller runs analysis over a projected final
+order and holds the result until the collection commits that import revision.
+The working collection keeps redundant entries in its path index and session
+exclusion list. Processing snapshots contain only active entries. Canceled
+imports preserve the preceding processing and exclusion state. An excluded
+entry can follow its keeper when a later import confirms that keeper is
+redundant to a new retained file.
+
+The Duplicate Finder tab displays the excluded entry and its keeper's filename.
+Files Excluded and the Finder's Deduplicate action authorize a revision-bound
+snapshot for managed Trash. The executor checks discovery identity, confirms
+current bytes, and holds read handles through transfer. It checks the keeper
+again at the journaled move or source-removal boundary. Verified transfers
+leave the exclusion list. Failures retain their exclusions and any required
+recovery evidence. The Files Excluded dialog closes when it authorizes the
+transfer. Both entry points report progress and results in the main window,
+with per-file failure details in the log. Windows path and metadata support
+follows the native observer.
 
 ## Tests and CI
 
@@ -689,8 +703,8 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Duplicate Finder integration, Deduplicate execution, media verification,
-perceptual similarity, and repacking are future components.
+Media verification, Purge, perceptual similarity, and repacking are future
+components.
 
 ## Deferred maintainability review
 

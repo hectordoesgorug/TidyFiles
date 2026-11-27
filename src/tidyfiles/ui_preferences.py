@@ -28,7 +28,7 @@ COLUMNS = (
     Column("new_filename", "New filename", 280, 120),
     Column("size", "Size", 100, 70),
     Column("status", "Status", 130, 100),
-    Column("group", "Group", 90, 70),
+    Column("duplicate_of", "Duplicate of", 230, 120),
     Column("resolution", "Resolution", 120, 95),
     Column("length", "Length", 100, 75),
     Column("extension", "Extension", 85, 60),
@@ -64,7 +64,7 @@ MODE_COLUMNS = {
         "row_number",
         "filename",
         "size",
-        "group",
+        "duplicate_of",
         "status",
         *_OPTIONAL_COLUMNS,
     ),
@@ -87,12 +87,12 @@ MODE_COLUMNS = {
 }
 REQUIRED_COLUMNS = {
     "Bulk Rename": frozenset({"filename", "new_filename", "status"}),
-    "Duplicate Finder": frozenset({"filename", "status"}),
+    "Duplicate Finder": frozenset({"filename", "duplicate_of", "status"}),
     "Repacker": frozenset({"filename", "new_filename", "status"}),
 }
 DEFAULT_VISIBLE_COLUMNS = {
     "Bulk Rename": ("row_number", "filename", "new_filename", "size", "status"),
-    "Duplicate Finder": ("row_number", "filename", "size", "group", "status"),
+    "Duplicate Finder": ("row_number", "filename", "size", "duplicate_of", "status"),
     "Repacker": (
         "row_number",
         "filename",

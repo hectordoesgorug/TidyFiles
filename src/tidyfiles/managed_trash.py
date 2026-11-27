@@ -6,13 +6,14 @@ import logging
 import ntpath
 import os
 import shutil
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from tidyfiles.collection import FileSystemIdentitySnapshot
+from tidyfiles.collection import CollectionSnapshot, FileSystemIdentitySnapshot
 from tidyfiles.destination_observation import (
     PathObservation,
     PathOccupancy,
@@ -21,6 +22,7 @@ from tidyfiles.destination_observation import (
     path_key,
 )
 from tidyfiles.destination_planning import DestinationOptions, planning_observer
+from tidyfiles.duplicate_analysis import _observe, hold_exact_duplicate
 from tidyfiles.modifying_jobs import ModifyingJobCoordinator
 from tidyfiles.recovery import RecoveryGuard
 from tidyfiles.rename_executor import _expected_file, _parents_match, _retain
@@ -63,10 +65,17 @@ class TrashOutcome(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class TrashKeeper:
+    path: str
+    observation: PathObservation
+
+
+@dataclass(frozen=True, slots=True)
 class TrashSource:
     entry_id: UUID
     path: str
     observation: PathObservation
+    keeper: TrashKeeper | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +112,44 @@ class TrashExecutor:
     def __init__(self, coordinator: ModifyingJobCoordinator, journals: JournalStore) -> None:
         self.coordinator = coordinator
         self.journals = journals
+
+    def execute_duplicates(self, authorized: CollectionSnapshot) -> TrashResult:
+        """Transfer only the excluded paths authorized by the Deduplicate action."""
+        observer = WindowsPathObserver(self.journals.managed_paths, capture_identity=True)
+        active = {entry.entry_id: entry for entry in authorized.entries}
+        sources = []
+        failed = []
+        for duplicate in authorized.excluded_duplicates:
+            entry = duplicate.entry
+            try:
+                keeper = active.get(duplicate.keeper.entry_id)
+                if keeper != duplicate.keeper or keeper is None:
+                    raise OSError("The designated keeper is no longer in the processing collection")
+                source = _observe(observer, entry).observation
+                if source.read_only_volume:
+                    raise OSError("The duplicate is on a read-only volume")
+                retained = _observe(observer, keeper).observation
+            except OSError as error:
+                failed.append(TrashEntryResult(
+                    entry.entry_id, entry.source_path, TrashOutcome.NOT_PROCESSED, detail=str(error)
+                ))
+            else:
+                sources.append(TrashSource(
+                    entry.entry_id, entry.source_path, source,
+                    TrashKeeper(keeper.source_path, retained),
+                ))
+
+        if not sources:
+            return TrashResult(TrashState.FAILED_SAFE, None, tuple(failed))
+        result = self.execute(authorized=TrashScope(tuple(sources)))
+        if not failed:
+            return result
+        outcomes = {entry.entry_id: entry for entry in (*result.entries, *failed)}
+        return replace(
+            result,
+            state=TrashState.FAILED_SAFE if result.state is TrashState.SUCCEEDED else result.state,
+            entries=tuple(outcomes[row.entry.entry_id] for row in authorized.excluded_duplicates),
+        )
 
     def execute(self, *, authorized: TrashScope | None) -> TrashResult:
         result = self._execute(authorized)
@@ -165,7 +212,7 @@ class TrashExecutor:
                     ),
                     ignore_transaction_id=journal.record.transaction_id,
                 )
-                return run.execute(journal)
+                return run.execute(journal, scope)
         except Exception as error:
             detail = str(error)
             active = self.coordinator.current
@@ -205,6 +252,7 @@ class _TrashRun:
     def check_scope(self, scope: TrashScope) -> None:
         observe = self.source_observer()
         ids, paths = set(), set()
+        source_paths = {path_key(item.path) for item in scope.sources}
         for item in scope.sources:
             current = observe(item.path)
             if not _expected_file(current, item.observation) or current.read_only_volume:
@@ -215,6 +263,8 @@ class _TrashRun:
             key = current.volume_guid, current.parent_identity, path_key(current.actual_name)
             if item.entry_id in ids or key in paths:
                 raise ValueError("The Trash scope repeats a collection ID or directory entry")
+            if item.keeper is not None and path_key(item.keeper.path) in source_paths:
+                raise ValueError("A retained keeper is in the Trash scope")
             ids.add(item.entry_id)
             paths.add(key)
 
@@ -274,7 +324,7 @@ class _TrashRun:
         metadata = self.metadata.get(_file_key(observation), observation.object_metadata)
         return replace(observation, object_metadata=metadata)
 
-    def execute(self, journal: JournalSession) -> TrashResult:
+    def execute(self, journal: JournalSession, scope: TrashScope) -> TrashResult:
         failed_entry = None
         detail = None
         entries = journal.record.entries
@@ -285,9 +335,9 @@ class _TrashRun:
             if key in last:
                 surviving[row.entry_id] = last[key]
             last[key] = row
-        for index, row in enumerate(entries):
+        for index, (row, item) in enumerate(zip(entries, scope.sources, strict=True)):
             try:
-                self._transfer(journal, row, surviving.get(row.entry_id))
+                self._transfer(journal, row, surviving.get(row.entry_id), item.keeper)
             except Exception as error:
                 failed_entry = index
                 detail = str(error)
@@ -295,7 +345,8 @@ class _TrashRun:
         return self._finish(journal, failed_entry, detail)
 
     def _transfer(
-        self, journal: JournalSession, row: TransactionEntry, sibling: TransactionEntry | None
+        self, journal: JournalSession, row: TransactionEntry, sibling: TransactionEntry | None,
+        keeper: TrashKeeper | None,
     ) -> None:
         source, target = self._current(row.source_observation), row.destination_observation
         assert target is not None and source.object_metadata is not None
@@ -304,6 +355,27 @@ class _TrashRun:
             raise OSError(f"Authorized Trash source changed: {row.source_path}")
         if observe(row.destination_path) != target:
             raise OSError(f"Trash destination changed: {row.destination_path}")
+        with (
+            hold_exact_duplicate(
+                observe, row.source_path, source, keeper.path, self._current(keeper.observation)
+            )
+            if keeper is not None else nullcontext()
+        ):
+            self._move(journal, row, sibling, source, target, observe, keeper)
+
+    def _move(
+        self, journal: JournalSession, row: TransactionEntry, sibling: TransactionEntry | None,
+        source: PathObservation, target: PathObservation, observe: WindowsPathObserver,
+        keeper: TrashKeeper | None,
+    ) -> None:
+        assert source.object_metadata is not None
+
+        def revalidate_keeper() -> None:
+            if keeper is not None and self.source_observer()(keeper.path) != self._current(
+                keeper.observation
+            ):
+                raise OSError(f"Designated keeper changed: {keeper.path}")
+
         identity_key = _file_key(source)
         if source.volume_guid == target.volume_guid:
             with bind_rename(
@@ -315,6 +387,7 @@ class _TrashRun:
                     or self.target_observer()(row.destination_path) != target
                 ):
                     raise OSError("Source or Trash destination changed after the move checkpoint")
+                revalidate_keeper()
                 bound.move()
             actual = self.target_observer()(row.destination_path)
             expected = replace(
@@ -345,6 +418,7 @@ class _TrashRun:
                 journal.checkpoint(
                     replace(row, stage=TRASH_COPY_BEFORE_REMOVE, verification=verified)
                 )
+                revalidate_keeper()
 
             journal.checkpoint(replace(row, stage="before_trash_copy"))
             surviving_link = (

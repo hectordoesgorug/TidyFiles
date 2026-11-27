@@ -422,6 +422,9 @@ class DiscoverySession:
             raise RuntimeError("Discovery results remain before finalization")
         self._advance_terminal_state(prepared_order=prepared_order)
 
+    def cancellation_requested(self) -> bool:
+        return self._cancel.is_set()
+
     def wait_until_terminal(self, timeout: float = 10) -> DiscoveryReport:
         deadline = time.monotonic() + timeout
         while not self.is_terminal and time.monotonic() < deadline:

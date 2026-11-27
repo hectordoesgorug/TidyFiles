@@ -6,9 +6,11 @@ import json
 import os
 import tempfile
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from tidyfiles.duplicate_analysis import HashAlgorithm
 from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
 
 SCHEMA_VERSION = 1
@@ -19,6 +21,9 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "auto_clear_trash_on_exit": False,
         "sort_criterion": SortCriterion.FILE_TYPE_AND_NAME.value,
         "sort_direction": SortDirection.ASCENDING.value,
+        "duplicate_checker": True,
+        "hash_algorithm": HashAlgorithm.XXHASH128.value,
+        "hash_workers": 4,
     },
     "profiles": {},
 }
@@ -26,6 +31,37 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 
 class ConfigError(ValueError):
     """Raised when configuration is invalid, unreadable, or cannot be saved."""
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicatePreferences:
+    enabled: bool = True
+    algorithm: HashAlgorithm = HashAlgorithm.XXHASH128
+    workers: int = 4
+
+
+def get_duplicate_preferences(config: dict[str, Any]) -> DuplicatePreferences:
+    settings = config["global_settings"]
+    defaults = _DEFAULT_CONFIG["global_settings"]
+    enabled = settings.get("duplicate_checker", defaults["duplicate_checker"])
+    workers = settings.get("hash_workers", defaults["hash_workers"])
+    try:
+        algorithm = HashAlgorithm(settings.get("hash_algorithm", defaults["hash_algorithm"]))
+    except (TypeError, ValueError) as error:
+        raise ConfigError("Unknown exact duplicate hash algorithm.") from error
+    if type(enabled) is not bool or type(workers) is not int or not 1 <= workers <= 10:
+        raise ConfigError("Duplicate Checker requires a boolean and 1 to 10 hash workers.")
+    return DuplicatePreferences(enabled, algorithm, workers)
+
+
+def set_duplicate_preferences(
+    config: dict[str, Any], preferences: DuplicatePreferences
+) -> None:
+    config["global_settings"].update(
+        duplicate_checker=preferences.enabled,
+        hash_algorithm=preferences.algorithm.value,
+        hash_workers=preferences.workers,
+    )
 
 
 def default_config() -> dict[str, Any]:
@@ -43,6 +79,7 @@ def _validate_config(config: Any) -> dict[str, Any]:
         raise ConfigError(f"Unsupported configuration schema version: {version}.")
     if not isinstance(config.get("global_settings"), dict):
         raise ConfigError("Configuration global_settings must be an object.")
+    get_duplicate_preferences(config)
     if any(
         key in config["global_settings"] and type(config["global_settings"][key]) is not bool
         for key in ("auto_clean", "auto_clear_trash_on_exit")

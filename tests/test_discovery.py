@@ -592,7 +592,9 @@ def test_hidden_and_system_attributes_do_not_exclude_regular_files(tmp_path: Pat
 
     assert report.state is DiscoveryState.COMPLETE
     assert items[0].disposition is DiscoveryDisposition.ACCEPTED
-    assert collection.snapshot().entries[0].metadata.attributes & attributes == attributes
+    metadata = collection.snapshot().entries[0].metadata
+    assert metadata is not None and metadata.attributes is not None
+    assert metadata.attributes & attributes == attributes
 
 
 def test_distinct_hard_link_paths_keep_distinct_collection_entries(tmp_path: Path) -> None:

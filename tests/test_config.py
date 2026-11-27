@@ -8,17 +8,49 @@ import pytest
 
 from tidyfiles.config import (
     ConfigError,
+    DuplicatePreferences,
     default_config,
     get_auto_clean_enabled,
     get_auto_clear_trash_on_exit,
+    get_duplicate_preferences,
     get_sorting_preferences,
     load_config,
     save_config,
     set_auto_clean_enabled,
     set_auto_clear_trash_on_exit,
+    set_duplicate_preferences,
     set_sorting_preferences,
 )
+from tidyfiles.duplicate_analysis import HashAlgorithm
 from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
+
+
+def test_duplicate_preferences_default_for_existing_config_and_round_trip(tmp_path):
+    path = tmp_path / "config.json"
+    old = {"schema_version": 1, "global_settings": {}, "profiles": {}}
+    prior = json.dumps(old)
+    path.write_text(prior, encoding="utf-8")
+    config = load_config(path)
+    assert get_duplicate_preferences(config) == DuplicatePreferences()
+    assert path.read_text(encoding="utf-8") == prior
+
+    chosen = DuplicatePreferences(False, HashAlgorithm.XXHASH64, 2)
+    set_duplicate_preferences(config, chosen)
+    save_config(path, config)
+    assert get_duplicate_preferences(load_config(path)) == chosen
+
+
+@pytest.mark.parametrize("key,value", [
+    ("duplicate_checker", 1),
+    ("hash_algorithm", "sha256"),
+    ("hash_workers", 0),
+    ("hash_workers", 11),
+])
+def test_invalid_duplicate_settings_are_reported(key, value, tmp_path):
+    config = default_config()
+    config["global_settings"][key] = value
+    with pytest.raises(ConfigError):
+        save_config(tmp_path / "config.json", config)
 
 
 def test_missing_file_returns_defaults_with_cleanup_disabled(tmp_path: Path) -> None:

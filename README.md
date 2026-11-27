@@ -21,16 +21,25 @@ previews, three built-in formats, token insertion, a scrollable token reference,
 and an explicit refresh for physical directory-count metadata. The format is
 session-only. Expression and file-specific errors are shown in the preview;
 Process uses the live filename preview as the review interface and runs fresh
-preflight before renaming. A standalone exact-duplicate engine is implemented.
-Duplicate analysis and repacking are unavailable through the desktop interface.
+preflight before renaming. Media verification, perceptual similarity, and
+repacking are planned.
 The application is not production-ready.
 
-Collection controls are shared across Bulk Rename, Duplicate Finder, and
-Repacker. Use Ctrl+A in the table to select all rows and Delete to remove the
-selection from the list. Right-click a row to open or copy its path or name,
-change its position, or remove it from the list. Common executable and script
-filename extensions are disabled in Open File; opening other files uses their
-Windows association and remains an explicit user action.
+Use Ctrl+A in the table to select all rows and Delete to remove selected
+processing entries from the list. Right-click a row to open or copy its path
+or name. Processing entries also support movement and removal. Common
+executable and script filename extensions are disabled in Open File. Other
+files open through their Windows association on explicit request.
+
+With **Duplicate Checker** enabled in Settings, Add Files and Add Folder
+analyze the cumulative processing collection in the background. The first
+verified copy in collection order stays in processing. **Files Excluded**
+reports the redundant copies and the number of files remaining for processing.
+Choose **OK** to keep those copies on disk or **Deduplicate** to authorize a
+managed Trash transfer and return to the main window. Progress and results
+appear in the main window's status area. The **Duplicate Finder** tab lists
+excluded copies with their original filenames for later review and Deduplicate. Use
+**Clear All** to clear the session's collection and exclusions.
 
 Bulk Rename labels individually valid filename results **Valid preview**; it
 does not check destination collisions, source identity or execution readiness.

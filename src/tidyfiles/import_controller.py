@@ -6,10 +6,12 @@ import os
 import threading
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
 from tidyfiles.collection import PreparedImportOrder, WorkingCollection
+from tidyfiles.config import DuplicatePreferences
 from tidyfiles.discovery import (
     DiscoveryDisposition,
     DiscoveryItem,
@@ -17,6 +19,12 @@ from tidyfiles.discovery import (
     DiscoverySession,
     DiscoveryState,
     FilesystemDiscovery,
+)
+from tidyfiles.duplicate_analysis import (
+    DuplicateAnalysisResult,
+    DuplicateAnalysisState,
+    DuplicateAnalyzer,
+    DuplicateProgress,
 )
 
 ViewState = tuple[tuple[UUID, ...], tuple[UUID, ...]]
@@ -51,6 +59,8 @@ class ImportController:
         on_error: Callable[[str], None],
         on_shutdown: Callable[[], None],
         discovery: FilesystemDiscovery | None = None,
+        duplicate_preferences: Callable[[], DuplicatePreferences] | None = None,
+        duplicate_analyzer: DuplicateAnalyzer | None = None,
     ) -> None:
         self.root = root
         self.collection = collection
@@ -65,6 +75,12 @@ class ImportController:
         self.on_finished = on_finished
         self.on_error = on_error
         self.on_shutdown = on_shutdown
+        self._duplicate_preferences = duplicate_preferences
+        self._duplicate_analyzer = duplicate_analyzer
+        self.duplicate_result: DuplicateAnalysisResult | None = None
+        self.duplicate_progress: DuplicateProgress | None = None
+        self._prepared_duplicates: DuplicateAnalysisResult | None = None
+        self._import_duplicate_preferences: DuplicatePreferences | None = None
 
         self.session: DiscoverySession | None = None
         self._phase = "idle"
@@ -77,6 +93,7 @@ class ImportController:
         self._prepared_order: PreparedImportOrder | None = None
         self._prepare_error: Exception | None = None
         self._prepare_done: threading.Event | None = None
+        self._render_order: tuple[UUID, ...] = ()
         self._render_offset = 0
         self._remove_offset = 0
         self._order_was_changed = False
@@ -128,6 +145,7 @@ class ImportController:
             return False
         try:
             prior_view = self.capture_view_state()
+            preferences = self._duplicate_preferences() if self._duplicate_preferences else None
             session = begin()
         except Exception as error:
             self.on_error(str(error))
@@ -138,8 +156,12 @@ class ImportController:
         self._new_entry_ids = []
         self._new_entry_set = set()
         self._prepared_order = None
+        self._prepared_duplicates = None
+        self.duplicate_progress = None
+        self._import_duplicate_preferences = preferences
         self._prepare_error = None
         self._prepare_done = None
+        self._render_order = ()
         self._render_offset = 0
         self._remove_offset = 0
         self._order_was_changed = False
@@ -262,7 +284,10 @@ class ImportController:
 
     def _start_preparation(self) -> None:
         assert self.session is not None
-        session_id = self.session.session_id
+        session = self.session
+        session_id = session.session_id
+        preferences = self._import_duplicate_preferences
+        analyzer = self._duplicate_analyzer
         done = threading.Event()
         self._phase = "preparing"
         self._order_started_at = time.perf_counter()
@@ -271,7 +296,29 @@ class ImportController:
 
         def prepare() -> None:
             try:
-                self._prepared_order = self.collection.prepare_import_order(session_id)
+                order = self.collection.prepare_import_order(session_id)
+                if preferences is not None and preferences.enabled and analyzer is not None:
+                    snapshot = self.collection.duplicate_analysis_snapshot(order)
+                    result = analyzer.analyze(
+                        snapshot,
+                        algorithm=preferences.algorithm,
+                        workers=preferences.workers,
+                        cancel_check=session.cancellation_requested,
+                        progress_callback=self._duplicate_progress,
+                    )
+                    if result.state is DuplicateAnalysisState.COMPLETE:
+                        if (result.collection_id, result.revision) != (
+                            order.collection_id, order.revision
+                        ):
+                            raise ValueError("Exact duplicate analysis is stale")
+                        self._prepared_duplicates = result
+                        order = replace(order, duplicate_pairs=tuple(
+                            (entry_id, group.keeper_id)
+                            for group in result.groups for entry_id in group.redundant_ids
+                        ))
+                    else:
+                        session.cancel()
+                self._prepared_order = order
             except Exception as error:
                 self._prepare_error = error
             finally:
@@ -282,6 +329,9 @@ class ImportController:
             name=f"TidyFiles-order-{session_id}",
             daemon=True,
         ).start()
+
+    def _duplicate_progress(self, progress: DuplicateProgress) -> None:
+        self.duplicate_progress = progress
 
     def _poll_preparation(self) -> None:
         assert self.session is not None and self._prepare_done is not None
@@ -301,6 +351,9 @@ class ImportController:
             self._begin_restore()
             return
         assert self._prepared_order is not None
+        excluded = {entry_id for entry_id, _ in self._prepared_order.duplicate_pairs}
+        order = self._prepared_order.entry_ids
+        self._render_order = tuple(entry_id for entry_id in order if entry_id not in excluded)
         self._phase = "rendering"
         self._render_offset = 0
         self.on_activity(self._phase, session)
@@ -311,7 +364,7 @@ class ImportController:
         if session.state is DiscoveryState.CANCELLING or self._shutdown_requested:
             self._begin_restore()
             return
-        order = self._prepared_order.entry_ids
+        order = self._render_order
         end = min(self._render_offset + self.RENDER_CHUNK, len(order))
         if end > self._render_offset:
             self._order_was_changed = True
@@ -328,6 +381,7 @@ class ImportController:
         if session.state in {DiscoveryState.CANCELLED, DiscoveryState.FAILED}:
             self._handle_terminal()
             return
+        self.duplicate_result = self._prepared_duplicates
         if self._started_at is not None:
             self._time_to_all_rows_rendered_seconds = time.perf_counter() - self._started_at
         self._handle_terminal()

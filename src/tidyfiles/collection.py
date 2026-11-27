@@ -105,6 +105,12 @@ class CollectionEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class ExcludedDuplicate:
+    entry: CollectionEntry
+    keeper: CollectionEntry
+
+
+@dataclass(frozen=True, slots=True)
 class ImportRootRecord:
     root_id: UUID
     path: str
@@ -136,6 +142,7 @@ class PreparedImportOrder:
     session_id: UUID
     revision: int
     entry_ids: tuple[UUID, ...]
+    duplicate_pairs: tuple[tuple[UUID, UUID], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +172,7 @@ class CollectionSnapshot:
     ordering_mode: OrderingMode
     sort_preferences: SortPreferences
     capabilities: CollectionCapabilities
+    excluded_duplicates: tuple[ExcludedDuplicate, ...] = ()
 
     @property
     def finalized_entries(self) -> tuple[CollectionEntry, ...]:
@@ -189,6 +197,7 @@ class WorkingCollection:
     def __init__(self, sort_preferences: SortPreferences | None = None) -> None:
         self._collection_id = uuid4()
         self._entries: dict[UUID, CollectionEntry] = {}
+        self._excluded_duplicates: dict[UUID, ExcludedDuplicate] = {}
         self._entry_order: list[UUID] = []
         self._path_entries: dict[str, UUID] = {}
         self._sessions: dict[UUID, ImportSessionSnapshot] = {}
@@ -276,7 +285,10 @@ class WorkingCollection:
         path_key = normalize_windows_path(path)
         existing_id = self._path_entries.get(path_key)
         if existing_id is not None:
-            return RegistrationResult(self._entries[existing_id], added=False)
+            existing = self._entries.get(existing_id)
+            if existing is None:
+                existing = self._excluded_duplicates[existing_id].entry
+            return RegistrationResult(existing, added=False)
 
         filename = ntpath.basename(path.rstrip("\\/"))
         if not filename:
@@ -325,6 +337,8 @@ class WorkingCollection:
         prepared_order: PreparedImportOrder | None = None,
     ) -> None:
         session = self._require_open_session(session_id)
+        pairs = prepared_order.duplicate_pairs if prepared_order is not None else ()
+        excluded = dict(pairs)
         if prepared_order is not None:
             if (
                 prepared_order.collection_id != self._collection_id
@@ -332,6 +346,13 @@ class WorkingCollection:
                 or prepared_order.revision != self._revision
                 or len(prepared_order.entry_ids) != len(self._entry_order)
                 or set(prepared_order.entry_ids) != set(self._entry_order)
+                or len(excluded) != len(pairs)
+                or any(
+                    redundant not in self._entries
+                    or keeper not in self._entries
+                    or keeper in excluded
+                    for redundant, keeper in pairs
+                )
             ):
                 raise CollectionError("Prepared import order is stale or incomplete")
         for entry_id in self._session_entries[session_id]:
@@ -356,7 +377,38 @@ class WorkingCollection:
                 *(entry.entry_id for entry in sorted_new),
             ]
         self._open_session_id = None
+        if excluded:
+            for entry_id, prior in self._excluded_duplicates.items():
+                if prior.keeper.entry_id in excluded:
+                    keeper = self._entries[excluded[prior.keeper.entry_id]]
+                    self._excluded_duplicates[entry_id] = replace(prior, keeper=keeper)
+            for entry_id in self._entry_order:
+                if entry_id in excluded:
+                    self._excluded_duplicates[entry_id] = ExcludedDuplicate(
+                        self._entries.pop(entry_id), self._entries[excluded[entry_id]]
+                    )
+            self._entry_order = [
+                entry_id for entry_id in self._entry_order if entry_id not in excluded
+            ]
         self._revision += 1
+
+    def duplicate_analysis_snapshot(self, order: PreparedImportOrder) -> CollectionSnapshot:
+        """Project final import order for analysis while the live session can still roll back."""
+        snapshot = self.snapshot()
+        if (
+            order.collection_id != self.collection_id
+            or order.revision != self.revision
+            or order.session_id != self._open_session_id
+        ):
+            raise CollectionError("Prepared import order is stale")
+        entries = {entry.entry_id: entry for entry in snapshot.entries}
+        return replace(
+            snapshot,
+            entries=tuple(
+                replace(entries[entry_id], is_finalized=True) for entry_id in order.entry_ids
+            ),
+            capabilities=replace(snapshot.capabilities, is_importing=False),
+        )
 
     def prepare_import_order(self, session_id: UUID) -> PreparedImportOrder:
         """Sort an immutable import snapshot for later revision-checked finalization."""
@@ -562,8 +614,8 @@ class WorkingCollection:
             )
 
         occupied = {
-            entry.normalized_path_key
-            for entry_id, entry in self._entries.items()
+            path
+            for path, entry_id in self._path_entries.items()
             if entry_id not in replacements
         }
         for entry in replacements.values():
@@ -586,12 +638,25 @@ class WorkingCollection:
         self._revision += 1
         return changed
 
+    def forget_trashed_duplicates(self, entry_ids: Sequence[UUID]) -> None:
+        """Forget only exclusions whose Trash transfers were verified."""
+        self._require_idle("forget transferred duplicates")
+        changed = False
+        for entry_id in entry_ids:
+            excluded = self._excluded_duplicates.pop(entry_id, None)
+            if excluded is not None:
+                self._path_entries.pop(excluded.entry.normalized_path_key)
+                changed = True
+        if changed:
+            self._revision += 1
+
     def clear_all(self) -> bool:
         """Clear collection-owned in-memory state; retain sort preferences."""
         self._require_idle("clear all")
         if not (self._entries or self._sessions or self._folder_roots):
             return False
         self._entries.clear()
+        self._excluded_duplicates.clear()
         self._entry_order.clear()
         self._path_entries.clear()
         self._sessions.clear()
@@ -618,6 +683,7 @@ class WorkingCollection:
             ordering_mode=self._ordering_mode,
             sort_preferences=self._sort_preferences,
             capabilities=capabilities,
+            excluded_duplicates=tuple(self._excluded_duplicates.values()),
         )
 
     def is_current(self, snapshot: CollectionSnapshot) -> bool:

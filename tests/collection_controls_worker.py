@@ -35,7 +35,9 @@ def app_runtime(tmp_path_factory):
     journals = JournalStore(app_dir=config_path.parent / "app", local_app_data=local)
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
-        root = create_main_window(load_config(config_path), config_path)
+        config = load_config(config_path)
+        config["global_settings"]["duplicate_checker"] = False
+        root = create_main_window(config, config_path)
         root.update()
         runtime = {"root": root, "app": root.application, "config_path": config_path}
         yield runtime
@@ -312,8 +314,10 @@ finally:
         time.sleep(0.11)
         root.update()
         assert app.collection.snapshot().sort_preferences == current_preferences
-        assert app.tree.get_children("") == displayed_order
-        assert app.tree.selection() == (str(selected.entry_id),)
+        assert app.tree.get_children("") == (() if mode == "Duplicate Finder" else displayed_order)
+        assert app.tree.selection() == (
+            () if mode == "Duplicate Finder" else (str(selected.entry_id),)
+        )
         assert app.sort_choice.get() == _SORT_LABELS[current_preferences.criterion]
         assert app.sort_direction_button.cget("text") == (
             "Ascending"
@@ -1079,6 +1083,8 @@ def test_sort_preference_save_failure_preserves_existing_config(
 ) -> None:
     root = app_runtime["root"]
     app = app_runtime["app"]
+    app.tabs.set("Repacker")
+    app._on_mode_change()
     config_path = app_runtime["config_path"]
     original = config_path.read_bytes()
     monkeypatch.setattr(app_module.messagebox, "showerror", lambda *_args, **_kwargs: None)

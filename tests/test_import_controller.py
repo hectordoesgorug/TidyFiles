@@ -11,7 +11,14 @@ import pytest
 
 import tidyfiles.discovery as discovery_module
 from tidyfiles.collection import ImportMode, WorkingCollection
-from tidyfiles.discovery import DiscoveryDisposition, DiscoveryReport, DiscoverySession
+from tidyfiles.config import DuplicatePreferences
+from tidyfiles.discovery import (
+    DiscoveryDisposition,
+    DiscoveryReport,
+    DiscoverySession,
+    DiscoveryState,
+)
+from tidyfiles.duplicate_analysis import DuplicateAnalyzer
 from tidyfiles.import_controller import ImportController
 
 
@@ -126,6 +133,90 @@ def _file(path: Path, content: str = "data") -> Path:
     return path
 
 
+def test_disabled_duplicate_checker_skips_analysis(tmp_path, monkeypatch):
+    harness = _Harness()
+    analyzer = DuplicateAnalyzer()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Disabled Duplicate Checker started analysis")
+
+    monkeypatch.setattr(analyzer, "analyze", unexpected)
+    harness.controller._duplicate_analyzer = analyzer
+    harness.controller._duplicate_preferences = lambda: DuplicatePreferences(enabled=False)
+    paths = (_file(tmp_path / "a.txt"), _file(tmp_path / "b.txt"))
+
+    assert harness.controller.start_files(paths)
+    harness.pump_until(lambda: not harness.controller.busy)
+
+    snapshot = harness.collection.snapshot()
+    assert len(snapshot.entries) == 2 and not snapshot.excluded_duplicates
+    assert harness.controller.duplicate_result is None
+
+
+def test_cancel_during_duplicate_analysis_preserves_previous_exclusions(tmp_path, monkeypatch):
+    harness = _Harness()
+    controller = harness.controller
+    analyzer = DuplicateAnalyzer()
+    controller._duplicate_analyzer = analyzer
+    controller._duplicate_preferences = DuplicatePreferences
+    a, b, earlier = (_file(tmp_path / name) for name in ("a.txt", "b.txt", "0.txt"))
+    assert controller.start_files((a, b))
+    harness.pump_until(lambda: not controller.busy)
+    before = harness.collection.snapshot()
+    completed = controller.duplicate_result
+    assert completed is not None and len(before.excluded_duplicates) == 1
+    harness.rebuild(harness.capture())
+
+    entered = threading.Event()
+    release = threading.Event()
+    analyze = analyzer.analyze
+
+    def blocked(snapshot, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return analyze(snapshot, **kwargs)
+
+    monkeypatch.setattr(analyzer, "analyze", blocked)
+    assert controller.start_files((earlier,))
+    try:
+        harness.pump_until(entered.is_set)
+        assert controller.cancel()
+    finally:
+        release.set()
+    harness.pump_until(lambda: not controller.busy)
+
+    after = harness.collection.snapshot()
+    assert after.entries == before.entries
+    assert after.excluded_duplicates == before.excluded_duplicates
+    assert controller.duplicate_result is completed
+    assert harness.reports[-1].state is DiscoveryState.CANCELLED
+    assert tuple(harness.order) == tuple(entry.entry_id for entry in before.entries)
+    assert earlier.read_text() == "data"
+
+
+def test_excluded_paths_stay_registered_and_follow_current_keeper(tmp_path):
+    harness = _Harness()
+    controller = harness.controller
+    controller._duplicate_analyzer = DuplicateAnalyzer()
+    controller._duplicate_preferences = DuplicatePreferences
+    first, excluded, new_keeper = (_file(tmp_path / name) for name in ("b.txt", "c.txt", "a.txt"))
+    assert controller.start_files((first, excluded))
+    harness.pump_until(lambda: not controller.busy)
+    prior = harness.collection.snapshot()
+
+    assert controller.start_files((excluded, new_keeper))
+    harness.pump_until(lambda: not controller.busy)
+    snapshot = harness.collection.snapshot()
+
+    assert [entry.source_path for entry in snapshot.entries] == [str(new_keeper)]
+    assert tuple(item.entry.source_path for item in snapshot.excluded_duplicates) == (
+        str(excluded), str(first),
+    )
+    assert snapshot.excluded_duplicates[0].entry == prior.excluded_duplicates[0].entry
+    assert all(item.keeper == snapshot.entries[0] for item in snapshot.excluded_duplicates)
+    assert harness.reports[-1].counters.already_listed == 1
+
+
 def test_cumulative_import_reuses_paths_and_preserves_entry_identity(tmp_path: Path) -> None:
     harness = _Harness()
     z_path = _file(tmp_path / "z.txt")
@@ -195,7 +286,8 @@ def test_folder_results_render_before_walk_finishes_and_cancel_rolls_back(
             lambda: entered_wait.is_set() and len(harness.rows) > len(previous.entries)
         )
         assert harness.controller.busy
-        assert not harness.controller.session.is_terminal
+        session = harness.controller.session
+        assert session is not None and not session.is_terminal
         assert len(harness.rows) == 2
         assert harness.controller.cancel()
         release_walk.set()

@@ -540,7 +540,7 @@ def test_reparse_children_are_skipped_and_linked_parent_paths_fail(tmp_path, mon
         pytest.skip(f"native Windows directory symlink unavailable: {error}")
     linked_collection = _new_collection(linked / "source.jpg")
     linked_result = evaluate_collection(linked_collection.snapshot(), "<NumFiles>_<Name>")
-    observation = linked_result.entries[0].metadata
+    observation = _required(linked_result.entries[0].metadata)
     assert _required(observation.failure).code == "linked_path"
     assert observation.physical_file_count is None
 
@@ -586,7 +586,7 @@ def test_native_symlink_entries_are_not_counted(tmp_path) -> None:
     result = evaluate_collection(
         _new_collection(folder / "source.jpg").snapshot(), "<NumFiles>_<NumDirs>"
     )
-    observation = result.entries[0].metadata
+    observation = _required(result.entries[0].metadata)
     assert observation.physical_file_count == 2  # source fixture and its real file
     assert observation.physical_directory_count == 0
 
