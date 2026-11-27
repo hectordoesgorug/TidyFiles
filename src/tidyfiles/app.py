@@ -3962,12 +3962,16 @@ class _MainWindow:
             row.entry.entry_id for row in verified if row.entry.entry_id in evidence_ids
         )
         if successful:
-            self._verification_issues = tuple(
-                (row.entry.source_path, f"{row.status.value} · {row.reason}")
-                for row in verified if row.status is not VerificationStatus.VERIFIED
-            )
-            for path, reason in self._verification_issues:
+            issues = []
+            for row in verified:
+                if row.status is VerificationStatus.VERIFIED:
+                    continue
+                path = row.entry.source_path
+                reason = f"{row.status.value} · {row.reason}"
                 _LOG.warning("Pre-verify %s · %s", path, reason)
+                if row.status is not VerificationStatus.CORRUPTED:
+                    issues.append((path, reason))
+            self._verification_issues = tuple(issues)
             if self._verification_issues:
                 message += f" · {len(self._verification_issues)} verification issue(s)"
         newly_excluded = 0

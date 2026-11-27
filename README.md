@@ -56,6 +56,10 @@ the other action when files remain eligible. While a transfer runs, all
 dialog controls are disabled. **OK** closes the dialog and leaves remaining
 excluded files on disk.
 
+**Import Issues** shows unsupported, inaccessible, and incomplete Pre-verify
+results alongside discovery and duplicate-check diagnostics. Files Excluded
+counts confirmed corruption, and the log records the evidence for each file.
+
 With **Perceptual Hashing** also enabled, the import checks the remaining files
 for similar images and videos. If Files Excluded appears, the check starts
 after **OK** closes the dialog. Process

@@ -65,6 +65,95 @@ def _close_app(app, root) -> None:
         root.destroy()
 
 
+@pytest.mark.parametrize("mixed", [False, True])
+def test_import_issues_omit_confirmed_corruption(tmp_path, monkeypatch, caplog, mixed):
+    if _run_gui_test_in_isolated_process(f"test_import_issues_omit_confirmed_corruption[{mixed}]"):
+        return
+    from dataclasses import replace
+
+    from PIL import Image
+
+    from tidyfiles.transaction_journal import JournalStore
+    from tidyfiles.verification import VerificationStatus
+
+    local = tmp_path / "local"
+    local.mkdir()
+    journals = JournalStore(app_dir=tmp_path / "app", local_app_data=local)
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    bad = tmp_path / "corrupt.png"
+    with Image.new("RGB", (16, 16)) as image:
+        image.save(bad)
+    original = bad.read_bytes()[:25]
+    bad.write_bytes(original)
+    outcomes = {
+        tmp_path / "unsupported.txt": VerificationStatus.UNSUPPORTED,
+        tmp_path / "inaccessible.txt": VerificationStatus.INACCESSIBLE,
+        tmp_path / "incomplete.txt": VerificationStatus.INCOMPLETE,
+    }
+    denied = tmp_path / "discovery-denied.txt"
+    if mixed:
+        for path in (*outcomes, denied):
+            path.write_bytes(path.name.encode())
+        lstat = os.lstat
+
+        def deny_discovery(path, *args, **kwargs):
+            if os.fspath(path) == str(denied):
+                raise PermissionError("test discovery failure")
+            return lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(discovery_module.os, "lstat", deny_discovery)
+
+    config = default_config()
+    config["global_settings"].update(pre_verify=True, duplicate_checker=False)
+    root = create_main_window(config)
+    app = root.application
+    if mixed:
+        verify = app._integrity_verifier.verify
+
+        def mixed_verification(*args, **kwargs):
+            rows = verify(*args, **kwargs)
+            return tuple(
+                replace(row, status=outcomes[path], reason=f"verification reason for {path.name}")
+                if (path := Path(row.entry.source_path)) in outcomes else row
+                for row in rows
+            )
+
+        monkeypatch.setattr(app._integrity_verifier, "verify", mixed_verification)
+    try:
+        root.update()
+        files = (bad, *outcomes, denied) if mixed else (bad,)
+        _import_files(app, root, monkeypatch, *files)
+        snapshot = app.collection.snapshot()
+        excluded, = snapshot.excluded_corruption
+        assert excluded.entry.source_path == str(bad) and excluded.reason
+        assert f"Pre-verify {bad} · Corrupted · {excluded.reason}" in caplog.messages
+        assert bad.read_bytes() == original
+        dialog = app._files_excluded_dialog
+        assert dialog is not None
+        summary = next(w.cget("text") for w in _descendants(dialog) if isinstance(w, ctk.CTkLabel))
+        assert "1 file(s) excluded as corrupted" in summary
+        assert "Purge has 1 file(s) pending" in summary
+        app._dismiss_files_excluded()
+
+        if not mixed:
+            assert not app.import_warnings_button.winfo_manager()
+            app.open_import_details()
+            assert not any(isinstance(w, ctk.CTkToplevel) for w in root.winfo_children())
+            return
+        assert len(snapshot.entries) == 3
+        assert app.import_warnings_button.winfo_manager() == "grid"
+        assert app.import_warnings_button.cget("text") == "Import issues (4)"
+        app.import_warnings_button.invoke()
+        details = next(w for w in _descendants(root) if isinstance(w, ctk.CTkTextbox))
+        text = details.get("1.0", "end")
+        assert str(bad) not in text and excluded.reason not in text
+        assert str(denied) in text and "test discovery failure" in text
+        for path, status in outcomes.items():
+            assert f"{path}\n    {status.value} · verification reason for {path.name}" in text
+    finally:
+        _close_app(app, root)
+
+
 def _mock_wav_probe(monkeypatch):
     import tidyfiles.verification as verification
     from tidyfiles.media_tools import MediaTool, MediaToolError, MediaTools

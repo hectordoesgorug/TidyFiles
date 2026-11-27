@@ -771,6 +771,12 @@ after the current transfer finishes. Only OK closes the dialog and continues
 the import. Corruption exclusions retain their source observations and
 reserve their paths for the session.
 
+DD-095 routes confirmed Pre-verify corruption to Files Excluded and the
+per-file log. The Import Issues count and details include Unsupported,
+Inaccessible, and Incomplete verification outcomes alongside existing
+discovery and duplicate-check diagnostics. The button appears when at least
+one reportable issue remains.
+
 Post-verify uses the same verifier with the successfully processed paths and
 final observations from the rename executor. It runs before eligible Auto-clean
 and records its outcomes in the Treeview, rename summary, and log. Completed

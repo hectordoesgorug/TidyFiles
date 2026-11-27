@@ -66,6 +66,7 @@ startup recovery notices, and managed Trash cleanup.
 | M4-E | Implemented | Pre-verify, corruption exclusions, explicit Purge, and Post-verify for successful rename outputs. |
 | M4-E1 | Implemented | Persistent Files Excluded review with independent Purge and Deduplicate transfers. |
 | M4-F | Implemented | Audio integrity verification, DD-094 file categorization, and test type narrowing. |
+| M4-F1 | Implemented | DD-095 Import Issues filtering for confirmed Pre-verify corruption. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
 | M6.1 | Planned | Targeted maintainability review after M6 and before M7. Use implemented features and their dependencies to determine which changes are justified. |
@@ -1229,6 +1230,18 @@ real-media tests, and focused audio, sorting, discovery, and GUI checks.
 Ruff, compileall, pip check, and Git whitespace checks passed. The live VS
 Code workspace showed zero Problems with `tests/test_app.py` open and
 Pylance active.
+
+## M4-F1 — Import Issues presentation
+
+DD-095 keeps confirmed Pre-verify corruption in Files Excluded and records its
+per-file evidence in the log. Import Issues counts only the remaining
+verification outcomes that require attention, along with existing discovery
+and exact duplicate check diagnostics.
+
+Local Windows verification on Python 3.13.17 passed all 813 tests, including
+20 focused GUI cases and 98 focused service regressions. Ruff, compileall,
+pip check, and Git whitespace checks passed. The live VS Code workspace
+showed zero Problems with Pylance active and Basic mode configured.
 
 ## M6.1 — Targeted maintainability review
 
