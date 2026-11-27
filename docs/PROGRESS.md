@@ -9,7 +9,9 @@ pure filename-engine components; M2-D and M2-E4 connect them to read-only
 evaluation and GUI previews. M3-G connects reviewed, journaled Bulk Rename and
 managed Trash cleanup to the desktop interface. M4-A implements exact duplicate
 analysis, and M4-B connects processing exclusions, the Duplicate Finder view,
-and explicit Deduplicate. Media verification and repacking remain pending.
+and explicit Deduplicate. M4-C adds the standalone perceptual engine and
+portable media-tool settings. Probable duplicate review, media verification,
+and repacking remain pending.
 See `docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-decision audit and
 historical verification record.
 
@@ -59,6 +61,7 @@ controls remain disabled.
 | M4 | In progress | Duplicate analysis and verification. |
 | M4-A | Implemented | Read-only exact duplicate detection, deterministic keepers, and session-scoped evidence. |
 | M4-B | Implemented | Import-time exact duplicate exclusion, flat review, and explicit managed Trash transfer. |
+| M4-C | Implemented | Perceptual hashing, probable grouping, and portable media dependencies. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
 | M6.1 | Planned | Targeted maintainability review after M6 and before M7. Use implemented features and their dependencies to determine which changes are justified. |
@@ -1098,6 +1101,33 @@ zero failures or skips. The GUI regression covers progress, operation locks,
 successful and failed transfers, partial success, and the return to the
 Treeview without a completion popup. Ruff, compileall, and Git whitespace
 checks passed. Owner acceptance of the revised interaction is pending.
+
+## M4-C — Perceptual analysis and portable media tools
+
+DD-089 samples five positions relative to video duration. DD-090 establishes
+the portable application directory as the source of FFmpeg and FFprobe, and
+supersedes the configured-directory and PATH fallback plans. Settings exposes
+perceptual preferences and local tool availability. The media tools and their
+import staging directories are ignored by Git and excluded from future
+distribution.
+
+In one disposable batch of 16 images and four MPEG-4 clips, four hash workers
+took 0.958 seconds on the first analysis and 0.012 seconds when reusing current
+evidence. All 20 files were analyzed on both runs. The real-media tests used
+Gyan's 9.1 Essentials versions of FFmpeg and FFprobe, including a one-frame
+clip and videos up to 12 seconds. Subprocess simulation covers invalid
+duration data and missing frames. Real codec coverage is limited to those
+fixtures, and image cancellation is cooperative around the decoder call.
+
+Local Windows checks on Python 3.13.17 passed all 757 default tests. The
+focused runs passed 39 media and perceptual tests, eight opt-in real-media
+tests, 103 existing regressions, and the Settings GUI case. The full rerun
+passed the import cancellation regression after redundant control redraws
+were removed. Ruff, compileall, and Git whitespace checks passed.
+
+M4-D will invoke the engine on the current post-exclusion snapshot and present
+the probable groups for manual review. The engine cannot authorize deletion.
+Verification, Purge, and repacking remain separate work.
 
 ## M6.1 — Targeted maintainability review
 

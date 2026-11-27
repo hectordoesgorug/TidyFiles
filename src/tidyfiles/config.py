@@ -14,6 +14,7 @@ from tidyfiles.duplicate_analysis import HashAlgorithm
 from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
 
 SCHEMA_VERSION = 1
+PERCEPTUAL_THRESHOLDS = (70, 80, 90, 100)
 _DEFAULT_CONFIG: dict[str, Any] = {
     "schema_version": SCHEMA_VERSION,
     "global_settings": {
@@ -24,6 +25,8 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "duplicate_checker": True,
         "hash_algorithm": HashAlgorithm.XXHASH128.value,
         "hash_workers": 4,
+        "perceptual_hashing": False,
+        "phash_threshold": 80,
     },
     "profiles": {},
 }
@@ -38,6 +41,8 @@ class DuplicatePreferences:
     enabled: bool = True
     algorithm: HashAlgorithm = HashAlgorithm.XXHASH128
     workers: int = 4
+    perceptual_enabled: bool = False
+    perceptual_threshold: int = 80
 
 
 def get_duplicate_preferences(config: dict[str, Any]) -> DuplicatePreferences:
@@ -45,13 +50,19 @@ def get_duplicate_preferences(config: dict[str, Any]) -> DuplicatePreferences:
     defaults = _DEFAULT_CONFIG["global_settings"]
     enabled = settings.get("duplicate_checker", defaults["duplicate_checker"])
     workers = settings.get("hash_workers", defaults["hash_workers"])
+    perceptual = settings.get("perceptual_hashing", defaults["perceptual_hashing"])
+    threshold = settings.get("phash_threshold", defaults["phash_threshold"])
     try:
         algorithm = HashAlgorithm(settings.get("hash_algorithm", defaults["hash_algorithm"]))
     except (TypeError, ValueError) as error:
         raise ConfigError("Unknown exact duplicate hash algorithm.") from error
     if type(enabled) is not bool or type(workers) is not int or not 1 <= workers <= 10:
         raise ConfigError("Duplicate Checker requires a boolean and 1 to 10 hash workers.")
-    return DuplicatePreferences(enabled, algorithm, workers)
+    if type(perceptual) is not bool or type(threshold) is not int:
+        raise ConfigError("Perceptual Hashing requires a boolean and an integer threshold.")
+    if threshold not in PERCEPTUAL_THRESHOLDS:
+        raise ConfigError("Perceptual similarity threshold must be 70, 80, 90, or 100.")
+    return DuplicatePreferences(enabled, algorithm, workers, perceptual, threshold)
 
 
 def set_duplicate_preferences(
@@ -61,6 +72,8 @@ def set_duplicate_preferences(
         duplicate_checker=preferences.enabled,
         hash_algorithm=preferences.algorithm.value,
         hash_workers=preferences.workers,
+        perceptual_hashing=preferences.perceptual_enabled,
+        phash_threshold=preferences.perceptual_threshold,
     )
 
 

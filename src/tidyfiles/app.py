@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+from collections.abc import Callable
 from concurrent.futures import Future
 from copy import deepcopy
 from datetime import datetime
@@ -37,6 +38,7 @@ from tidyfiles.collection import (
     WorkingCollection,
 )
 from tidyfiles.config import (
+    PERCEPTUAL_THRESHOLDS,
     ConfigError,
     DuplicatePreferences,
     default_config,
@@ -81,6 +83,12 @@ from tidyfiles.filename_integration import (
 from tidyfiles.format_reference import FORMAT_REFERENCE, TOKEN_GROUPS
 from tidyfiles.import_controller import ImportController
 from tidyfiles.managed_trash import TrashExecutor, TrashOutcome, TrashResult, TrashState
+from tidyfiles.media_tools import (
+    MediaTools,
+    check_media_tools,
+    import_media_tools,
+    plan_media_import,
+)
 from tidyfiles.modifying_jobs import ModifyingJobCoordinator
 from tidyfiles.preflight_service import PreflightService
 from tidyfiles.recovery import RecoveryInspection, RecoveryInspector
@@ -303,8 +311,17 @@ class _MainWindow:
         self.appearance_choice: tk.StringVar | None = None
         self.auto_clear_trash_switch: ctk.CTkSwitch | None = None
         self._duplicate_settings_widgets: tuple[
-            ctk.CTkSwitch, ctk.CTkOptionMenu, ctk.CTkOptionMenu
+            ctk.CTkSwitch, ctk.CTkOptionMenu, ctk.CTkOptionMenu,
+            ctk.CTkSwitch, ctk.CTkOptionMenu,
         ] | None = None
+        self.media_tools: MediaTools | None = None
+        self._media_future: Future[tuple[MediaTools, str | None]] | None = None
+        self._media_after: str | None = None
+        self._media_cancel = threading.Event()
+        self._media_importing = False
+        self._media_notice: str | None = None
+        self._media_label: ctk.CTkLabel | None = None
+        self._media_import_button: ctk.CTkButton | None = None
         self._entries_by_id: dict[UUID, CollectionEntry] = {}
         self._display_order: list[UUID] = []
         self._display_positions: dict[UUID, int] = {}
@@ -398,6 +415,7 @@ class _MainWindow:
         self.root.bind("<Configure>", self._schedule_geometry_check, add="+")
         self._schedule_system_appearance_check()
         self._start_recovery_inspection()
+        self._check_portable_media()
 
     def _configure_root(self) -> None:
         self.root.title("TidyFiles")
@@ -3318,14 +3336,16 @@ class _MainWindow:
                 schedule=False, invalidate_metadata=True
             )
 
-        self._update_control_states()
-        self.cancel_button.grid()
+        if not self.cancel_button.winfo_manager():
+            self.cancel_button.grid()
         cancellable = (
             self.import_controller.cancellation_applicable
             and phase not in {"cancelling", "restoring", "removing"}
             and not self._close_pending
         )
-        self.cancel_button.configure(state="normal" if cancellable else "disabled")
+        cancel_state = "normal" if cancellable else "disabled"
+        if self.cancel_button.cget("state") != cancel_state:
+            self.cancel_button.configure(state=cancel_state)
         if not self._progress_running:
             self.progress.start()
             self._progress_running = True
@@ -3998,10 +4018,10 @@ class _MainWindow:
             add="+",
         )
         dialog.title("Settings")
-        dialog.geometry("470x475")
+        dialog.geometry("490x615")
         dialog.resizable(False, False)
         dialog.transient(self.root)
-        content = ctk.CTkFrame(dialog)
+        content = ctk.CTkScrollableFrame(dialog)
         content.pack(fill="both", expand=True, padx=14, pady=14)
         ctk.CTkLabel(
             content, text="Appearance", anchor="w", font=ctk.CTkFont(weight="bold")
@@ -4054,8 +4074,31 @@ class _MainWindow:
             command=self._save_duplicate_settings,
         )
         workers.grid(row=2, column=1, sticky="w", padx=(12, 0), pady=(4, 0))
-        self._duplicate_settings_widgets = enabled, algorithm, workers
+        perceptual = ctk.CTkSwitch(
+            duplicate_options, text="Perceptual Hashing", command=self._save_duplicate_settings,
+        )
+        perceptual.grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 4))
+        ctk.CTkLabel(duplicate_options, text="Similarity threshold").grid(
+            row=4, column=0, sticky="w"
+        )
+        threshold = ctk.CTkOptionMenu(
+            duplicate_options, values=[f"{value}%" for value in PERCEPTUAL_THRESHOLDS],
+            command=self._save_duplicate_settings,
+        )
+        threshold.grid(row=4, column=1, sticky="w", padx=(12, 0))
+        self._duplicate_settings_widgets = enabled, algorithm, workers, perceptual, threshold
         self._show_duplicate_settings(preferences)
+        ctk.CTkLabel(
+            content, text="Portable media tools", anchor="w", font=ctk.CTkFont(weight="bold"),
+        ).pack(fill="x", padx=10)
+        self._media_label = ctk.CTkLabel(content, anchor="w", justify="left", wraplength=420)
+        self._media_label.pack(fill="x", padx=10, pady=(2, 6))
+        self._media_import_button = ctk.CTkButton(
+            content, text="Locate and Import", command=self._locate_media_tools
+        )
+        self._media_import_button.pack(anchor="w", padx=10, pady=(0, 8))
+        self._check_portable_media()
+        self._show_media_status()
         ctk.CTkButton(content, text="Done", width=85, command=dialog.destroy).pack(
             anchor="e", padx=10, pady=(0, 8)
         )
@@ -4064,27 +4107,133 @@ class _MainWindow:
     def _show_duplicate_settings(self, preferences: DuplicatePreferences) -> None:
         widgets = self._duplicate_settings_widgets
         if widgets is not None:
-            enabled, algorithm, workers = widgets
+            enabled, algorithm, workers, perceptual, threshold = widgets
             enabled.set(preferences.enabled)
             algorithm.set(
                 "xxHash128" if preferences.algorithm is HashAlgorithm.XXHASH128 else "xxHash64"
             )
             workers.set(str(preferences.workers))
+            perceptual.set(preferences.perceptual_enabled)
+            perceptual.configure(state="normal" if preferences.enabled else "disabled")
+            threshold.set(f"{preferences.perceptual_threshold}%")
+            threshold.configure(
+                state="normal"
+                if preferences.enabled and preferences.perceptual_enabled else "disabled"
+            )
 
     def _save_duplicate_settings(self, _value: str | None = None) -> None:
         widgets = self._duplicate_settings_widgets
         if widgets is None:
             return
         previous = get_duplicate_preferences(self.config)
-        enabled, algorithm, workers = widgets
+        enabled, algorithm, workers, perceptual, threshold = widgets
         preferences = DuplicatePreferences(
-            bool(enabled.get()), HashAlgorithm(algorithm.get().lower()), int(workers.get())
+            bool(enabled.get()), HashAlgorithm(algorithm.get().lower()), int(workers.get()),
+            bool(perceptual.get()), int(threshold.get().removesuffix("%")),
         )
         set_duplicate_preferences(self.config, preferences)
         self._save_preferences()
         if self._last_save_error is not None:
             set_duplicate_preferences(self.config, previous)
-            self._show_duplicate_settings(previous)
+            preferences = previous
+        self._show_duplicate_settings(preferences)
+
+    def _check_portable_media(self) -> None:
+        if self._media_future is not None:
+            return
+        cancel = self._media_cancel
+        self._start_media_work(lambda: (check_media_tools(cancel_check=cancel.is_set), None))
+
+    def _locate_media_tools(self) -> None:
+        if self._closing or self._close_pending or self._media_future is not None:
+            return
+        parent = self.settings_window or self.root
+        try:
+            selected = filedialog.askdirectory(
+                parent=parent, title="Locate FFmpeg and FFprobe", mustexist=True
+            )
+            if not selected:
+                return
+            plan = plan_media_import()
+            source = Path(selected)
+        except (OSError, tk.TclError) as error:
+            self._media_notice = f"Media tool import failed: {error}"
+            self._show_media_status()
+            return
+        if source == plan.directory:
+            self._check_portable_media()
+            return
+        replacements = plan.replacements
+        if replacements and not messagebox.askyesno(
+            "Replace portable media tools?",
+            f"Replace {', '.join(replacements)} in the TidyFiles application directory?",
+            parent=parent,
+        ):
+            return
+
+        def work() -> tuple[MediaTools, str | None]:
+            try:
+                return import_media_tools(
+                    source, plan, replace_existing=bool(replacements)
+                ), "Media tools imported."
+            except OSError as error:
+                return check_media_tools(), f"Media tool import failed: {error}"
+
+        self._start_media_work(work, importing=True)
+
+    def _start_media_work(
+        self, work: Callable[[], tuple[MediaTools, str | None]], *, importing: bool = False
+    ) -> None:
+        future: Future[tuple[MediaTools, str | None]] = Future()
+        self._media_future = future
+        self._media_importing = importing
+        self._show_media_status()
+
+        def execute() -> None:
+            try:
+                future.set_result(work())
+            except Exception as error:
+                future.set_exception(error)
+
+        threading.Thread(target=execute, name="TidyFiles-media-tools", daemon=True).start()
+        self._media_after = self.root.after(40, self._poll_media_work)
+
+    def _poll_media_work(self) -> None:
+        future = self._media_future
+        if future is None or self._closing:
+            return
+        if not future.done():
+            self._media_after = self.root.after(40, self._poll_media_work)
+            return
+        self._media_after = None
+        self._media_future = None
+        self._media_importing = False
+        try:
+            self.media_tools, self._media_notice = future.result()
+        except Exception as error:
+            self._media_notice = f"Media tool check failed: {error}"
+        self._show_media_status()
+
+    def _show_media_status(self) -> None:
+        if self._media_label is None or self._media_import_button is None:
+            return
+        busy = self._media_future is not None
+        self._media_import_button.configure(state="disabled" if busy else "normal")
+        tools = self.media_tools
+        if busy:
+            summary = "Importing media tools…" if self._media_importing else "Checking media tools…"
+        elif tools is None:
+            summary = "Video perceptual hashing is unavailable."
+        else:
+            summary = "\n".join(
+                f"{tool.name}.exe: {tool.version or tool.problem}"
+                for tool in (tools.ffmpeg, tools.ffprobe)
+            )
+            if not tools.video_ready:
+                summary += "\nVideo perceptual hashing is unavailable. Image analysis is available."
+        if self._media_notice and not busy:
+            summary += f"\n{self._media_notice}"
+        self._media_label.configure(text=summary)
 
     def _on_settings_window_destroy(
         self, event: tk.Event[Any], dialog: ctk.CTkToplevel
@@ -4094,6 +4243,8 @@ class _MainWindow:
             self.appearance_choice = None
             self.auto_clear_trash_switch = None
             self._duplicate_settings_widgets = None
+            self._media_label = None
+            self._media_import_button = None
 
     def _live_trash_switch(self) -> ctk.CTkSwitch | None:
         dialog = self.settings_window
@@ -4212,6 +4363,9 @@ class _MainWindow:
     def close(self) -> None:
         if self._closing or self._close_pending:
             return
+        if self._media_importing:
+            self.status.configure(text="Wait for the media tool import to finish before closing.")
+            return
         job = self.coordinator.current
         if (
             (job is not None and job.modifying)
@@ -4280,6 +4434,7 @@ class _MainWindow:
                 ).start()
                 return
         self._closing = True
+        self._media_cancel.set()
         self.import_controller.dispose()
         self.preflight_service.close(wait=False)
         for name in (
@@ -4287,6 +4442,7 @@ class _MainWindow:
             "_preview_debounce_after",
             "_preview_clear_after",
             "_preview_render_after",
+            "_media_after",
         ):
             self._cancel_preview_after(name)
         if self._recovery_after is not None:

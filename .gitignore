@@ -42,6 +42,7 @@ junit.xml
 # Tools
 /ffmpeg.exe
 /ffprobe.exe
+/.tidyfiles-media-*/
 
 # Local environment values and credentials
 .env

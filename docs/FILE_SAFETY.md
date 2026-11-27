@@ -356,6 +356,18 @@ keeper again at the move or source-removal boundary. Distinct hard-linked paths
 are eligible when the keeper path can be preserved. Failed or unverifiable
 entries stay excluded, with recovery records retained when required.
 
+## Perceptual analysis and tool import
+
+Perceptual hashing reads active sources through identity-checked handles.
+A failed decode or incomplete video sample is reported as an analysis problem.
+The returned similarity, including 100%, provides no deletion authorization.
+
+Locate and Import copies only the explicitly selected FFmpeg and FFprobe
+executables. Replacement approval applies to the two observed destination
+paths. Validation and staging precede installation. A failed installation
+attempts to restore the prior files and reports the backup location if
+restoration fails.
+
 ## Planned safety components
 
 The following remain unimplemented:

@@ -63,6 +63,8 @@ not implemented.
 | `src/tidyfiles/execution_preflight.py` | Review-time identity capture, full-batch refresh, and read-only identity, destination and exact-set revalidation. |
 | `src/tidyfiles/preflight_service.py` | A bounded preflight worker with replacement, cancellation, progress, and current-result tracking. |
 | `src/tidyfiles/duplicate_analysis.py` | Read-only exact duplicate analysis of finalized collection snapshots, with bounded hashing, byte confirmation, ordered results, progress, and session-scoped evidence. |
+| `src/tidyfiles/perceptual_analysis.py` | Read-only 64-bit image and sampled video perceptual hashing, session-scoped evidence, and deterministic probable-duplicate grouping. |
+| `src/tidyfiles/media_tools.py` | Portable FFmpeg and FFprobe resolution, bounded subprocesses, and explicitly authorized import. |
 | `src/tidyfiles/transaction_record.py` | Versioned transaction records, Windows identity encoding, and finalization evidence validation. |
 | `src/tidyfiles/transaction_journal.py` | Pinned journal sessions, atomic persistence, the independent recovery locator, read-only discovery, and explicitly authorized recovery-record dismissal. |
 | `src/tidyfiles/recovery.py` | Read-only current recovery observations and path/identity overlap protection for modifying services. |
@@ -703,8 +705,36 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Media verification, Purge, perceptual similarity, and repacking are future
+Media verification, Purge, probable duplicate review, and repacking are future
 components.
+
+## Perceptual analysis and portable media tools
+
+`PerceptualAnalyzer.analyze()` accepts the remaining finalized processing
+snapshot, duplicate preferences, and optional validated media tools. It
+requires Duplicate Checker and Perceptual Hashing to be enabled. It returns
+revision-scoped files, problems, sample positions, and probable groups.
+Configured workers hash in bounded batches. Evidence is reused only for
+matching source observations and, for video, matching tool observations.
+Cancellation discards incomplete results. The caller owns one analyzer per
+session and validates the returned revision before displaying results.
+
+Pillow and ImageHash produce 64-bit pHashes. FFprobe reads the video stream
+duration, with container duration as a fallback. FFmpeg extracts frames at
+10%, 30%, 50%, 70%, and 90% through a pipe. An incomplete sample set stays in
+the result for diagnosis and cannot enter a group. Hamming similarities are
+averaged by corresponding video position. Each group compares candidates to
+its first reference in collection order. Review order is largest first,
+with collection order breaking equal-size ties.
+
+Settings checks both executables in the portable application directory
+outside Tk. Locate and Import validates the selected pair, stages the copies,
+checks the approved destination observations, and validates the installed
+copies. If installation fails, it restores the prior pair where possible and
+reports any retained backups. The implementation uses the portable directory
+for all tools, independent of the working directory and PATH. Import and
+probable-duplicate review integration with **Add Files** and **Add Folder**
+belongs to M4-D.
 
 ## Deferred maintainability review
 

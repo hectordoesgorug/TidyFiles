@@ -7,8 +7,9 @@
 - Git
 
 The project uses CustomTkinter and the standard-library `ttk.Treeview`. The exact
-duplicate engine uses the `xxhash` runtime dependency. Ruff and pytest are
-development dependencies declared in `pyproject.toml`.
+duplicate engine uses `xxhash`. Perceptual hashing uses Pillow, ImageHash, and
+pillow-heif. ImageHash supplies its scientific dependencies through normal
+package installation. Ruff and pytest are development dependencies.
 
 ## Create the environment and install
 
@@ -58,6 +59,18 @@ git diff --check
 The current GitHub Actions workflow runs on Windows with Python 3.13 and runs
 Ruff and pytest after installing `.[dev]`. Local compile checks and manual GUI
 review remain separate from those CI results.
+
+The default suite runs without portable media executables. With a local pair
+installed as described in the [README](../README.md#optional-media-tools), run
+the opt-in integration tests against disposable media:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/media_integration_worker.py
+```
+
+The tested pair reported `9.1-essentials_build-www.gyan.dev` for both tools.
+The test suite leaves the supplied executables intact and tests copying only
+into a disposable application directory.
 
 ## Documentation boundaries
 

@@ -21,7 +21,8 @@ previews, three built-in formats, token insertion, a scrollable token reference,
 and an explicit refresh for physical directory-count metadata. The format is
 session-only. Expression and file-specific errors are shown in the preview;
 Process uses the live filename preview as the review interface and runs fresh
-preflight before renaming. Media verification, perceptual similarity, and
+preflight before renaming. The perceptual hashing engine and its settings are
+implemented. Import integration, probable-duplicate review, verification, and
 repacking are planned.
 The application is not production-ready.
 
@@ -67,6 +68,32 @@ Auto-clean and Auto-Clear Trash are separate,
 default-off settings. Auto-clean runs only after complete rename success from
 explicit Add Folder roots; Auto-Clear Trash runs only after normal exit and
 warns only if it encounters errors or leaves content behind.
+
+## Optional media tools
+
+Video perceptual hashing requires local `ffmpeg.exe` and `ffprobe.exe`. The
+recommended Windows x64 reference is Gyan's FFmpeg 9.1 Essentials ZIP. Other
+compatible versions are accepted. [FFmpeg downloads](https://ffmpeg.org/download.html)
+[Gyan Windows builds](https://www.gyan.dev/ffmpeg/builds/)
+[Essentials ZIP](https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip)
+
+Extract the ZIP and find the `bin` directory. Place the two executables beside
+`TidyFiles.exe`, or use **Settings → Locate and Import** and select the
+`bin` directory. For a source checkout, the portable directory is the
+repository root. Locate and Import copies the executables, retains the
+originals, and asks before replacing existing copies.
+
+TidyFiles checks the local versions in the background. You can also run these
+commands from the portable directory:
+
+```powershell
+.\ffmpeg.exe -version
+.\ffprobe.exe -version
+```
+
+Image perceptual hashing, exact duplicate checking, and renaming work without
+the media tools. TidyFiles releases exclude both executables from archives and
+PyInstaller bundles.
 
 ## Run locally
 

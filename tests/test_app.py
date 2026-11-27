@@ -248,6 +248,111 @@ def _run_gui_test_in_isolated_process(test_name: str) -> bool:
     return True
 
 
+def test_portable_media_settings_do_not_block_rename_and_refresh_after_import(
+    tmp_path, monkeypatch
+):
+    if _run_gui_test_in_isolated_process(
+        "test_portable_media_settings_do_not_block_rename_and_refresh_after_import"
+    ):
+        return
+    import tidyfiles.media_tools as media
+    from tidyfiles.config import get_duplicate_preferences
+    from tidyfiles.transaction_journal import JournalStore
+
+    root_dir, source, local = (tmp_path / name for name in ("app", "source", "local"))
+    for directory in (root_dir, source, local):
+        directory.mkdir()
+    for executable in ("ffmpeg.exe", "ffprobe.exe"):
+        (source / executable).write_bytes(b"9.1 fixture")
+    (source / "ffplay.exe").write_bytes(b"keep at source")
+    journals = JournalStore(app_dir=root_dir, local_app_data=local)
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journals)
+    monkeypatch.setattr(media, "application_directory", lambda: root_dir)
+    release = threading.Event()
+    started = threading.Event()
+    approvals = []
+
+    def startup_check(*args, **kwargs):
+        started.set()
+        assert release.wait(10)
+        return media.check_media_tools(*args, **kwargs)
+
+    def version(path, args, **kwargs):
+        assert args == ("-version",)
+        suffix = path.read_bytes().decode().split()[0]
+        return f"{path.stem} version {suffix}\n".encode()
+
+    def decline(title, *_args, **_kwargs):
+        approvals.append(title)
+        return False
+
+    monkeypatch.setattr(app_module, "check_media_tools", startup_check)
+    monkeypatch.setattr(media, "run_media_command", version)
+    config_path = tmp_path / "config.json"
+    root = create_main_window(default_config(), config_path)
+    app = root.application
+    fixture = tmp_path / "ordinary.txt"
+    fixture.write_text("ordinary", encoding="utf-8")
+    try:
+        root.update()
+        _wait_for(root, started.is_set)
+        _import_files(app, root, monkeypatch, fixture)
+        app.rename_format.set("<Name> renamed")
+        _wait_for(root, app._process_ready)
+        assert app.media_tools is None
+        assert fixture.exists()
+        app.open_settings()
+        assert app._media_import_button is not None
+        assert app._media_import_button.cget("state") == "disabled"
+        release.set()
+        _wait_for(root, lambda: app._media_future is None)
+        assert app._media_label is not None
+        assert "Video perceptual hashing is unavailable" in app._media_label.cget("text")
+        assert app._process_ready()
+
+        options = app._duplicate_settings_widgets
+        assert options is not None
+        duplicate, _, _, perceptual, threshold = options
+        assert not perceptual.get() and threshold.cget("state") == "disabled"
+        perceptual.toggle()
+        assert threshold.cget("state") == "normal"
+        threshold.set("90%")
+        app._save_duplicate_settings()
+        duplicate.toggle()
+        assert perceptual.cget("state") == threshold.cget("state") == "disabled"
+        saved = get_duplicate_preferences(load_config(config_path))
+        assert not saved.enabled and saved.perceptual_enabled and saved.perceptual_threshold == 90
+
+        monkeypatch.setattr(app_module.filedialog, "askdirectory", lambda **_: "")
+        app._media_import_button.invoke()
+        assert not tuple(root_dir.glob("*.exe"))
+        monkeypatch.setattr(app_module.filedialog, "askdirectory", lambda **_: str(source))
+        monkeypatch.setattr(
+            app_module.messagebox, "askyesno", decline,
+        )
+        app._media_import_button.invoke()
+        _wait_for(root, lambda: app._media_future is None)
+        assert app.media_tools is not None and app.media_tools.video_ready
+        assert "ffmpeg.exe: 9.1" in app._media_label.cget("text")
+        assert "ffprobe.exe: 9.1" in app._media_label.cget("text")
+        assert not approvals
+        assert sorted(path.name for path in root_dir.glob("*.exe")) == ["ffmpeg.exe", "ffprobe.exe"]
+        assert all((source / name).exists() for name in ("ffmpeg.exe", "ffprobe.exe", "ffplay.exe"))
+        (source / "ffmpeg.exe").write_bytes(b"10.0 fixture")
+        app._media_import_button.invoke()
+        assert approvals == ["Replace portable media tools?"]
+        assert (root_dir / "ffmpeg.exe").read_bytes() == b"9.1 fixture"
+
+        monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *_args, **_kwargs: True)
+        app._media_import_button.invoke()
+        _wait_for(root, lambda: app._media_future is None)
+        assert "ffmpeg.exe: 10.0" in app._media_label.cget("text")
+    finally:
+        release.set()
+        _wait_for(root, lambda: app._media_future is None)
+        _close_app(app, root)
+
+
 def _confirm_review(app, label: str) -> None:
     dialog = app._plan_review_dialog
     assert dialog is not None
