@@ -53,22 +53,23 @@ def test_add_files_imports_individually_and_reports_duplicates(tmp_path: Path) -
     assert all(item.session_id == report.session_id for item in items)
     entries = collection.snapshot().entries
     assert [entry.original_filename for entry in entries] == [
-        "one.tar.gz",
         "extensionless",
+        "one.tar.gz",
         "zero.dat",
     ]
-    assert entries[0].original_stem == "one.tar"
-    assert entries[0].source_extension == ".gz"
-    assert entries[0].import_root_path == str(tmp_path)
+    extensionless, archive, _zero = entries
+    assert archive.original_stem == "one.tar"
+    assert archive.source_extension == ".gz"
+    assert archive.import_root_path == str(tmp_path)
     assert first.read_bytes() == b"data"
-    assert entries[1].source_extension == ""
-    assert entries[1].metadata is not None
-    assert entries[1].metadata.size_bytes == 0
-    assert entries[1].metadata.modified_time_ns == second.stat().st_mtime_ns
+    assert extensionless.source_extension == ""
+    assert extensionless.metadata is not None
+    assert extensionless.metadata.size_bytes == 0
+    assert extensionless.metadata.modified_time_ns == second.stat().st_mtime_ns
     created_time = getattr(second.stat(), "st_birthtime_ns", None)
     if created_time is None and os.name == "nt":
         created_time = second.stat().st_ctime_ns
-    assert entries[1].metadata.created_time_ns == created_time
+    assert extensionless.metadata.created_time_ns == created_time
     assert collection.snapshot().folder_roots == ()
 
 

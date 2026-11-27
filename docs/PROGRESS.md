@@ -65,6 +65,7 @@ startup recovery notices, and managed Trash cleanup.
 | M4-D | Implemented | Import-integrated probable duplicate review, authorized managed Trash transfers, and progressive media metadata. |
 | M4-E | Implemented | Pre-verify, corruption exclusions, explicit Purge, and Post-verify for successful rename outputs. |
 | M4-E1 | Implemented | Persistent Files Excluded review with independent Purge and Deduplicate transfers. |
+| M4-F | Implemented | Audio integrity verification, DD-094 file categorization, and test type narrowing. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
 | M6.1 | Planned | Targeted maintainability review after M6 and before M7. Use implemented features and their dependencies to determine which changes are justified. |
@@ -1204,6 +1205,30 @@ Amendment verification passed all 797 tests in the final local Windows run,
 Both CI cases passed three final isolated repetitions. Two earlier full runs
 each hit a different intermittent Tk check. Both passed in isolation and in
 the final complete run.
+
+## M4-F — Audio verification and file-type sorting
+
+Pre-verify and Post-verify use portable FFprobe to inspect supported audio
+streams and containers. A recognized audio container can pass with a
+different filename suffix. Confirmed WAV structural defects are eligible for
+the existing protected Purge workflow. Unsupported containers, unavailable
+tools, timeouts, and ambiguous input failures retain their separate outcomes.
+
+DD-094 orders non-GIF images, GIF, audio, video, and other files in ascending
+File Type + Name order. Natural names determine order within each category.
+Descending reverses the complete key. Preview numbering follows the resulting
+collection order.
+
+A disposable copy of the mixed test folder produced 95 Verified and five
+Corrupted results. The 19-byte `broken_audio.wav` contained plain text and
+lacked a WAV signature. Pre-verify excluded the five corrupt files before
+exact analysis, which excluded three copies and left 92 processing entries.
+
+Local Windows verification on Python 3.13.17 passed all 811 tests, 11 opt-in
+real-media tests, and focused audio, sorting, discovery, and GUI checks.
+Ruff, compileall, pip check, and Git whitespace checks passed. The live VS
+Code workspace showed zero Problems with `tests/test_app.py` open and
+Pylance active.
 
 ## M6.1 — Targeted maintainability review
 

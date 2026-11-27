@@ -383,7 +383,11 @@ Corruption exclusion requires positive evidence tied to the discovered
 file's identity and metadata. Missing tools, timeouts, and read or resource
 failures have separate outcomes. An empty file requires a format-specific
 rule before it can be classified as corrupted. FFprobe's absence gives a
-video an Unsupported result even when the initial header is recognizable.
+supported video or audio file an Unsupported result even when its initial
+header is recognizable. WAV corruption evidence can come from a RIFF size
+that exceeds the file length, or FFprobe's invalid-input result combined with
+a plain text payload lacking a WAV signature. A supported audio stream that FFprobe
+recognizes in another container can pass the inspection despite its suffix.
 
 DD-091 makes **Purge** in Files Excluded or the main window the authorization
 to transfer the pending corruption exclusions. It supersedes the secondary

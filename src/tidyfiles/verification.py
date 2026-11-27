@@ -20,6 +20,7 @@ from tidyfiles.destination_observation import PathObservation, WindowsPathObserv
 from tidyfiles.duplicate_analysis import _FileFailure, _observe, _read_source
 from tidyfiles.media_tools import MediaCancelled, MediaTool, MediaToolError, run_media_command
 from tidyfiles.perceptual_analysis import _IMAGE_EXTENSIONS, _VIDEO_EXTENSIONS
+from tidyfiles.sorting import _AUDIO_EXTENSIONS
 
 _IMAGE_FORMATS = {
     ".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG", ".bmp": "BMP",
@@ -104,16 +105,27 @@ def _image_check(
     return VerificationStatus.VERIFIED, "Pillow loaded the image"
 
 
-def _video_check(
-    entry: CollectionEntry, header: bytes, probe: MediaTool | None, cancelled: Callable[[], bool],
+def _container_check(
+    entry: CollectionEntry, header: bytes, size: int, kind: str,
+    probe: MediaTool | None, cancelled: Callable[[], bool],
 ) -> tuple[VerificationStatus, str]:
     extension = entry.source_extension.casefold()
     iso_header = extension in _ISO_VIDEO and header[4:8] == b"ftyp"
     if probe is None or not probe.is_current() or probe.path is None:
         detail = "recognized ISO media header" if iso_header else "header read only"
         return VerificationStatus.UNSUPPORTED, f"Portable FFprobe unavailable ({detail})"
-    if not header:
+    if not header and kind == "video":
         return VerificationStatus.CORRUPTED, "Empty file lacks the required video container data"
+    wave = extension == ".wav"
+    wave_signature = header[:4] in {b"RIFF", b"RIFX", b"RF64", b"BW64"}
+    wave_signature = wave_signature and header[8:12] == b"WAVE"
+    byte_order = "big" if header.startswith(b"RIFX") else "little"
+    riff_size = (
+        int.from_bytes(header[4:8], byte_order)
+        if wave and wave_signature and header[:4] in {b"RIFF", b"RIFX"}
+        else 0
+    )
+    truncated_wave = 0 < riff_size < 0xFFFFFFFF and riff_size + 8 > size
     try:
         output = run_media_command(
             probe.path,
@@ -124,11 +136,14 @@ def _video_check(
         if not probe.is_current():
             return VerificationStatus.UNSUPPORTED, "Portable FFprobe changed during verification"
         data = json.loads(output)
-        video = [row for row in data.get("streams", []) if row.get("codec_type") == "video"]
-        if not video or any(row.get("codec_name") in (None, "", "unknown") for row in video):
-            return VerificationStatus.UNSUPPORTED, "No supported video stream identified by FFprobe"
-        if not data.get("format", {}).get("format_name"):
+        container = data.get("format", {}).get("format_name")
+        streams = [row for row in data.get("streams", []) if row.get("codec_type") == kind]
+        if not streams or any(row.get("codec_name") in (None, "", "unknown") for row in streams):
+            return VerificationStatus.UNSUPPORTED, f"FFprobe found no supported {kind} stream"
+        if not container:
             return VerificationStatus.INCOMPLETE, "FFprobe did not identify the container"
+        if container == "wav" and truncated_wave:
+            return VerificationStatus.CORRUPTED, "WAV RIFF size exceeds the file size"
     except MediaToolError as error:
         reason = str(error)
         detail = reason.casefold()
@@ -142,10 +157,19 @@ def _video_check(
             return VerificationStatus.UNSUPPORTED, reason
         if iso_header and "moov atom not found" in detail:
             return VerificationStatus.CORRUPTED, "ISO media container lacks its required moov atom"
+        if wave and detail.endswith("invalid data found when processing input"):
+            if truncated_wave:
+                return VerificationStatus.CORRUPTED, "WAV RIFF size exceeds the file size"
+            payload = header.rstrip(b"\x00")
+            if (
+                not wave_signature and len(header) == size and payload
+                and all(0x20 <= byte < 0x7f for byte in payload)
+            ):
+                return VerificationStatus.CORRUPTED, "Plain text payload lacks a WAV signature"
         return VerificationStatus.INCOMPLETE, reason
     except (ValueError, AttributeError, TypeError, MemoryError) as error:
         return VerificationStatus.INCOMPLETE, str(error) or "FFprobe result unavailable"
-    return VerificationStatus.VERIFIED, "FFprobe identified the container and video streams"
+    return VerificationStatus.VERIFIED, f"FFprobe identified the container and {kind} streams"
 
 
 class IntegrityVerifier:
@@ -175,7 +199,13 @@ class IntegrityVerifier:
                 elif extension in _IMAGE_EXTENSIONS or extension == ".heif":
                     status, reason = _image_check(stream, header, extension)
                 elif extension in _VIDEO_EXTENSIONS:
-                    status, reason = _video_check(entry, header, probe, cancelled)
+                    status, reason = _container_check(
+                        entry, header, source.size, "video", probe, cancelled
+                    )
+                elif extension in _AUDIO_EXTENSIONS:
+                    status, reason = _container_check(
+                        entry, header, source.size, "audio", probe, cancelled
+                    )
                 else:
                     status, reason = VerificationStatus.VERIFIED, f"Read the initial {size} byte(s)"
             if cancelled():

@@ -113,12 +113,13 @@ collection retains earlier incomplete-import records. Discovery order is
 provisional until all results are consumed and the import is finalized. The
 collection then either sorts all retained entries in automatic mode or keeps
 existing order and appends the new entries sorted in manual mode. The default
-sort is File Type + Name, ascending, using the legacy image, video, document,
-audio, archive, and other categories. Name, extension, size, creation date,
+sort is File Type + Name, ascending. DD-094 orders images excluding GIF,
+GIF, audio, video, and other files. Filenames sort naturally and
+case-insensitively within each category. Name, extension, size, creation date,
 modified date, and path are also supported. Descending reverses the complete
-known compound key, including category order; ascending preserves the legacy
-category order. Missing metadata sorts after known values in both directions;
-known zero values remain ordinary sortable values. The legacy HEIC suffix is
+known compound key, including category order. Missing metadata sorts after
+known values in both directions. Known zero values remain ordinary sortable
+values. The legacy HEIC suffix is
 an image sort category only; this does not add conversion support.
 
 Natural comparison case-folds text and compares decimal runs by numeric value
@@ -778,8 +779,8 @@ uses the rename result and protects its output paths.
 
 Both settings default off. The verifier uses bounded worker batches and reads
 through identity-checked handles. Pillow loads supported image data. FFprobe
-checks the container and video stream metadata without full decoding. Other
-files get a read of up to 512 bytes. The outcomes are Verified, Corrupted,
+checks supported audio and video containers and streams without full decoding.
+Other files get a read of up to 512 bytes. The outcomes are Verified, Corrupted,
 Unsupported, Inaccessible, and Incomplete. Only a recognized structural
 defect, recognized decoding damage, or missing mandatory data in a known
 format can produce Purge evidence.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 import subprocess
 import sys
@@ -64,10 +65,36 @@ def _close_app(app, root) -> None:
         root.destroy()
 
 
+def _mock_wav_probe(monkeypatch):
+    import tidyfiles.verification as verification
+    from tidyfiles.media_tools import MediaTool, MediaToolError, MediaTools
+
+    probe = MediaTool("ffprobe", Path("C:/fixture/ffprobe.exe"), "test")
+    monkeypatch.setattr(
+        app_module, "check_media_tools",
+        lambda **_: MediaTools(MediaTool("ffmpeg"), MediaTool("ffprobe")),
+    )
+    is_current = MediaTool.is_current
+    monkeypatch.setattr(MediaTool, "is_current", lambda tool: tool is probe or is_current(tool))
+    monkeypatch.setattr(
+        app_module._MainWindow, "_resolve_verification_probe", staticmethod(lambda *_: probe)
+    )
+
+    def run(_path, args, **options):
+        if Path(args[-1]).name.startswith("broken"):
+            raise MediaToolError("Invalid data found when processing input")
+        return (
+            b'{"streams":[{"codec_type":"audio","codec_name":"pcm_s16le"}],'
+            b'"format":{"format_name":"wav"}}'
+        )
+
+    monkeypatch.setattr(verification, "run_media_command", run)
+
+
 @pytest.mark.parametrize("scenario", [
     "disabled", "independent", "ok", "purge", "deduplicate", "changed", "unavailable",
     "cancel", "stale", "purge_then_deduplicate", "deduplicate_then_purge", "purge_partial",
-    "purge_stalled",
+    "purge_stalled", "audio",
 ])
 def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
     if _run_gui_test_in_isolated_process(f"test_pre_verification_and_purge_workflow[{scenario}]"):
@@ -89,15 +116,25 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
     storage.managed_trash_path.cache_clear()
     if scenario == "unavailable":
         monkeypatch.setattr(trash, "managed_trash_path", lambda: None)
-    good, duplicate, bad, unsupported = (
-        tmp_path / name for name in ("a.txt", "b.txt", "broken.png", "unknown.jpg")
-    )
-    good.write_bytes(b"exact copy")
+    audio = scenario == "audio"
+    extension = "wav" if audio else "txt"
+    good, duplicate = tmp_path / f"a.{extension}", tmp_path / f"b.{extension}"
+    bad = tmp_path / ("broken.wav" if audio else "broken.png")
+    unsupported = tmp_path / "unknown.jpg"
+    if audio:
+        import wave
+
+        with wave.open(str(good), "wb") as stream:
+            stream.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+            stream.writeframes(bytes(16))
+        original = b"INVALID WAV HEADER\x00"
+    else:
+        good.write_bytes(b"exact copy")
+        with Image.new("RGB", (16, 16)) as image:
+            image.save(bad)
+        original = bad.read_bytes()[:25]
     duplicate.write_bytes(good.read_bytes())
     unsupported.write_bytes(b"unidentified image fixture")
-    with Image.new("RGB", (16, 16)) as image:
-        image.save(bad)
-    original = bad.read_bytes()[:25]
     bad.write_bytes(original)
     second_bad = tmp_path / "second broken.png"
     partial = scenario == "purge_partial"
@@ -108,6 +145,8 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
         pre_verify=scenario != "disabled", duplicate_checker=scenario != "independent",
         perceptual_hashing=scenario not in {"disabled", "independent", "cancel", "stale"},
     )
+    if audio:
+        _mock_wav_probe(monkeypatch)
     root = create_main_window(config)
     app = root.application
     verifies, exact, perceptual, popups = [], [], [], []
@@ -117,7 +156,9 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
     metadata_release, metadata_resumed = threading.Event(), threading.Event()
     stalled = scenario == "purge_stalled"
     verify = app._integrity_verifier.verify
-    analyze_exact = app.import_controller._duplicate_analyzer.analyze
+    duplicate_analyzer = app.import_controller._duplicate_analyzer
+    assert duplicate_analyzer is not None
+    analyze_exact = duplicate_analyzer.analyze
     analyze_perceptual = app._perceptual_analyzer.analyze
     execute_purge = app.trash_executor.execute_reviewed
     execute_deduplicate = app.trash_executor.execute_duplicates
@@ -158,7 +199,7 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
         return analyze_perceptual(snapshot, *args, **options)
 
     monkeypatch.setattr(app._integrity_verifier, "verify", check)
-    monkeypatch.setattr(app.import_controller._duplicate_analyzer, "analyze", capture_exact)
+    monkeypatch.setattr(duplicate_analyzer, "analyze", capture_exact)
     monkeypatch.setattr(app._perceptual_analyzer, "analyze", capture_perceptual)
 
     def hold_transfer(execute):
@@ -220,7 +261,8 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
             incoming.write_bytes(original)
             incoming.replace(bad)
         actions = {
-            "purge": ("Purge",), "independent": ("Purge",), "changed": ("Purge",),
+            "purge": ("Purge",), "audio": ("Purge",), "independent": ("Purge",),
+            "changed": ("Purge",),
             "unavailable": ("Purge",),
             "purge_partial": ("Purge",), "deduplicate": ("Deduplicate",),
             "purge_stalled": ("Purge", "Purge"),
@@ -311,11 +353,14 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
         if scenario not in {"disabled", "independent"}:
             assert len(perceptual) == 1
             assert {row.original_filename for row in perceptual[0]} == {good.name, unsupported.name}
-        if scenario in {"purge", "independent", "purge_stalled"} or len(actions) == 2:
+        if scenario in {"purge", "audio", "independent", "purge_stalled"} or len(actions) == 2:
             assert not bad.exists() and duplicate.exists() == ("Deduplicate" not in actions)
             assert not snapshot.excluded_corruption
-            assert bool(snapshot.excluded_duplicates) == (scenario in {"purge", "purge_stalled"})
-            assert [path.read_bytes() for path in (app_dir / "trash").glob("*/*.png")] == [original]
+            assert bool(snapshot.excluded_duplicates) == (
+                scenario in {"purge", "purge_stalled", "audio"}
+            )
+            trashed = (app_dir / "trash").glob(f"*/*{bad.suffix}")
+            assert [path.read_bytes() for path in trashed] == [original]
         elif scenario in {"changed", "unavailable", "purge_partial"}:
             assert bad.read_bytes() == original and duplicate.exists()
             assert snapshot.excluded_corruption and snapshot.excluded_duplicates
@@ -343,7 +388,7 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
         storage.managed_trash_path.cache_clear()
 
 
-@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("enabled", [False, True, "audio"])
 def test_post_verification_before_auto_clean(tmp_path, monkeypatch, enabled):
     if _run_gui_test_in_isolated_process(f"test_post_verification_before_auto_clean[{enabled}]"):
         return
@@ -357,15 +402,21 @@ def test_post_verification_before_auto_clean(tmp_path, monkeypatch, enabled):
     local.mkdir()
     journal = JournalStore(app_dir=tmp_path / "app", local_app_data=local)
     monkeypatch.setattr(app_module, "JournalStore", lambda: journal)
-    good, bad = nested / "good.txt", nested / "broken.png"
+    audio = enabled == "audio"
+    good, bad = nested / "good.txt", nested / ("broken.wav" if audio else "broken.png")
     good.write_bytes(b"ordinary text")
-    with Image.new("RGB", (16, 16)) as image:
-        image.save(bad)
-    broken = bad.read_bytes()[:25]
+    if audio:
+        broken = b"INVALID WAV HEADER\x00"
+    else:
+        with Image.new("RGB", (16, 16)) as image:
+            image.save(bad)
+        broken = bad.read_bytes()[:25]
     bad.write_bytes(broken)
     clutter = nested / "Thumbs.db"
     clutter.touch()
     config_path = tmp_path / "config.json"
+    if audio:
+        _mock_wav_probe(monkeypatch)
     root = create_main_window(default_config(), config_path)
     app = root.application
     entered, release = threading.Event(), threading.Event()
@@ -400,6 +451,7 @@ def test_post_verification_before_auto_clean(tmp_path, monkeypatch, enabled):
             switches["Post-verify"].toggle()
             assert load_config(config_path)["global_settings"]["post_verify"] is True
         settings.destroy()
+        gc.collect()  # Finalize the closed Settings widgets on the Tk thread.
         monkeypatch.setattr(app_module.filedialog, "askdirectory", lambda **_: str(folder))
         app.add_folder()
         _wait_for(root, lambda: not app.import_controller.busy)
@@ -408,7 +460,7 @@ def test_post_verification_before_auto_clean(tmp_path, monkeypatch, enabled):
         app.rename_format.set("<Name> renamed")
         _wait_for(root, app._process_ready)
         app.process_button.invoke()
-        success, damaged = nested / "good renamed.txt", nested / "broken renamed.png"
+        success, damaged = nested / "good renamed.txt", nested / f"broken renamed{bad.suffix}"
         if enabled:
             _wait_for(root, entered.is_set)
             _wait_for(root, lambda: app._processing_phase == "post_verify")
@@ -423,7 +475,7 @@ def test_post_verification_before_auto_clean(tmp_path, monkeypatch, enabled):
         if enabled:
             assert set(statuses) == {"Corrupted", "Verified"}
             assert "1 verified · 1 corrupted" in summaries[0]
-            assert "broken renamed.png · Corrupted" in summaries[0]
+            assert f"{damaged.name} · Corrupted" in summaries[0]
         else:
             assert not calls and "Post-verify" not in summaries[0]
         assert "Auto-clean removed 1 item(s)" in summaries[0]
@@ -1123,7 +1175,7 @@ def test_main_window_collection_columns_import_and_persistence(
             entry for entry in app.collection.snapshot().entries
             if entry.source_path == str(one_file)
         )
-        assert one_entry.metadata.size_bytes == 3
+        assert one_entry.metadata is not None and one_entry.metadata.size_bytes == 3
         assert one_file.read_text() == "one"
         assert one_file.stat().st_mtime_ns == file_stats.st_mtime_ns
         assert selected_dialogs["files_options"]["filetypes"] == (("All Files", "*.*"),)
@@ -1245,7 +1297,8 @@ def test_main_window_collection_columns_import_and_persistence(
                 time.sleep(0.001)
             assert entered_wait.is_set()
             assert len(app.tree.get_children("")) > len(before_cancel.entries)
-            assert not app.import_controller.session.is_terminal
+            session = app.import_controller.session
+            assert session is not None and not session.is_terminal
             app.tabs.set("Repacker")
             app._on_mode_change()
             assert app.active_mode == "Repacker"

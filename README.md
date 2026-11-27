@@ -15,8 +15,11 @@ widths are customizable per mode; appearance and window placement are saved in
 the existing configuration. The shared collection supports seven sorting
 criteria, saved sort preferences, manual movement and row dragging, selection,
 context-menu actions, Remove from List, and Clear All. These controls change only
-the in-memory collection; sorting uses stored metadata, and removing or clearing
-entries leaves source files unchanged. Bulk Rename provides live filename
+the in-memory collection. File Type + Name sorts non-GIF images, GIFs, audio,
+video, and other files in that order. It sorts names naturally and
+case-insensitively within each group. Removing or clearing entries leaves
+source files unchanged.
+Bulk Rename provides live filename
 previews, three built-in formats, token insertion, a scrollable token reference,
 and an explicit refresh for physical directory-count metadata. The format is
 session-only. Expression and file-specific errors are shown in the preview;
@@ -88,8 +91,9 @@ files and elapsed time, with an estimated remaining time after enough progress.
 Post-verify checks successful outputs at their final paths before eligible
 Auto-clean. The Treeview and rename summary report the outcome. A failed
 check leaves the output in place. Verification loads supported images with
-Pillow, inspects video containers and streams with FFprobe, and reads up to
-512 bytes for other files. **Verified** means those limited checks passed.
+Pillow, inspects supported audio and video containers and streams with
+FFprobe, and reads up to 512 bytes for other files. **Verified** means those
+limited checks passed.
 The other outcomes are **Corrupted**, **Unsupported**, **Inaccessible**, and
 **Incomplete**.
 
@@ -105,8 +109,8 @@ warns only if it encounters errors or leaves content behind.
 
 ## Optional media tools
 
-Video perceptual hashing requires local `ffmpeg.exe` and `ffprobe.exe`. Video
-verification and the video and audio metadata columns use `ffprobe.exe`.
+Video perceptual hashing requires local `ffmpeg.exe` and `ffprobe.exe`. Audio
+and video verification and their metadata columns use `ffprobe.exe`.
 The recommended Windows
 x64 reference is Gyan's FFmpeg 9.1 Essentials ZIP. Other
 compatible versions are accepted. [FFmpeg downloads](https://ffmpeg.org/download.html)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import wave
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,44 @@ def test_real_video_verification_and_missing_probe(local_tools, tmp_path):
         result.status is VerificationStatus.UNSUPPORTED for result in verifier.verify(entries, None)
     )
     assert good.read_bytes() == contents and truncated.stat().st_size < len(contents)
+
+
+def test_real_audio_container_verification(local_tools, tmp_path):
+    _, tools = local_tools
+    assert tools.ffmpeg.path is not None
+    wav, empty, bad, truncated, mp3, flac, aac, mislabeled = (
+        tmp_path / name for name in (
+            "tone.wav", "empty.wav", "bad.wav", "truncated.wav", "tone.mp3", "tone.flac",
+            "tone.aac", "mislabeled.wav",
+        )
+    )
+    for path, frames in ((wav, bytes(1600)), (empty, b"")):
+        with wave.open(str(path), "wb") as stream:
+            stream.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+            stream.writeframes(frames)
+    bad.write_bytes(b"INVALID WAV HEADER\x00")
+    truncated.write_bytes(wav.read_bytes()[:-16])
+    for path in (mp3, flac, aac):
+        media.run_media_command(
+            tools.ffmpeg.path,
+            ("-v", "error", "-i", str(wav), "-ar", "44100", str(path)),
+            timeout=15,
+        )
+    shutil.copyfile(mp3, mislabeled)
+    paths = (wav, empty, bad, truncated, mp3, flac, aac, mislabeled)
+    contents = {path: path.read_bytes() for path in paths}
+    entries = _collection(*paths).snapshot().entries
+    checked = IntegrityVerifier().verify(entries, tools.ffprobe)
+    results = {row.entry.original_filename: row for row in checked}
+    for path in paths:
+        expected = (
+            VerificationStatus.CORRUPTED if path in {bad, truncated}
+            else VerificationStatus.VERIFIED
+        )
+        assert results[path.name].status is expected, results[path.name]
+        assert path.read_bytes() == contents[path]
+    assert "signature" in results[bad.name].reason
+    assert "size" in results[truncated.name].reason
 
 
 @pytest.mark.parametrize("duration,rate", [(0.5, 2), (0.6, 5), (6, 10), (12, 10)])

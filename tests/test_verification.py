@@ -33,12 +33,62 @@ def test_images_and_limited_readability_checks(tmp_path):
     assert {name: row.status for name, row in results.items()} == {
         good.name: Status.VERIFIED, bad.name: Status.CORRUPTED, unknown.name: Status.UNSUPPORTED,
         empty_image.name: Status.CORRUPTED, empty.name: Status.VERIFIED,
-        audio.name: Status.VERIFIED,
+        audio.name: Status.UNSUPPORTED,
     }
     assert results[bad.name].corruption() is not None
     assert results[unknown.name].corruption() is None
     assert results[empty.name].reason == "Read the initial 0 byte(s)"
-    assert results[audio.name].reason == "Read the initial 512 byte(s)"
+    assert "Portable FFprobe unavailable" in results[audio.name].reason
+
+
+@pytest.mark.parametrize(("extension", "output", "status"), [
+    (".wav", MediaToolError("Invalid data found when processing input"), Status.CORRUPTED),
+    (".mp3", MediaToolError("Invalid data found when processing input"), Status.INCOMPLETE),
+    (".wav", MediaToolError("Generic failure"), Status.INCOMPLETE),
+    (".wav", MediaToolError("ffprobe.exe timed out"), Status.INCOMPLETE),
+    (".wav", MediaToolError("Permission denied"), Status.INACCESSIBLE),
+    (".wav", MediaToolError("Decoder not found"), Status.UNSUPPORTED),
+    (".wav", MediaCancelled(), Status.INCOMPLETE),
+    (".wav", b'{"streams":[{"codec_type":"audio"}],"format":{"format_name":"wav"}}',
+     Status.UNSUPPORTED),
+    (".wav", b'{"streams":[{"codec_type":"video","codec_name":"h264"}],'
+     b'"format":{"format_name":"mov"}}', Status.UNSUPPORTED),
+    (".wav", b'{"streams":[{"codec_type":"audio","codec_name":"mp3"}],'
+     b'"format":{"format_name":"mp3"}}', Status.VERIFIED),
+])
+def test_audio_uses_container_evidence_and_preserves_error_categories(
+    tmp_path, monkeypatch, extension, output, status,
+):
+    path = tmp_path / f"audio{extension}"
+    path.write_bytes(b"INVALID WAV HEADER\x00")
+    (entry,) = _collection(path).snapshot().entries
+    probe = MediaTool("ffprobe", Path("C:/fixture/ffprobe.exe"), "test")
+    monkeypatch.setattr(MediaTool, "is_current", lambda self: True)
+
+    def run(_path, args, **options):
+        assert args[-1] == str(path) and options["timeout"] == 30
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+    monkeypatch.setattr(verification, "run_media_command", run)
+    result = IntegrityVerifier().check(entry, probe)
+    assert result.status is status, result
+    assert (result.corruption() is not None) == (status is Status.CORRUPTED)
+
+
+def test_unrecognized_binary_audio_remains_incomplete(tmp_path, monkeypatch):
+    path = tmp_path / "unknown.wav"
+    path.write_bytes(b"\x01\x02\x03\xfe")
+    (entry,) = _collection(path).snapshot().entries
+    monkeypatch.setattr(MediaTool, "is_current", lambda self: True)
+
+    def reject(*args, **kwargs):
+        raise MediaToolError("Invalid data found when processing input")
+
+    monkeypatch.setattr(verification, "run_media_command", reject)
+    result = IntegrityVerifier().check(entry, MediaTool("ffprobe", Path("C:/fixture/ffprobe.exe")))
+    assert result.status is Status.INCOMPLETE and result.corruption() is None
 
 
 def test_heic_uses_registered_decoder(tmp_path):

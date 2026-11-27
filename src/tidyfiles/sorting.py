@@ -40,19 +40,14 @@ class SortPreferences:
 
 
 _IMAGE_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".ico",
+    ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".ico",
     ".svg", ".raw", ".psd", ".ai", ".heic",
 }
 _VIDEO_EXTENSIONS = {
     ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".mkv", ".m4v",
     ".3gp", ".mpg", ".mpeg", ".ogv",
 }
-_DOCUMENT_EXTENSIONS = {
-    ".pdf", ".doc", ".docx", ".txt", ".rtf", ".odt", ".xls", ".xlsx",
-    ".ppt", ".pptx", ".csv",
-}
 _AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a"}
-_ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"}
 
 
 def natural_sort_key(value: str) -> tuple[tuple[object, ...], ...]:
@@ -75,15 +70,14 @@ def _category(extension: str) -> int:
     for category, extensions in enumerate(
         (
             _IMAGE_EXTENSIONS,
-            _VIDEO_EXTENSIONS,
-            _DOCUMENT_EXTENSIONS,
+            (".gif",),
             _AUDIO_EXTENSIONS,
-            _ARCHIVE_EXTENSIONS,
+            _VIDEO_EXTENSIONS,
         )
     ):
         if suffix in extensions:
             return category
-    return 5
+    return 4
 
 
 def _primary_key(
