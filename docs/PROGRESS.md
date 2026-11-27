@@ -64,6 +64,7 @@ startup recovery notices, and managed Trash cleanup.
 | M4-C | Implemented | Perceptual hashing, probable grouping, and portable media dependencies. |
 | M4-D | Implemented | Import-integrated probable duplicate review, authorized managed Trash transfers, and progressive media metadata. |
 | M4-E | Implemented | Pre-verify, corruption exclusions, explicit Purge, and Post-verify for successful rename outputs. |
+| M4-E1 | Implemented | Persistent Files Excluded review with independent Purge and Deduplicate transfers. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
 | M6.1 | Planned | Targeted maintainability review after M6 and before M7. Use implemented features and their dependencies to determine which changes are justified. |
@@ -1176,6 +1177,19 @@ The focused verification and native regression run passed 179 tests. The
 1,200-file rename regression ran in the full suite. All ten opt-in real-media
 tests passed with Gyan's FFmpeg and FFprobe 9.1 Essentials. Ruff, compileall,
 pip check, and Git whitespace checks passed.
+
+## M4-E1 — Persistent Files Excluded review
+
+DD-092 supersedes the transfer-triggered dismissal introduced in M4-B1.
+Files Excluded keeps both available actions in one review. It locks all
+controls during each transfer, refreshes the pending counts and transfer
+outcome afterward, and continues the import when the user clicks OK.
+Successful transfers remove pending exclusions. Failed transfers keep their
+exclusion evidence, and neither outcome changes the active processing rows.
+
+Local Windows verification on Python 3.13.17 passed all 796 default tests,
+27 focused GUI scenarios, 80 service regressions, and ten opt-in real-media
+tests. Ruff, compileall, pip check, and Git whitespace checks passed.
 
 ## M6.1 — Targeted maintainability review
 

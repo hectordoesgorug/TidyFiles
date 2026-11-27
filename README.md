@@ -47,12 +47,15 @@ Pre-verify checks the processing collection after discovery and before duplicate
 analysis. Only files with positive corruption evidence leave processing.
 **Files Excluded** shows the breakdown and remaining count. **Purge** there or
 in the main window authorizes managed Trash transfer of pending corruption
-exclusions. **Deduplicate** authorizes transfer of exact copies. Each action
-closes the dialog and reports the result in the main window. **OK** leaves
+exclusions. **Deduplicate** authorizes transfer of exact copies. The dialog
+stays open, shows the transfer result and updated pending counts, and allows
+the other action when files remain eligible. While a transfer runs, all
+dialog controls are disabled. **OK** closes the dialog and leaves remaining
 excluded files on disk.
 
 With **Perceptual Hashing** also enabled, the import checks the remaining files
-for similar images and videos after the Files Excluded action finishes. Process
+for similar images and videos. If Files Excluded appears, the check starts
+after **OK** closes the dialog. Process
 becomes available after review and preview preparation. The **Probable
 Duplicates** dialog shows groups with the largest file first. **Auto-select**
 checks every file except the largest in each group. **Delete Selected**

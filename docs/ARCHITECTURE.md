@@ -690,10 +690,11 @@ snapshot for managed Trash. The executor checks discovery identity, confirms
 current bytes, and holds read handles through transfer. It checks the keeper
 again at the journaled move or source-removal boundary. Verified transfers
 leave the exclusion list. Failures retain their exclusions and any required
-recovery evidence. The Files Excluded dialog closes when it authorizes the
-transfer. Both entry points report progress and results in the main window,
-with per-file failure details in the log. Windows path and metadata support
-follows the native observer.
+recovery evidence. Files Excluded stays open for the transfer and refreshes
+its revision-bound snapshot, pending counts, and results afterward. Both
+entry points report progress and results in the main window, with per-file
+failure details in the log. Windows path and metadata support follows the
+native observer.
 
 ## Tests and CI
 
@@ -740,8 +741,8 @@ while table metadata needs only FFprobe.
 
 **Add Files** and **Add Folder** capture duplicate preferences for the import.
 When both checks are enabled, the application schedules perceptual analysis
-after finalizing exact exclusions and after any exact Trash transfer from
-**Files Excluded**. Process stays disabled through probable review and any
+after finalizing exact exclusions and closing any **Files Excluded** review
+with **OK**. Process stays disabled through probable review and any
 authorized Trash transfer. Canceling perceptual analysis keeps the finalized
 collection and any already completed exact transfers. Probable selections are
 tracked as session exclusions before Trash starts. Failed paths stay reserved
@@ -761,9 +762,11 @@ Pre-verify runs in the existing import preparation worker after discovery.
 The controller projects finalized entries for verification, filters positive
 corruption results out of the exact-analysis snapshot, and commits both
 exclusion categories with the prepared order. A canceled preparation rolls
-back the import before either category is published. Files Excluded settles
-the explicit action before perceptual analysis starts. Corruption exclusions
-retain their source observations and reserve their paths for the session.
+back the import before either category is published. Files Excluded supports
+separate Purge and Deduplicate transfers in either order. Its controls unlock
+after the current transfer finishes. Only OK closes the dialog and continues
+the import. Corruption exclusions retain their source observations and
+reserve their paths for the session.
 
 Post-verify uses the same verifier with the successfully processed paths and
 final observations from the rename executor. It runs before eligible Auto-clean

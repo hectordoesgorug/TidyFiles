@@ -138,6 +138,7 @@ from tidyfiles.verification import IntegrityVerifier, VerificationResult, Verifi
 
 _DEFAULT_MODE = MODES[0]
 _LOG = logging.getLogger(__name__)
+_METADATA_STOP_TIMEOUT = 3.0
 _MEDIA_WRITE_PHASES = {
     "planning", "review", "preflight", "rename_preparing", "rename_modifying",
     "auto_cleaning", "deduplicating", "probable_trash", "purging", "post_verify",
@@ -308,6 +309,7 @@ class _MainWindow:
         ] = queue.Queue(maxsize=128)
         self._metadata_cells: dict[UUID, tuple[CollectionEntry, MediaCells]] = {}
         self._files_excluded_dialog: ctk.CTkToplevel | None = None
+        self._refresh_files_excluded: Callable[[CollectionSnapshot, str, bool], None] | None = None
         self._deduplicate_status_revision: int | None = None
         self._active_view_selection: tuple[UUID, ...] = ()
         self._import_view_switched = False
@@ -1601,8 +1603,7 @@ class _MainWindow:
 
         def work() -> None:
             try:
-                if metadata_done is not None:
-                    metadata_done.wait()
+                self._wait_for_metadata_stop(metadata_done)
                 plan = capture_review_plan(
                     snapshot,
                     evaluation,
@@ -2271,58 +2272,86 @@ class _MainWindow:
         dialog = ctk.CTkToplevel(self.root)
         self._files_excluded_dialog = dialog
         dialog.title("Files Excluded")
-        dialog.geometry("455x240")
+        dialog.geometry("455x275")
         dialog.resizable(False, False)
         dialog.transient(self.root)
-        dialog.protocol("WM_DELETE_WINDOW", self._dismiss_files_excluded)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
         body = ctk.CTkFrame(dialog)
         body.pack(fill="both", expand=True, padx=12, pady=12)
-        ctk.CTkLabel(
-            body,
-            text=(
+        summary = ctk.CTkLabel(
+            body, text="",
+            justify="left", anchor="w", wraplength=400,
+        )
+        summary.pack(fill="x", padx=12, pady=(12, 4))
+        actions = ctk.CTkFrame(body, fg_color="transparent")
+        actions.pack(side="bottom", anchor="e", padx=12, pady=12)
+        purge = None
+        if snapshot.excluded_corruption:
+            purge = ctk.CTkButton(
+                actions, text="Purge", width=85, command=lambda: self.start_purge(snapshot),
+            )
+            purge.pack(side="left", padx=(0, 8))
+        deduplicate = None
+        if snapshot.excluded_duplicates:
+            deduplicate = ctk.CTkButton(
+                actions, text="Deduplicate", width=115,
+                command=lambda: self.start_deduplicate(snapshot),
+            )
+            deduplicate.pack(side="left", padx=(0, 8))
+        ok = ctk.CTkButton(
+            actions, text="OK", width=75, command=self._dismiss_files_excluded
+        )
+        ok.pack(side="left")
+        result = ctk.CTkLabel(body, text="", justify="left", anchor="w", wraplength=400)
+        result.pack(fill="x", padx=12)
+
+        def refresh(current: CollectionSnapshot, message: str, busy: bool) -> None:
+            nonlocal snapshot
+            snapshot = current
+            summary.configure(text=(
                 f"{corrupt} file(s) excluded as corrupted. "
                 f"{exact} file(s) excluded as exact duplicates.\n"
                 f"{other} discovery exclusion(s).\n"
                 f"{len(snapshot.entries)} file(s) remain for processing.\n\n"
                 f"Purge has {len(snapshot.excluded_corruption)} file(s) pending. "
-                f"Deduplicate has {len(snapshot.excluded_duplicates)} file(s) pending. "
-                "Both actions use managed Trash. "
-                "OK leaves excluded files on disk."
-            ),
-            justify="left", anchor="w", wraplength=400,
-        ).pack(fill="x", padx=12, pady=12)
-        actions = ctk.CTkFrame(body, fg_color="transparent")
-        actions.pack(side="bottom", anchor="e", padx=12, pady=12)
-        if snapshot.excluded_corruption:
-            ctk.CTkButton(
-                actions, text="Purge", width=85, command=lambda: self.start_purge(snapshot),
-            ).pack(side="left", padx=(0, 8))
-        if snapshot.excluded_duplicates:
-            ctk.CTkButton(
-                actions, text="Deduplicate", width=115,
-                command=lambda: self.start_deduplicate(snapshot),
-            ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
-            actions, text="OK", width=75, command=self._dismiss_files_excluded
-        ).pack(side="left")
+                f"Deduplicate has {len(snapshot.excluded_duplicates)} file(s) pending.\n"
+                "Transfers use managed Trash. OK leaves remaining files on disk."
+            ))
+            result.configure(text=message)
+            if purge is not None:
+                purge.configure(
+                    state="normal" if snapshot.excluded_corruption and not busy else "disabled"
+                )
+            if deduplicate is not None:
+                deduplicate.configure(
+                    state="normal" if snapshot.excluded_duplicates and not busy else "disabled"
+                )
+            ok.configure(state="disabled" if busy else "normal")
+
+        self._refresh_files_excluded = refresh
+        refresh(snapshot, "", False)
         dialog.grab_set()
         self._update_control_states()
 
     def _dismiss_files_excluded(self, *, continue_review: bool = True) -> None:
         dialog = self._files_excluded_dialog
-        if dialog is None:
+        if dialog is None or self._collection_operation_pending:
             return
         self._files_excluded_dialog = None
+        self._refresh_files_excluded = None
         dialog.grab_release()
         dialog.destroy()
         if not continue_review or not self._start_perceptual():
+            self._purge_notice = None
             self._update_control_states()
 
     def start_deduplicate(self, authorized: CollectionSnapshot | None = None) -> bool:
         if (
             self._closing or self._close_pending or self._collection_operation_pending
             or self._import_is_busy()
-            or (authorized is None and self.active_mode != "Duplicate Finder")
+            or (authorized is None and (
+                self.active_mode != "Duplicate Finder" or self._files_excluded_dialog is not None
+            ))
         ):
             return False
         snapshot = self.collection.snapshot() if authorized is None else authorized
@@ -2354,19 +2383,17 @@ class _MainWindow:
     def _start_exclusion_trash(
         self, phase: str, message: str, kind: str, execute: Callable[[], TrashResult],
     ) -> bool:
-        self._set_processing_phase(
-            phase, message,
-        )
+        self._set_processing_phase(phase, message)
+        if (refresh := self._refresh_files_excluded) is not None:
+            refresh(self.collection.snapshot(), message, True)
         metadata_done = self._pause_media_metadata()
-        self._dismiss_files_excluded(continue_review=False)
         self.progress.configure(mode="indeterminate")
         self.progress.start()
         self._start_processing_poll()
 
         def work() -> None:
             try:
-                if metadata_done is not None:
-                    metadata_done.wait()
+                self._wait_for_metadata_stop(metadata_done)
                 result = execute()
                 payload = (result, None)
             except Exception as error:
@@ -2375,6 +2402,14 @@ class _MainWindow:
 
         threading.Thread(target=work, name=f"TidyFiles-{kind}", daemon=True).start()
         return True
+
+    def _finish_exclusion_trash(self, message: str) -> None:
+        self._deduplicate_status_revision = self.collection.revision
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
+        self._finish_processing(message)
+        if (refresh := self._refresh_files_excluded) is not None:
+            refresh(self.collection.snapshot(), message, False)
 
     def _handle_purge(self, result: TrashResult | None, error: Exception | None) -> None:
         moved = []
@@ -2400,16 +2435,11 @@ class _MainWindow:
             _LOG.warning("Purge · %s", problem)
         if problems:
             message += f" {len(problems)} issue(s). {' '.join(problems[0].splitlines())}"
-        self._deduplicate_status_revision = self.collection.revision
-        self.progress.stop()
-        self.progress.configure(mode="determinate")
-        self._finish_processing(message)
+        self._finish_exclusion_trash(message)
         if moved:
             self._notify_collection_changed()
         if self._pending_perceptual is not None:
             self._purge_notice = message
-        if not self._start_perceptual():
-            self._purge_notice = None
 
     def _handle_deduplicate(self, result: TrashResult | None, error: Exception | None) -> None:
         moved = []
@@ -2439,16 +2469,11 @@ class _MainWindow:
             _LOG.warning("Deduplicate: %s", problem)
         if problems:
             message += f" {' '.join(problems[0].splitlines())}"
-        self._deduplicate_status_revision = self.collection.revision
-        self.progress.stop()
-        self.progress.configure(mode="determinate")
-        self._finish_processing(message)
+        self._finish_exclusion_trash(message)
         if self.active_mode == "Duplicate Finder":
             self.refresh_collection()
         if moved:
             self._notify_collection_changed()
-        if self._start_perceptual():
-            return
         if not moved and self.active_mode == "Bulk Rename" and self._preview_result is None:
             self._invalidate_filename_preview(schedule=True)
 
@@ -2584,8 +2609,7 @@ class _MainWindow:
 
         def work() -> None:
             try:
-                if metadata_done is not None:
-                    metadata_done.wait()
+                self._wait_for_metadata_stop(metadata_done)
                 payload = (self.trash_executor.execute_reviewed(reviewed), None, len(reviewed))
             except Exception as error:
                 payload = (None, error, len(reviewed))
@@ -4743,6 +4767,11 @@ class _MainWindow:
             return done
         return None
 
+    @staticmethod
+    def _wait_for_metadata_stop(done: threading.Event | None) -> None:
+        if done is not None and not done.wait(_METADATA_STOP_TIMEOUT):
+            raise TimeoutError("Media metadata reading is still stopping. Try the action again.")
+
     def _poll_media_metadata(self) -> None:
         tool = self.media_tools.ffprobe if self.media_tools is not None else None
         key = (self.collection.revision, tool)
@@ -4752,7 +4781,7 @@ class _MainWindow:
                 observed_key, entry, cells = self._metadata_updates.get_nowait()
             except queue.Empty:
                 break
-            if paused or observed_key != key:
+            if paused or observed_key != key or observed_key != self._metadata_key:
                 continue
             self._metadata_cells[entry.entry_id] = entry, cells
             visible = self._entries_by_id.get(entry.entry_id)
@@ -4929,6 +4958,8 @@ class _MainWindow:
 
     def close(self) -> None:
         if self._closing or self._close_pending:
+            return
+        if self._files_excluded_dialog is not None:
             return
         if self._media_importing:
             self.status.configure(text="Wait for the media tool import to finish before closing.")

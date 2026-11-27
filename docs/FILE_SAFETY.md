@@ -390,8 +390,10 @@ to transfer the pending corruption exclusions. It supersedes the secondary
 confirmation described in DD-008. Purge revalidates current identity and
 metadata against the recorded observation and uses the existing managed
 Trash, journal, and recovery checks. An unsuccessful transfer stays excluded
-and reports the outcome. Post-verify reports findings on successful outputs
-and leaves their contents and resulting paths in place.
+and reports the outcome. DD-092 keeps Files Excluded open for additional
+explicit actions. It locks the dialog during a transfer, and OK leaves
+remaining exclusions physically untouched. Post-verify reports findings on
+successful outputs and leaves their contents and resulting paths in place.
 
 ## Planned safety components
 

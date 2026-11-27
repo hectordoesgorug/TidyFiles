@@ -58,6 +58,7 @@ def _close_app(app, root) -> None:
     if app._closing:
         return
     if app._processing_phase == "idle":
+        app._dismiss_files_excluded(continue_review=False)
         app.close()
     else:
         root.destroy()
@@ -65,7 +66,7 @@ def _close_app(app, root) -> None:
 
 @pytest.mark.parametrize("scenario", [
     "disabled", "independent", "ok", "purge", "deduplicate", "changed", "unavailable",
-    "cancel", "stale",
+    "cancel", "stale", "purge_then_deduplicate", "deduplicate_then_purge", "purge_partial",
 ])
 def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
     if _run_gui_test_in_isolated_process(f"test_pre_verification_and_purge_workflow[{scenario}]"):
@@ -97,6 +98,10 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
         image.save(bad)
     original = bad.read_bytes()[:25]
     bad.write_bytes(original)
+    second_bad = tmp_path / "second broken.png"
+    partial = scenario == "purge_partial"
+    if partial:
+        second_bad.write_bytes(original)
     config = default_config()
     config["global_settings"].update(
         pre_verify=scenario != "disabled", duplicate_checker=scenario != "independent",
@@ -106,9 +111,12 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
     app = root.application
     verifies, exact, perceptual, popups = [], [], [], []
     entered, release = threading.Event(), threading.Event()
+    transfer_release = threading.Event()
     verify = app._integrity_verifier.verify
     analyze_exact = app.import_controller._duplicate_analyzer.analyze
     analyze_perceptual = app._perceptual_analyzer.analyze
+    execute_purge = app.trash_executor.execute_reviewed
+    execute_deduplicate = app.trash_executor.execute_duplicates
 
     def check(entries, tool, **options):
         verifies.append(entries)
@@ -131,24 +139,28 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
     monkeypatch.setattr(app._integrity_verifier, "verify", check)
     monkeypatch.setattr(app.import_controller._duplicate_analyzer, "analyze", capture_exact)
     monkeypatch.setattr(app._perceptual_analyzer, "analyze", capture_perceptual)
+
+    def hold_transfer(execute):
+        def transfer(scope):
+            assert transfer_release.wait(5)
+            return execute(scope)
+
+        return transfer
+
+    monkeypatch.setattr(app.trash_executor, "execute_reviewed", hold_transfer(execute_purge))
+    monkeypatch.setattr(
+        app.trash_executor, "execute_duplicates", hold_transfer(execute_deduplicate)
+    )
     for popup in ("askyesno", "showinfo", "showwarning", "showerror"):
         monkeypatch.setattr(app_module.messagebox, popup, lambda *args, **_: popups.append(args))
-
-    def click(label):
-        dialog = app._files_excluded_dialog
-        assert dialog is not None
-        next(
-            widget for widget in _descendants(dialog)
-            if isinstance(widget, ctk.CTkButton) and widget.cget("text") == label
-        ).invoke()
 
     try:
         root.update()
         app.rename_format.set("<IncNr>")
-        monkeypatch.setattr(
-            app_module.filedialog, "askopenfilenames",
-            lambda **_: tuple(map(str, (good, duplicate, bad, unsupported))),
-        )
+        files = (good, duplicate, bad, unsupported, *((second_bad,) if partial else ()))
+        monkeypatch.setattr(app_module.filedialog, "askopenfilenames", lambda **_: tuple(
+            map(str, files)
+        ))
         app.add_files()
         if scenario != "disabled":
             _wait_for(root, entered.is_set)
@@ -164,7 +176,7 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
             assert bad.read_bytes() == original
             assert scenario != "stale" or "failed" in app.status.cget("text").lower()
             return
-        assert len(snapshot.excluded_corruption) == (0 if scenario == "disabled" else 1)
+        assert len(snapshot.excluded_corruption) == (0 if scenario == "disabled" else 1 + partial)
         assert len(snapshot.excluded_duplicates) == (0 if scenario == "independent" else 1)
         if scenario == "disabled":
             assert not verifies and bad.name in {entry.original_filename for entry in exact[0]}
@@ -172,17 +184,73 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
             assert bad.name not in {entry.original_filename for entry in exact[0]}
         assert not perceptual and app.process_button.cget("state") == "disabled"
         assert bad.read_bytes() == original
-        if scenario == "changed":
+        if scenario in {"changed", "purge_partial"}:
             incoming = tmp_path / "replacement.png"
             incoming.write_bytes(original)
             incoming.replace(bad)
-        if scenario in {"purge", "changed", "unavailable"}:
-            click("Purge")
-            assert app._files_excluded_dialog is None and app._processing_phase == "purging"
+        actions = {
+            "purge": ("Purge",), "independent": ("Purge",), "changed": ("Purge",),
+            "unavailable": ("Purge",),
+            "purge_partial": ("Purge",), "deduplicate": ("Deduplicate",),
+            "purge_then_deduplicate": ("Purge", "Deduplicate"),
+            "deduplicate_then_purge": ("Deduplicate", "Purge"),
+        }.get(scenario, ())
+        dialog = app._files_excluded_dialog
+        assert dialog is not None
+        labels = [widget for widget in _descendants(dialog) if isinstance(widget, ctk.CTkLabel)]
+        buttons = {
+            widget.cget("text"): widget
+            for widget in _descendants(dialog) if isinstance(widget, ctk.CTkButton)
+        }
+        assert ("Purge" in buttons) == bool(snapshot.excluded_corruption)
+        assert ("Deduplicate" in buttons) == bool(snapshot.excluded_duplicates)
+        close_protocol = dialog.protocol("WM_DELETE_WINDOW")
+        dialog.tk.call(close_protocol)
+        assert dialog.winfo_exists()
+        for action in actions:
+            transfer_release.clear()
+            buttons[action].invoke()
+            assert app._files_excluded_dialog is dialog
+            assert app._processing_phase in {"purging", "deduplicating"}
+            assert all(button.cget("state") == "disabled" for button in buttons.values())
+            buttons["OK"].invoke()
+            dialog.tk.call(close_protocol)
+            app._dismiss_files_excluded()
+            app.close()
+            root.update()
+            assert dialog.winfo_exists() and not app._closing
             assert app.process_button.cget("state") == "disabled"
             assert app.cancel_button.cget("state") == "disabled"
-        else:
-            click("Deduplicate" if scenario == "deduplicate" else "OK")
+            transfer_release.set()
+            _wait_for(root, lambda: app._processing_phase == "idle")
+            current = app.collection.snapshot()
+            assert current.entries == snapshot.entries
+            assert app._files_excluded_dialog is dialog and buttons["OK"].cget("state") == "normal"
+            summary = labels[0].cget("text")
+            assert f"Purge has {len(current.excluded_corruption)} file(s) pending" in summary
+            assert f"Deduplicate has {len(current.excluded_duplicates)} file(s) pending" in summary
+            for label, pending in (
+                ("Purge", current.excluded_corruption),
+                ("Deduplicate", current.excluded_duplicates),
+            ):
+                if label in buttons:
+                    assert buttons[label].cget("state") == ("normal" if pending else "disabled")
+            message = labels[1].cget("text")
+            if partial:
+                assert "Purged 1" in message and "1 remain excluded" in message
+                assert "1 issue(s)" in message and "identity changed" in message
+            elif scenario in {"changed", "unavailable"}:
+                assert "Purged 0" in message and "1 remain excluded" in message
+            else:
+                assert ("Purged 1" if action == "Purge" else "Moved 1") in message
+                assert "0 remain excluded" in message
+            assert not popups and not perceptual and not app._process_ready()
+            assert app.process_button.cget("state") == "disabled"
+        buttons["OK"].invoke()
+        assert not dialog.winfo_exists()
+        if scenario not in {"disabled", "independent"}:
+            assert app._processing_phase == "perceptual"
+            assert app.process_button.cget("state") == "disabled"
         _wait_for(root, app._process_ready)
         snapshot = app.collection.snapshot()
         assert tuple(str(entry.entry_id) for entry in snapshot.entries) == app.tree.get_children("")
@@ -194,28 +262,33 @@ def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
         if scenario not in {"disabled", "independent"}:
             assert len(perceptual) == 1
             assert {row.original_filename for row in perceptual[0]} == {good.name, unsupported.name}
-        if scenario == "purge":
-            assert not bad.exists() and duplicate.exists()
-            assert not snapshot.excluded_corruption and snapshot.excluded_duplicates
+        if scenario in {"purge", "independent"} or len(actions) == 2:
+            assert not bad.exists() and duplicate.exists() == (len(actions) == 1)
+            assert not snapshot.excluded_corruption
+            assert bool(snapshot.excluded_duplicates) == (scenario == "purge")
             assert [path.read_bytes() for path in (app_dir / "trash").glob("*/*.png")] == [original]
-        elif scenario in {"changed", "unavailable"}:
+        elif scenario in {"changed", "unavailable", "purge_partial"}:
             assert bad.read_bytes() == original and duplicate.exists()
             assert snapshot.excluded_corruption and snapshot.excluded_duplicates
             status = app.status.cget("text")
-            assert "Purged 0" in status and "1 remain excluded" in status
-            assert ("identity changed" if scenario == "changed" else "unavailable") in status
+            assert f"Purged {int(partial)}" in status and "1 remain excluded" in status
+            assert ("unavailable" if scenario == "unavailable" else "identity changed") in status
+            if partial:
+                assert not second_bad.exists()
         else:
             assert bad.exists()
             assert duplicate.exists() == (scenario != "deduplicate")
             if scenario != "disabled":
                 assert snapshot.excluded_corruption
                 assert app.controls["purge"].cget("state") == "normal"
+                transfer_release.set()
                 app.controls["purge"].invoke()
                 _wait_for(root, lambda: app._processing_phase == "idle")
                 assert not bad.exists() and not app.collection.snapshot().excluded_corruption
                 assert not popups
     finally:
         release.set()
+        transfer_release.set()
         _close_app(app, root)
         storage.managed_trash_path.cache_clear()
 
@@ -359,8 +432,8 @@ def test_exact_duplicate_workflow(tmp_path, monkeypatch, caplog, choice):
             if isinstance(widget, ctk.CTkButton) and widget.cget("text") == label
         ).invoke()
 
-    def finish_deduplicate():
-        assert app._files_excluded_dialog is None
+    def finish_deduplicate(dialog=None):
+        assert app._files_excluded_dialog is dialog
         assert app._processing_phase == "deduplicating"
         assert app.progress.cget("mode") == "indeterminate"
         assert "Validating and moving exact duplicates" in app.status.cget("text")
@@ -374,7 +447,7 @@ def test_exact_duplicate_workflow(tmp_path, monkeypatch, caplog, choice):
         release.set()
         _wait_for(root, lambda: app._processing_phase == "idle")
         assert app.progress.cget("mode") == "determinate"
-        assert app._files_excluded_dialog is None
+        assert app._files_excluded_dialog is dialog
         assert not popups
 
     try:
@@ -415,10 +488,9 @@ def test_exact_duplicate_workflow(tmp_path, monkeypatch, caplog, choice):
             excluded.write_bytes(b"changed")
         if choice in {"dialog_deduplicate", "failed"}:
             invoke(dialog, "Deduplicate")
-            assert not dialog.winfo_exists()
-            finish_deduplicate()
-        else:
-            invoke(dialog, "OK")
+            finish_deduplicate(dialog)
+            assert dialog.winfo_exists() and not app._process_ready()
+        invoke(dialog, "OK")
         assert app._files_excluded_dialog is None
         _wait_for(root, app._process_ready)
         if choice == "dialog_deduplicate":
@@ -534,10 +606,13 @@ def test_perceptual_import_and_review(tmp_path, monkeypatch, scenario):
     popups = []
     metadata_entered = threading.Event()
     metadata_release = threading.Event()
+    metadata_cancelled = threading.Event()
+    metadata_resumed = threading.Event()
     release = threading.Event()
     entered = threading.Event()
     analyze = app._perceptual_analyzer.analyze
     read = app._metadata_probe.read
+    execute_duplicates = app.trash_executor.execute_duplicates
 
     def capture(snapshot, *args, **kwargs):
         calls.append(snapshot)
@@ -548,10 +623,23 @@ def test_perceptual_import_and_review(tmp_path, monkeypatch, scenario):
         result = analyze(snapshot, *args, **kwargs)
         return replace(result, revision=result.revision - 1) if scenario == "stale" else result
 
-    def delay_metadata(*args, **kwargs):
-        metadata_entered.set()
-        assert metadata_release.wait(10)
-        return read(*args, **kwargs)
+    def delay_metadata(entries, probe, *, cancelled, publish):
+        if not metadata_entered.is_set():
+            metadata_entered.set()
+            while not cancelled() and not metadata_release.wait(0.01):
+                pass
+            if cancelled():
+                metadata_cancelled.set()
+                return
+        elif scenario in {"deduplicate", "cancel"}:
+            assert all(entry.original_filename != exact.name for entry in entries)
+            metadata_resumed.set()
+        return read(entries, probe, cancelled=cancelled, publish=publish)
+
+    def transfer(snapshot):
+        assert metadata_cancelled.is_set()
+        assert app._metadata_done is not None and app._metadata_done.is_set()
+        return execute_duplicates(snapshot)
 
     def invoke(dialog, label):
         next(
@@ -561,6 +649,8 @@ def test_perceptual_import_and_review(tmp_path, monkeypatch, scenario):
 
     monkeypatch.setattr(app._perceptual_analyzer, "analyze", capture)
     monkeypatch.setattr(app._metadata_probe, "read", delay_metadata)
+    if scenario in {"deduplicate", "cancel"}:
+        monkeypatch.setattr(app.trash_executor, "execute_duplicates", transfer)
     for popup in ("askyesno", "showinfo", "showwarning", "showerror"):
         monkeypatch.setattr(app_module.messagebox, popup, lambda *args, **_: popups.append(args))
     try:
@@ -589,10 +679,20 @@ def test_perceptual_import_and_review(tmp_path, monkeypatch, scenario):
             return
 
         if exact.exists():
-            assert app._files_excluded_dialog is not None and not entered.is_set()
+            dialog = app._files_excluded_dialog
+            assert dialog is not None and not entered.is_set()
             assert app.process_button.cget("state") == "disabled"
             action = "Deduplicate" if scenario in {"deduplicate", "cancel"} else "OK"
-            invoke(app._files_excluded_dialog, action)
+            if action == "Deduplicate":
+                _wait_for(root, metadata_entered.is_set)
+                invoke(dialog, action)
+                _wait_for(root, lambda: app._processing_phase == "idle")
+                assert app._files_excluded_dialog is dialog and not entered.is_set()
+                assert metadata_cancelled.is_set() and not exact.exists()
+                assert not app._process_ready()
+                _wait_for(root, metadata_resumed.is_set)
+                assert not entered.is_set()
+            invoke(dialog, "OK")
         _wait_for(root, entered.is_set)
         assert app.process_button.cget("state") == "disabled"
         assert all(entry.original_filename != exact.name for entry in calls[-1].entries)

@@ -42,8 +42,8 @@ files with different contents. Import across Add Files and Add Folder, check
 the active counts and numbered rename previews, then exercise both Files
 Excluded buttons and the flat Duplicate Finder list. Check Cancel during
 analysis and retry Deduplicate with a missing keeper or changed copy. Confirm
-Deduplicate closes Files Excluded and reports both successful and failed
-transfers in the main window. Check the layout at the supported display scales
+Deduplicate keeps Files Excluded open and refreshes its counts and outcomes.
+Check the layout at the supported display scales
 and exercise Clear Trash and normal-exit Auto-Clear Trash only against
 disposable batches.
 
@@ -60,9 +60,10 @@ FFprobe and confirm Process becomes available independently of those reads.
 For verification acceptance, import a disposable folder containing a valid
 photo, a truncated photo, an unsupported media file, and a pair of exact
 copies. Check that Pre-verify works with Duplicate Checker disabled. With
-both enabled, exercise OK, Purge, and Deduplicate on separate copies of the
-fixture. Check the remaining action and verify that a file replaced during
-review remains outside processing and is reported when Purge runs. Exercise
+both enabled, test Purge and Deduplicate in either order before pressing OK.
+Check that controls lock during a transfer and that perceptual hashing starts
+after OK when enabled. Verify that a file replaced during review remains
+outside processing and is reported when Purge runs. Exercise
 Post-verify with Auto-clean and check the completion summary and resulting
 files after a verification issue.
 
