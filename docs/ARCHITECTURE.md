@@ -64,6 +64,7 @@ not implemented.
 | `src/tidyfiles/preflight_service.py` | A bounded preflight worker with replacement, cancellation, progress, and current-result tracking. |
 | `src/tidyfiles/duplicate_analysis.py` | Read-only exact duplicate analysis of finalized collection snapshots, with bounded hashing, byte confirmation, ordered results, progress, and session-scoped evidence. |
 | `src/tidyfiles/perceptual_analysis.py` | Read-only 64-bit image and sampled video perceptual hashing, session-scoped evidence, and deterministic probable-duplicate grouping. |
+| `src/tidyfiles/verification.py` | Bounded read-only integrity checks for Pre-verify and Post-verify, including classification and corruption evidence. |
 | `src/tidyfiles/media_metadata.py` | Background media cell values and review thumbnail preparation, with source observation checks. |
 | `src/tidyfiles/probable_dialog.py` | Modal group review, checkbox controls, and routing of the user's choice. |
 | `src/tidyfiles/media_tools.py` | Portable FFmpeg and FFprobe resolution, bounded subprocesses, and explicitly authorized import. |
@@ -567,8 +568,8 @@ of the complete scope. Recovery inspection distinguishes retained cross-volume
 copy identity from source identity. DD-087 defines Trash clearing by recognized
 batches under the dedicated managed Trash directory; per-file ownership
 records are not required. M3-G connects confirmed manual clearing and normal
-exit Auto-Clear Trash to the service. The Deduplicate action authorizes its
-captured exclusion scope. Purge and Repack controls remain disabled.
+exit Auto-Clear Trash to the service. Deduplicate and Purge authorize their
+respective captured exclusion scopes.
 
 ## Recovery and cleanup services
 
@@ -707,7 +708,7 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Media verification, Purge, and repacking are future components.
+Media repacking is a future component.
 
 ## Perceptual analysis and portable media tools
 
@@ -753,6 +754,30 @@ revision- and tool-scoped results into the corresponding Treeview cells.
 Preview readiness is independent of these display values. Before a modifying
 operation needs a file, its worker waits for canceled metadata reads to release
 their handles.
+
+## Integrity verification and Purge
+
+Pre-verify runs in the existing import preparation worker after discovery.
+The controller projects finalized entries for verification, filters positive
+corruption results out of the exact-analysis snapshot, and commits both
+exclusion categories with the prepared order. A canceled preparation rolls
+back the import before either category is published. Files Excluded settles
+the explicit action before perceptual analysis starts. Corruption exclusions
+retain their source observations and reserve their paths for the session.
+
+Post-verify uses the same verifier with the successfully processed paths and
+final observations from the rename executor. It runs before eligible Auto-clean
+and records its outcomes in the Treeview, rename summary, and log. Completed
+rows leave the collection when the rename summary closes. Cleanup eligibility
+uses the rename result and protects its output paths.
+
+Both settings default off. The verifier uses bounded worker batches and reads
+through identity-checked handles. Pillow loads supported image data. FFprobe
+checks the container and video stream metadata without full decoding. Other
+files get a read of up to 512 bytes. The outcomes are Verified, Corrupted,
+Unsupported, Inaccessible, and Incomplete. Only a recognized structural
+defect, recognized decoding damage, or missing mandatory data in a known
+format can produce Purge evidence.
 
 ## Deferred maintainability review
 

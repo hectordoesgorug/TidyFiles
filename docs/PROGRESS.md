@@ -11,7 +11,8 @@ managed Trash cleanup to the desktop interface. M4-A implements exact duplicate
 analysis, and M4-B connects processing exclusions, the Duplicate Finder view,
 and explicit Deduplicate. M4-C adds the perceptual engine and portable
 media-tool settings. M4-D connects probable duplicate review and progressive
-media columns to import. Media verification, Purge, and repacking remain pending.
+media columns to import. M4-E connects integrity verification and explicit
+Purge. Media repacking remains pending.
 See `docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-decision audit and
 historical verification record.
 
@@ -33,8 +34,7 @@ reviewed plans. M3-C adds journals, recovery discovery, and exclusive job
 coordination. M3-D adds a standalone Windows rename executor, M3-E adds
 standalone managed Trash transfers, and M3-F adds read-only recovery inspection,
 overlap protection, and guarded cleanup services. M3-G connects Bulk Rename,
-startup recovery notices, and managed Trash cleanup. Duplicate and Repack
-controls remain disabled.
+startup recovery notices, and managed Trash cleanup.
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
@@ -63,6 +63,7 @@ controls remain disabled.
 | M4-B | Implemented | Import-time exact duplicate exclusion, flat review, and explicit managed Trash transfer. |
 | M4-C | Implemented | Perceptual hashing, probable grouping, and portable media dependencies. |
 | M4-D | Implemented | Import-integrated probable duplicate review, authorized managed Trash transfers, and progressive media metadata. |
+| M4-E | Implemented | Pre-verify, corruption exclusions, explicit Purge, and Post-verify for successful rename outputs. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
 | M6.1 | Planned | Targeted maintainability review after M6 and before M7. Use implemented features and their dependencies to determine which changes are justified. |
@@ -1149,6 +1150,32 @@ On Windows with Python 3.13.17, all 770 default tests, 10 focused GUI scenarios,
 and nine opt-in tests with Gyan's FFmpeg and FFprobe 9.1 Essentials passed.
 Ruff, compileall, pip check, and Git whitespace checks passed. Visual desktop
 acceptance across themes and display scales remains pending.
+
+## M4-E — Integrity verification and Purge
+
+Pre-verify and Post-verify persist independently and default off. Pre-verify
+runs after discovery and excludes only files with positive corruption
+evidence before exact and perceptual analysis. Files Excluded offers distinct
+Purge and Deduplicate actions. DD-091 supersedes DD-008's secondary Purge
+confirmation. Purge revalidates its candidates and uses managed Trash.
+Post-verify checks successful rename outputs before eligible Auto-clean.
+The Treeview and the existing rename summary show verification outcomes.
+
+A disposable owner dataset clone produced 96 Verified and four Corrupted
+results. Pillow reported truncation in `damaged_photo.jpg` and
+`damaged_picture.png`. `empty_capture.webp` lacked mandatory WebP data, and
+FFprobe identified the missing ISO media `moov` atom in `broken_clip.mp4`.
+The integrated import excluded those four and three exact copies, leaving
+93 processing entries. The 80% perceptual stage checked 67 remaining media
+entries and found nine groups. Verification alone took 1.45 seconds for
+100 files, and discovery through Files Excluded took 2.19 seconds in a separate
+run on the same Windows PC. Both tests read from local temporary clones.
+
+Local Windows verification with Python 3.13.17 passed all 793 default tests.
+The focused verification and native regression run passed 179 tests. The
+1,200-file rename regression ran in the full suite. All ten opt-in real-media
+tests passed with Gyan's FFmpeg and FFprobe 9.1 Essentials. Ruff, compileall,
+pip check, and Git whitespace checks passed.
 
 ## M6.1 — Targeted maintainability review
 

@@ -22,7 +22,8 @@ and an explicit refresh for physical directory-count metadata. The format is
 session-only. Expression and file-specific errors are shown in the preview;
 Process uses the live filename preview as the review interface and runs fresh
 preflight before renaming. Duplicate checking includes exact exclusion and
-optional perceptual review. Media verification, Purge, and repacking are planned.
+optional perceptual review. Integrity verification and Purge are available.
+Media repacking is planned.
 The application is not production-ready.
 
 Use Ctrl+A in the table to select all rows and Delete to remove selected
@@ -41,8 +42,17 @@ appear in the main window's status area. The **Duplicate Finder** tab lists
 excluded copies with their original filenames for later review and Deduplicate. Use
 **Clear All** to clear the session's collection and exclusions.
 
+**Pre-verify** and **Post-verify** in Settings are independent and default off.
+Pre-verify checks the processing collection after discovery and before duplicate
+analysis. Only files with positive corruption evidence leave processing.
+**Files Excluded** shows the breakdown and remaining count. **Purge** there or
+in the main window authorizes managed Trash transfer of pending corruption
+exclusions. **Deduplicate** authorizes transfer of exact copies. Each action
+closes the dialog and reports the result in the main window. **OK** leaves
+excluded files on disk.
+
 With **Perceptual Hashing** also enabled, the import checks the remaining files
-for similar images and videos after any exact-duplicate action finishes. Process
+for similar images and videos after the Files Excluded action finishes. Process
 becomes available after review and preview preparation. The **Probable
 Duplicates** dialog shows groups with the largest file first. **Auto-select**
 checks every file except the largest in each group. **Delete Selected**
@@ -72,6 +82,14 @@ canceled. Active filesystem modification cannot be canceled, and normal
 application closure waits until it finishes. Processing status reports completed
 files and elapsed time, with an estimated remaining time after enough progress.
 
+Post-verify checks successful outputs at their final paths before eligible
+Auto-clean. The Treeview and rename summary report the outcome. A failed
+check leaves the output in place. Verification loads supported images with
+Pillow, inspects video containers and streams with FFprobe, and reads up to
+512 bytes for other files. **Verified** means those limited checks passed.
+The other outcomes are **Corrupted**, **Unsupported**, **Inaccessible**, and
+**Incomplete**.
+
 Startup displays unresolved transaction recovery details without restoring,
 moving, or deleting files. Clear Recovery Records requires confirmation and
 removes selected recovery information without changing affected files. Clear
@@ -84,8 +102,9 @@ warns only if it encounters errors or leaves content behind.
 
 ## Optional media tools
 
-Video perceptual hashing requires local `ffmpeg.exe` and `ffprobe.exe`. The
-video and audio metadata columns use `ffprobe.exe`. The recommended Windows
+Video perceptual hashing requires local `ffmpeg.exe` and `ffprobe.exe`. Video
+verification and the video and audio metadata columns use `ffprobe.exe`.
+The recommended Windows
 x64 reference is Gyan's FFmpeg 9.1 Essentials ZIP. Other
 compatible versions are accepted. [FFmpeg downloads](https://ffmpeg.org/download.html)
 [Gyan Windows builds](https://www.gyan.dev/ffmpeg/builds/)

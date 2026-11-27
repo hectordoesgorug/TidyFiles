@@ -377,6 +377,22 @@ paths. Validation and staging precede installation. A failed installation
 attempts to restore the prior files and reports the backup location if
 restoration fails.
 
+## Integrity verification and Purge
+
+Corruption exclusion requires positive evidence tied to the discovered
+file's identity and metadata. Missing tools, timeouts, and read or resource
+failures have separate outcomes. An empty file requires a format-specific
+rule before it can be classified as corrupted. FFprobe's absence gives a
+video an Unsupported result even when the initial header is recognizable.
+
+DD-091 makes **Purge** in Files Excluded or the main window the authorization
+to transfer the pending corruption exclusions. It supersedes the secondary
+confirmation described in DD-008. Purge revalidates current identity and
+metadata against the recorded observation and uses the existing managed
+Trash, journal, and recovery checks. An unsuccessful transfer stays excluded
+and reports the outcome. Post-verify reports findings on successful outputs
+and leaves their contents and resulting paths in place.
+
 ## Planned safety components
 
 The following remain unimplemented:

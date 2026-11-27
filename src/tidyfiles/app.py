@@ -13,6 +13,7 @@ import tkinter as tk
 from collections.abc import Callable
 from concurrent.futures import Future
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -36,6 +37,7 @@ from tidyfiles.collection import (
     OrderingMode,
     PreparedSortOrder,
     WorkingCollection,
+    normalize_windows_path,
 )
 from tidyfiles.config import (
     PERCEPTUAL_THRESHOLDS,
@@ -82,7 +84,7 @@ from tidyfiles.filename_integration import (
     FilenameEvaluationService,
 )
 from tidyfiles.format_reference import FORMAT_REFERENCE, TOKEN_GROUPS
-from tidyfiles.import_controller import ImportController
+from tidyfiles.import_controller import ImportController, VerifyImport
 from tidyfiles.managed_trash import TrashExecutor, TrashOutcome, TrashResult, TrashState
 from tidyfiles.media_metadata import (
     PENDING,
@@ -114,6 +116,7 @@ from tidyfiles.rename_executor import (
     RenameExecutor,
     RenameOutcome,
     RenameProgress,
+    RenameResult,
     RenameScope,
     RenameState,
 )
@@ -131,12 +134,13 @@ from tidyfiles.ui_preferences import (
     restore_window_geometry,
     set_column_preferences,
 )
+from tidyfiles.verification import IntegrityVerifier, VerificationResult, VerificationStatus
 
 _DEFAULT_MODE = MODES[0]
 _LOG = logging.getLogger(__name__)
 _MEDIA_WRITE_PHASES = {
     "planning", "review", "preflight", "rename_preparing", "rename_modifying",
-    "auto_cleaning", "deduplicating", "probable_trash",
+    "auto_cleaning", "deduplicating", "probable_trash", "purging", "post_verify",
 }
 _FORMAT_PRESETS = (
     "<DirName> <IncNr>",
@@ -291,7 +295,9 @@ class _MainWindow:
         self.trash_clear_service = TrashClearService(self.coordinator, self.journals)
         self.trash_executor = TrashExecutor(self.coordinator, self.journals)
         self._perceptual_analyzer = PerceptualAnalyzer(managed_paths=self.journals.managed_paths)
+        self._integrity_verifier = IntegrityVerifier(self.journals.managed_paths)
         self._pending_perceptual: DuplicatePreferences | None = None
+        self._purge_notice: str | None = None
         self._probable_dialog: ProbableDuplicatesDialog | None = None
         self._metadata_probe = MediaMetadataProbe(self.journals.managed_paths)
         self._metadata_key: tuple[int, MediaTool | None] | None = None
@@ -306,6 +312,8 @@ class _MainWindow:
         self._active_view_selection: tuple[UUID, ...] = ()
         self._import_view_switched = False
         self._duplicate_issues: tuple[tuple[str, str], ...] = ()
+        self._verification_issues: tuple[tuple[str, str], ...] = ()
+        self._finishing_import = False
         self.active_mode = _DEFAULT_MODE
         self.column_preferences = {
             mode: get_column_preferences(self.config, mode) for mode in MODES
@@ -435,6 +443,7 @@ class _MainWindow:
             on_shutdown=self._finish_close,
             duplicate_preferences=lambda: get_duplicate_preferences(self.config),
             duplicate_analyzer=DuplicateAnalyzer(managed_paths=self.journals.managed_paths),
+            pre_verify=self._capture_pre_verifier,
         )
         self._preview_service = FilenameEvaluationService()
         self.rename_format.trace_add("write", self._on_format_changed)
@@ -485,7 +494,7 @@ class _MainWindow:
         self.settings_button = ctk.CTkButton(
             header, text="Settings", width=95, command=self.open_settings
         )
-        self.settings_button.grid(row=0, column=1, sticky="e")
+        self.settings_button.grid(row=0, column=2, sticky="e")
 
         self.tabs = ctk.CTkTabview(
             self.root, anchor="nw", height=154, command=self._on_mode_change
@@ -508,6 +517,10 @@ class _MainWindow:
         self.tabs.set(_DEFAULT_MODE)
 
         self._build_collection_toolbar()
+        self.controls["purge"] = ctk.CTkButton(
+            header, text="Purge", width=72, command=self.start_purge
+        )
+        self.controls["purge"].grid(row=0, column=1, padx=(0, 6), sticky="e")
         self._build_table()
         self._build_collection_footer()
 
@@ -1569,6 +1582,7 @@ class _MainWindow:
         )
         self._processing_acknowledged_import_ids = incomplete_ids
         self._processing_auto_clean_enabled = bool(self.auto_clean_switch.get())
+        self._processing_post_verify = self.config["global_settings"].get("post_verify", False)
         self._processing_cancel.clear()
         self._processing_started_at = None
         self._submit_destination_plan(evaluation)
@@ -1803,6 +1817,8 @@ class _MainWindow:
                 self._handle_trash_clear(payload)
             elif kind == "deduplicate":
                 self._handle_deduplicate(*payload)
+            elif kind == "purge":
+                self._handle_purge(*payload)
             elif kind == "perceptual":
                 self._handle_perceptual(*payload)
             elif kind == "probable_trash":
@@ -1863,6 +1879,10 @@ class _MainWindow:
             self.status.configure(text=f"Checking perceptual similarity… {update[1]}/{update[2]}")
             if total := int(update[2]):
                 self.progress.set(int(update[1]) / total)
+        elif isinstance(update, tuple) and update[0] == "post_verify":
+            self.status.configure(text=f"Verifying renamed outputs… {update[1]}/{update[2]}")
+            if total := int(update[2]):
+                self.progress.set(int(update[1]) / total)
 
     def _handle_preflight_result(self, result: PreflightResult) -> None:
         self._active_preflight_result = None
@@ -1900,6 +1920,8 @@ class _MainWindow:
         self._start_processing_poll()
         partial = self._processing_partial
         auto_clean_enabled = self._processing_auto_clean_enabled
+        post_verify = self._processing_post_verify
+        tools, tool_check = self.media_tools, self._media_future
 
         def work() -> None:
             try:
@@ -1913,6 +1935,10 @@ class _MainWindow:
                         else self._active_preflight_result
                     ),
                     progress=self._queue_processing_progress,
+                )
+                verified = (
+                    self._verify_rename_outputs(snapshot, result, tools, tool_check)
+                    if post_verify else ()
                 )
                 clean_result = None
                 if auto_clean_enabled:
@@ -1947,30 +1973,91 @@ class _MainWindow:
                     and item.actual_path is not None
                 }
                 self._processing_done.put(
-                    ("rename", (result, clean_result, paths, None))
+                    ("rename", (result, clean_result, paths, None, verified))
                 )
             except Exception as error:
-                self._processing_done.put(("rename", (None, None, {}, error)))
+                self._processing_done.put(("rename", (None, None, {}, error, ())))
 
         threading.Thread(
             target=work, name="TidyFiles-rename-executor", daemon=True
         ).start()
 
+    def _verify_rename_outputs(
+        self, snapshot: CollectionSnapshot, rename: RenameResult, tools: MediaTools | None,
+        tool_check: Future[tuple[MediaTools, str | None]] | None,
+    ) -> tuple[VerificationResult, ...]:
+        originals = {entry.entry_id: entry for entry in snapshot.entries}
+        entries = []
+        expected = {}
+        unverified = []
+        for item in rename.entries:
+            if item.outcome not in {RenameOutcome.RENAMED, RenameOutcome.UNCHANGED}:
+                continue
+            if item.actual_path is None:
+                continue
+            path = Path(item.actual_path)
+            entry = replace(
+                originals[item.entry_id], source_path=item.actual_path, original_filename=path.name,
+                source_extension=path.suffix, normalized_path_key=normalize_windows_path(path),
+                metadata=None,
+            )
+            if item.observation is None:
+                unverified.append(VerificationResult(
+                    entry, VerificationStatus.INCOMPLETE, "Rename output observation unavailable"
+                ))
+            else:
+                entries.append(entry)
+                expected[item.entry_id] = item.observation
+        if not entries:
+            return tuple(unverified)
+        self._queue_processing_progress(("stage", "post_verify", "Verifying renamed outputs…"))
+        try:
+            probe = self._resolve_verification_probe(tools, tool_check, lambda: False)
+            verified = self._integrity_verifier.verify(
+                tuple(entries), probe, expected=expected,
+                progress=lambda done, total, _result: self._queue_processing_progress(
+                    ("post_verify", str(done), str(total))
+                ),
+            )
+        except Exception as error:
+            _LOG.exception("Post-verification could not finish")
+            verified = tuple(
+                VerificationResult(entry, VerificationStatus.INCOMPLETE, str(error))
+                for entry in entries
+            )
+        return (*verified, *unverified)
+
     def _handle_rename_result(self, payload: Any) -> None:
-        result, clean_result, paths, error = payload
+        result, clean_result, paths, error, verified = payload
         if error is not None or result is None:
             self._finish_processing(f"Rename failed safely: {error}")
             return
+        excluded = set(self._processing_plan.excluded_entry_ids if self._processing_plan else ())
+        snapshot = self._processing_snapshot
+        assert snapshot is not None
+        excluded.update({entry.entry_id for entry in snapshot.entries}.difference(
+            self._processing_intended_ids
+        ))
+        summary = self._rename_result_summary(result, clean_result, excluded, verified)
+        issues = bool(excluded) or result.state is not RenameState.SUCCEEDED or any(
+            item.outcome not in {RenameOutcome.RENAMED, RenameOutcome.UNCHANGED}
+            for item in result.entries
+        )
+        issues |= bool(clean_result is not None and (clean_result.detail or clean_result.failures))
+        if verified:
+            for row in verified:
+                item = str(row.entry.entry_id)
+                if self.tree.exists(item):
+                    self.tree.set(item, "status", row.status.value)
+                _LOG.info("Post-verify %s · %s · %s", row.entry.source_path, row.status, row.reason)
+            issues |= any(row.status is not VerificationStatus.VERIFIED for row in verified)
+            show = messagebox.showwarning if issues else messagebox.showinfo
+            show("Rename results", summary, parent=self.root)
         removed_ids = tuple(
             item.entry_id
             for item in result.entries
             if item.outcome in {RenameOutcome.RENAMED, RenameOutcome.UNCHANGED}
         )
-        excluded = set(self._processing_plan.excluded_entry_ids if self._processing_plan else ())
-        snapshot = self._processing_snapshot
-        assert snapshot is not None
-        planned_ids = {entry.entry_id for entry in snapshot.entries}
-        excluded.update(planned_ids.difference(self._processing_intended_ids))
         for entry_id in excluded:
             self._processing_diagnostics_by_id[entry_id] = (
                 "Excluded by the confirmed collision-only subset"
@@ -2019,17 +2106,11 @@ class _MainWindow:
         if removed or updated:
             self._notify_collection_changed()
         self._update_summary()
-        summary = self._rename_result_summary(result, clean_result, excluded)
-        issues = bool(excluded) or result.state is not RenameState.SUCCEEDED or any(
-            item.outcome not in {RenameOutcome.RENAMED, RenameOutcome.UNCHANGED}
-            for item in result.entries
-        )
-        if clean_result is not None and (clean_result.detail or clean_result.failures):
-            issues = True
-        self._finish_processing(summary, show_dialog=True, warning=issues)
+        self._finish_processing(summary, show_dialog=not verified, warning=issues)
 
     def _rename_result_summary(
-        self, result: Any, cleanup: CleanupResult | None, excluded: set[UUID]
+        self, result: Any, cleanup: CleanupResult | None, excluded: set[UUID],
+        verified: tuple[VerificationResult, ...] = (),
     ) -> str:
         counts = {outcome: 0 for outcome in RenameOutcome}
         for item in result.entries:
@@ -2057,6 +2138,20 @@ class _MainWindow:
                 lines.append(diagnostic)
         if excluded:
             lines.append(f"{len(excluded)} file(s) were excluded from the confirmed subset.")
+        if verified:
+            totals = {status: 0 for status in VerificationStatus}
+            for row in verified:
+                totals[row.status] += 1
+            lines.append("Post-verify · " + " · ".join(
+                f"{count} {status.value.lower()}" for status, count in totals.items() if count
+            ))
+            problems = [row for row in verified if row.status is not VerificationStatus.VERIFIED]
+            lines.extend(
+                f"{row.entry.original_filename} · {row.status.value} · {row.reason}"
+                for row in problems[:12]
+            )
+            if len(problems) > 12:
+                lines.append(f"{len(problems) - 12} more verification issue(s) in the log.")
         if cleanup is not None:
             if cleanup.detail:
                 lines.append(f"Auto-clean: {cleanup.detail}")
@@ -2128,7 +2223,7 @@ class _MainWindow:
             return
         if phase in {
             "rename_modifying", "auto_cleaning", "trash_clearing", "exit_trash_clear",
-            "deduplicating", "probable_trash",
+            "deduplicating", "probable_trash", "purging", "post_verify",
         }:
             self.status.configure(text="The current filesystem changes cannot be canceled safely.")
             return
@@ -2170,11 +2265,13 @@ class _MainWindow:
             target=inspect, name="TidyFiles-trash-inspection", daemon=True
         ).start()
 
-    def _show_files_excluded(self, snapshot: CollectionSnapshot, newly_excluded: int) -> None:
+    def _show_files_excluded(
+        self, snapshot: CollectionSnapshot, exact: int, corrupt: int, other: int,
+    ) -> None:
         dialog = ctk.CTkToplevel(self.root)
         self._files_excluded_dialog = dialog
         dialog.title("Files Excluded")
-        dialog.geometry("455x225")
+        dialog.geometry("455x240")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.protocol("WM_DELETE_WINDOW", self._dismiss_files_excluded)
@@ -2183,19 +2280,28 @@ class _MainWindow:
         ctk.CTkLabel(
             body,
             text=(
-                f"{newly_excluded} file(s) excluded as exact duplicates.\n"
+                f"{corrupt} file(s) excluded as corrupted. "
+                f"{exact} file(s) excluded as exact duplicates.\n"
+                f"{other} discovery exclusion(s).\n"
                 f"{len(snapshot.entries)} file(s) remain for processing.\n\n"
-                f"Deduplicate moves {len(snapshot.excluded_duplicates)} excluded file(s) "
-                "into managed Trash. OK leaves them on disk."
+                f"Purge has {len(snapshot.excluded_corruption)} file(s) pending. "
+                f"Deduplicate has {len(snapshot.excluded_duplicates)} file(s) pending. "
+                "Both actions use managed Trash. "
+                "OK leaves excluded files on disk."
             ),
             justify="left", anchor="w", wraplength=400,
         ).pack(fill="x", padx=12, pady=12)
         actions = ctk.CTkFrame(body, fg_color="transparent")
         actions.pack(side="bottom", anchor="e", padx=12, pady=12)
-        ctk.CTkButton(
-            actions, text="Deduplicate", width=115,
-            command=lambda: self.start_deduplicate(snapshot),
-        ).pack(side="left", padx=(0, 8))
+        if snapshot.excluded_corruption:
+            ctk.CTkButton(
+                actions, text="Purge", width=85, command=lambda: self.start_purge(snapshot),
+            ).pack(side="left", padx=(0, 8))
+        if snapshot.excluded_duplicates:
+            ctk.CTkButton(
+                actions, text="Deduplicate", width=115,
+                command=lambda: self.start_deduplicate(snapshot),
+            ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(
             actions, text="OK", width=75, command=self._dismiss_files_excluded
         ).pack(side="left")
@@ -2222,8 +2328,34 @@ class _MainWindow:
         snapshot = self.collection.snapshot() if authorized is None else authorized
         if not snapshot.excluded_duplicates or not self.collection.is_current(snapshot):
             return False
+        return self._start_exclusion_trash(
+            "deduplicating", "Validating and moving exact duplicates into managed Trash…",
+            "deduplicate", lambda: self.trash_executor.execute_duplicates(snapshot),
+        )
+
+    def start_purge(self, authorized: CollectionSnapshot | None = None) -> bool:
+        if (
+            self._closing or self._close_pending or self._collection_operation_pending
+            or self._import_is_busy() or self._finishing_import
+            or (authorized is None and self._files_excluded_dialog is not None)
+        ):
+            return False
+        if authorized is not None and not self.collection.is_current(authorized):
+            return False
+        snapshot = self.collection.snapshot()
+        if not snapshot.excluded_corruption:
+            return False
+        evidence = tuple((row.entry, row.observation) for row in snapshot.excluded_corruption)
+        return self._start_exclusion_trash(
+            "purging", "Validating and moving corrupted files into managed Trash…",
+            "purge", lambda: self.trash_executor.execute_reviewed(evidence),
+        )
+
+    def _start_exclusion_trash(
+        self, phase: str, message: str, kind: str, execute: Callable[[], TrashResult],
+    ) -> bool:
         self._set_processing_phase(
-            "deduplicating", "Validating and moving exact duplicates into managed Trash…"
+            phase, message,
         )
         metadata_done = self._pause_media_metadata()
         self._dismiss_files_excluded(continue_review=False)
@@ -2235,14 +2367,49 @@ class _MainWindow:
             try:
                 if metadata_done is not None:
                     metadata_done.wait()
-                result = self.trash_executor.execute_duplicates(snapshot)
+                result = execute()
                 payload = (result, None)
             except Exception as error:
                 payload = (None, error)
-            self._processing_done.put(("deduplicate", payload))
+            self._processing_done.put((kind, payload))
 
-        threading.Thread(target=work, name="TidyFiles-deduplicate", daemon=True).start()
+        threading.Thread(target=work, name=f"TidyFiles-{kind}", daemon=True).start()
         return True
+
+    def _handle_purge(self, result: TrashResult | None, error: Exception | None) -> None:
+        moved = []
+        problems = []
+        if result is not None:
+            for item in result.entries:
+                if item.outcome is TrashOutcome.TRASHED:
+                    moved.append(item.entry_id)
+                else:
+                    detail = item.detail or result.detail or item.outcome.value.replace("_", " ")
+                    problems.append(f"{Path(item.source_path).name}: {detail}")
+            if result.detail and not problems:
+                problems.append(result.detail)
+        if error is not None:
+            problems.append(str(error))
+        self.collection.forget_purged(moved)
+        remaining = len(self.collection.snapshot().excluded_corruption)
+        message = f"Purged {len(moved)} corrupted file(s) to Trash. {remaining} remain excluded."
+        if result is not None and result.state is TrashState.RECOVERY_REQUIRED:
+            message += " Recovery information was retained."
+        _LOG.info("Purge · %s", message)
+        for problem in problems:
+            _LOG.warning("Purge · %s", problem)
+        if problems:
+            message += f" {len(problems)} issue(s). {' '.join(problems[0].splitlines())}"
+        self._deduplicate_status_revision = self.collection.revision
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
+        self._finish_processing(message)
+        if moved:
+            self._notify_collection_changed()
+        if self._pending_perceptual is not None:
+            self._purge_notice = message
+        if not self._start_perceptual():
+            self._purge_notice = None
 
     def _handle_deduplicate(self, result: TrashResult | None, error: Exception | None) -> None:
         moved = []
@@ -2460,6 +2627,9 @@ class _MainWindow:
         self._finish_perceptual(message)
 
     def _finish_perceptual(self, message: str) -> None:
+        if self._purge_notice is not None:
+            message = f"{self._purge_notice} {message}"
+            self._purge_notice = None
         self._deduplicate_status_revision = self.collection.revision
         self._finish_processing(message)
         if not self._closing and self.active_mode == "Bulk Rename":
@@ -3065,6 +3235,7 @@ class _MainWindow:
         ) or self.collection.capabilities.is_importing
         busy = (
             importing
+            or self._finishing_import
             or self._collection_operation_pending
             or self._closing
             or self._close_pending
@@ -3096,6 +3267,9 @@ class _MainWindow:
 
         self.controls["add_files"].configure(state="normal")
         self.controls["add_folder"].configure(state="normal")
+        self.controls["purge"].configure(
+            state="normal" if self.collection.has_corruption else "disabled"
+        )
         finder = self.active_mode == "Duplicate Finder"
         has_entries = bool(self._entries_by_id)
         selected = self._selected_entry_ids()
@@ -3169,6 +3343,7 @@ class _MainWindow:
             self.active_mode == "Bulk Rename"
             and self._unsynced_selection is None
             and self._files_excluded_dialog is None
+            and not self._finishing_import
             and self._pending_perceptual is None
             and self._entries_by_id
             and result is not None
@@ -3497,6 +3672,7 @@ class _MainWindow:
         self._unknown_size_count = 0
         self._last_import_report = None
         self._duplicate_issues = ()
+        self._verification_issues = ()
         self._display_positions.clear()
         self._preview_filename_ids.clear()
         self._preview_problem_ids.clear()
@@ -3562,11 +3738,11 @@ class _MainWindow:
                 self._progress_running = False
             self.progress.set(0)
             self.cancel_button.grid_remove()
-            self._update_control_states()
             return
 
         if not self._preview_import_invalidated:
             self._preview_import_invalidated = True
+            self._finishing_import = True
             preferences = self.import_controller.import_duplicate_preferences
             if preferences is not None and preferences.enabled and preferences.perceptual_enabled:
                 self._pending_perceptual = preferences
@@ -3615,12 +3791,16 @@ class _MainWindow:
             )
         elif session is not None and phase == "preparing":
             progress = self.import_controller.duplicate_progress
-            message = (
-                f"Checking exact duplicates · {progress.stage.value.capitalize()} "
-                f"{progress.completed}/{progress.total}"
-                if progress is not None
-                else f"Preparing final collection order · {session.counters.accepted} added"
-            )
+            verification = self.import_controller.verification_progress
+            if progress is not None:
+                message = (
+                    f"Checking exact duplicates · {progress.stage.value.capitalize()} "
+                    f"{progress.completed}/{progress.total}"
+                )
+            elif verification is not None:
+                message = f"Pre-verifying files… {verification[0]}/{verification[1]}"
+            else:
+                message = f"Preparing final collection order · {session.counters.accepted} added"
             self.status.configure(text=message)
         elif session is not None and phase == "rendering":
             rendered = min(
@@ -3752,16 +3932,28 @@ class _MainWindow:
         if not successful or self._close_pending:
             self._pending_perceptual = None
         result = self.import_controller.duplicate_result if successful else None
+        verified = self.import_controller.verification_results if successful else ()
+        evidence_ids = {row.entry.entry_id for row in snapshot.excluded_corruption}
+        corrupted = tuple(
+            row.entry.entry_id for row in verified if row.entry.entry_id in evidence_ids
+        )
+        if successful:
+            self._verification_issues = tuple(
+                (row.entry.source_path, f"{row.status.value} · {row.reason}")
+                for row in verified if row.status is not VerificationStatus.VERIFIED
+            )
+            for path, reason in self._verification_issues:
+                _LOG.warning("Pre-verify %s · %s", path, reason)
+            if self._verification_issues:
+                message += f" · {len(self._verification_issues)} verification issue(s)"
         newly_excluded = 0
+        removed = corrupted
         if result is not None:
-            removed = tuple(entry_id for group in result.groups for entry_id in group.redundant_ids)
-            newly_excluded = len(removed)
-            self._remove_rows_chunk(removed)
-            for entry_id in removed:
-                self._processing_diagnostics_by_id.pop(entry_id, None)
-                entry = self._entries_by_id.pop(entry_id, None)
-                if entry is not None:
-                    self._account_size(entry, -1)
+            duplicates = tuple(
+                entry_id for group in result.groups for entry_id in group.redundant_ids
+            )
+            newly_excluded = len(duplicates)
+            removed += duplicates
             paths = {entry.entry_id: entry.source_path for entry in snapshot.entries}
             self._duplicate_issues = tuple(
                 (paths[failure.entry_id], failure.reason) for failure in result.failures
@@ -3770,6 +3962,13 @@ class _MainWindow:
                 message += f" · {len(self._duplicate_issues)} exact duplicate check error(s)"
         elif successful:
             self._duplicate_issues = ()
+        if removed:
+            self._remove_rows_chunk(removed)
+            for entry_id in removed:
+                self._processing_diagnostics_by_id.pop(entry_id, None)
+                entry = self._entries_by_id.pop(entry_id, None)
+                if entry is not None:
+                    self._account_size(entry, -1)
         if self._import_view_switched or (
             newly_excluded and self.active_mode == "Duplicate Finder"
         ):
@@ -3779,10 +3978,12 @@ class _MainWindow:
         self.status.configure(text=message)
         self._update_summary()
         self._notify_collection_changed()
-        if newly_excluded and not self._close_pending:
-            self._show_files_excluded(snapshot, newly_excluded)
+        if (newly_excluded or corrupted) and not self._close_pending:
+            self._show_files_excluded(snapshot, newly_excluded, len(corrupted), counters.excluded)
         elif successful:
             self._start_perceptual()
+        self._finishing_import = False
+        self._update_control_states()
 
     def _update_import_warnings(
         self, sessions: tuple[ImportSessionSnapshot, ...] | None = None
@@ -3794,7 +3995,10 @@ class _MainWindow:
             for session in sessions
             if session.state in {ImportSessionState.INCOMPLETE, ImportSessionState.FAILED}
         )
-        issue_count = len(self._import_issue_sessions) + len(self._duplicate_issues)
+        issue_count = (
+            len(self._import_issue_sessions) + len(self._duplicate_issues)
+            + len(self._verification_issues)
+        )
         if issue_count:
             self.import_warnings_button.configure(
                 text=f"Import issues ({issue_count})"
@@ -3805,7 +4009,7 @@ class _MainWindow:
 
     def open_import_details(self) -> None:
         sessions = self._import_issue_sessions
-        if not sessions and not self._duplicate_issues:
+        if not sessions and not self._duplicate_issues and not self._verification_issues:
             return
         dialog = ctk.CTkToplevel(self.root)
         dialog.title("Import issues")
@@ -3817,7 +4021,8 @@ class _MainWindow:
         ctk.CTkLabel(
             body,
             text=(
-                "Review affected paths and the reported discovery or exact duplicate check errors."
+                "Review affected paths and the reported discovery, verification, "
+                "or duplicate issues."
             ),
             anchor="w",
             justify="left",
@@ -3839,9 +4044,14 @@ class _MainWindow:
         for path, reason in self._duplicate_issues:
             details.insert("end", f"Exact duplicate check\n  {path}\n    {reason}\n")
             details.insert("end", "\n")
+        for path, reason in self._verification_issues:
+            details.insert("end", f"Pre-verify\n  {path}\n    {reason}\n\n")
         details.configure(state="disabled")
 
     def _on_import_error(self, message: str) -> None:
+        if not self.import_controller.busy:
+            self._finishing_import = False
+            self._update_control_states()
         self.status.configure(text=message)
 
     def _select_all_rows(self, _event: tk.Event[Any]) -> str:
@@ -4297,6 +4507,16 @@ class _MainWindow:
             anchor="w",
             wraplength=420,
         ).pack(fill="x", padx=10, pady=(4, 10))
+        for key, label in (("pre_verify", "Pre-verify"), ("post_verify", "Post-verify")):
+            verify_switch = ctk.CTkSwitch(content, text=label)
+            verify_switch.configure(
+                command=lambda key=key, switch=verify_switch: self._save_verification_setting(
+                    key, switch
+                )
+            )
+            if self.config["global_settings"].get(key, False):
+                verify_switch.select()
+            verify_switch.pack(anchor="w", padx=10, pady=(2, 6))
         duplicate_options = ctk.CTkFrame(content, fg_color="transparent")
         duplicate_options.pack(fill="x", padx=10, pady=(2, 12))
         preferences = get_duplicate_preferences(self.config)
@@ -4379,6 +4599,44 @@ class _MainWindow:
             set_duplicate_preferences(self.config, previous)
             preferences = previous
         self._show_duplicate_settings(preferences)
+
+    def _save_verification_setting(self, key: str, switch: ctk.CTkSwitch) -> None:
+        settings = self.config["global_settings"]
+        previous = settings.get(key, False)
+        settings[key] = bool(switch.get())
+        self._save_preferences()
+        if self._last_save_error is not None:
+            settings[key] = previous
+            switch.select() if previous else switch.deselect()
+
+    @staticmethod
+    def _resolve_verification_probe(
+        tools: MediaTools | None, tool_check: Future[tuple[MediaTools, str | None]] | None,
+        cancelled: Callable[[], bool],
+    ) -> MediaTool | None:
+        if tool_check is not None:
+            while not tool_check.done() and not cancelled():
+                time.sleep(0.05)
+            if cancelled():
+                return None
+            try:
+                tools, _notice = tool_check.result()
+            except Exception as error:
+                _LOG.warning("Portable FFprobe availability check failed: %s", error)
+        return tools.ffprobe if tools is not None else None
+
+    def _capture_pre_verifier(self) -> VerifyImport | None:
+        if not self.config["global_settings"].get("pre_verify", False):
+            return None
+        tools, tool_check = self.media_tools, self._media_future
+
+        def verify(entries, cancelled, progress):
+            probe = self._resolve_verification_probe(tools, tool_check, cancelled)
+            return self._integrity_verifier.verify(
+                entries, probe, cancelled=cancelled, progress=progress
+            )
+
+        return verify
 
     def _check_portable_media(self) -> None:
         if self._media_future is not None:
@@ -4681,7 +4939,7 @@ class _MainWindow:
             or self._processing_phase
             in {
                 "rename_modifying", "auto_cleaning", "trash_clearing", "exit_trash_clear",
-                "deduplicating", "probable_trash",
+                "deduplicating", "probable_trash", "purging", "post_verify",
             }
         ):
             self.status.configure(

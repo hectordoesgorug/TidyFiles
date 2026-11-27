@@ -25,6 +25,22 @@ from tidyfiles.duplicate_analysis import HashAlgorithm
 from tidyfiles.sorting import SortCriterion, SortDirection, SortPreferences
 
 
+def test_verification_settings_default_off_and_persist_independently(tmp_path):
+    path = tmp_path / "config.json"
+    config = default_config()
+    settings = config["global_settings"]
+    assert settings["pre_verify"] is False and settings["post_verify"] is False
+    settings["pre_verify"] = True
+    save_config(path, config)
+    loaded = load_config(path)["global_settings"]
+    assert loaded["pre_verify"] is True and loaded["post_verify"] is False
+
+    settings["post_verify"] = 1
+    with pytest.raises(ConfigError, match="Verification settings"):
+        save_config(path, config)
+    assert load_config(path)["global_settings"]["post_verify"] is False
+
+
 def test_duplicate_preferences_default_for_existing_config_and_round_trip(tmp_path):
     path = tmp_path / "config.json"
     old = {"schema_version": 1, "global_settings": {}, "profiles": {}}

@@ -57,6 +57,15 @@ and reported as a failed transfer. Switch tabs after review and verify the
 shared rows and filename preview. Compare media columns with and without
 FFprobe and confirm Process becomes available independently of those reads.
 
+For verification acceptance, import a disposable folder containing a valid
+photo, a truncated photo, an unsupported media file, and a pair of exact
+copies. Check that Pre-verify works with Duplicate Checker disabled. With
+both enabled, exercise OK, Purge, and Deduplicate on separate copies of the
+fixture. Check the remaining action and verify that a file replaced during
+review remains outside processing and is reported when Purge runs. Exercise
+Post-verify with Auto-clean and check the completion summary and resulting
+files after a verification issue.
+
 ## Local checks
 
 ```powershell

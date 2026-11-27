@@ -63,6 +63,252 @@ def _close_app(app, root) -> None:
         root.destroy()
 
 
+@pytest.mark.parametrize("scenario", [
+    "disabled", "independent", "ok", "purge", "deduplicate", "changed", "unavailable",
+    "cancel", "stale",
+])
+def test_pre_verification_and_purge_workflow(tmp_path, monkeypatch, scenario):
+    if _run_gui_test_in_isolated_process(f"test_pre_verification_and_purge_workflow[{scenario}]"):
+        return
+    from dataclasses import replace
+
+    from PIL import Image
+
+    import tidyfiles.managed_trash as trash
+    import tidyfiles.storage as storage
+    from tidyfiles.transaction_journal import JournalStore
+
+    app_dir, local = tmp_path / "app", tmp_path / "local"
+    app_dir.mkdir()
+    local.mkdir()
+    journal = JournalStore(app_dir=app_dir, local_app_data=local)
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journal)
+    monkeypatch.setattr(storage, "application_directory", lambda: app_dir)
+    storage.managed_trash_path.cache_clear()
+    if scenario == "unavailable":
+        monkeypatch.setattr(trash, "managed_trash_path", lambda: None)
+    good, duplicate, bad, unsupported = (
+        tmp_path / name for name in ("a.txt", "b.txt", "broken.png", "unknown.jpg")
+    )
+    good.write_bytes(b"exact copy")
+    duplicate.write_bytes(good.read_bytes())
+    unsupported.write_bytes(b"unidentified image fixture")
+    with Image.new("RGB", (16, 16)) as image:
+        image.save(bad)
+    original = bad.read_bytes()[:25]
+    bad.write_bytes(original)
+    config = default_config()
+    config["global_settings"].update(
+        pre_verify=scenario != "disabled", duplicate_checker=scenario != "independent",
+        perceptual_hashing=scenario not in {"disabled", "independent", "cancel", "stale"},
+    )
+    root = create_main_window(config)
+    app = root.application
+    verifies, exact, perceptual, popups = [], [], [], []
+    entered, release = threading.Event(), threading.Event()
+    verify = app._integrity_verifier.verify
+    analyze_exact = app.import_controller._duplicate_analyzer.analyze
+    analyze_perceptual = app._perceptual_analyzer.analyze
+
+    def check(entries, tool, **options):
+        verifies.append(entries)
+        entered.set()
+        assert release.wait(10)
+        rows = verify(entries, tool, **options)
+        if scenario == "stale":
+            stale = replace(rows[0].entry, source_path=str(tmp_path / "ignored"))
+            return (replace(rows[0], entry=stale), *rows[1:])
+        return rows
+
+    def capture_exact(snapshot, **options):
+        exact.append(snapshot.entries)
+        return analyze_exact(snapshot, **options)
+
+    def capture_perceptual(snapshot, *args, **options):
+        perceptual.append(snapshot.entries)
+        return analyze_perceptual(snapshot, *args, **options)
+
+    monkeypatch.setattr(app._integrity_verifier, "verify", check)
+    monkeypatch.setattr(app.import_controller._duplicate_analyzer, "analyze", capture_exact)
+    monkeypatch.setattr(app._perceptual_analyzer, "analyze", capture_perceptual)
+    for popup in ("askyesno", "showinfo", "showwarning", "showerror"):
+        monkeypatch.setattr(app_module.messagebox, popup, lambda *args, **_: popups.append(args))
+
+    def click(label):
+        dialog = app._files_excluded_dialog
+        assert dialog is not None
+        next(
+            widget for widget in _descendants(dialog)
+            if isinstance(widget, ctk.CTkButton) and widget.cget("text") == label
+        ).invoke()
+
+    try:
+        root.update()
+        app.rename_format.set("<IncNr>")
+        monkeypatch.setattr(
+            app_module.filedialog, "askopenfilenames",
+            lambda **_: tuple(map(str, (good, duplicate, bad, unsupported))),
+        )
+        app.add_files()
+        if scenario != "disabled":
+            _wait_for(root, entered.is_set)
+            assert not exact and app.process_button.cget("state") == "disabled"
+            if scenario == "cancel":
+                app.cancel_import()
+        release.set()
+        _wait_for(root, lambda: not app.import_controller.busy)
+        snapshot = app.collection.snapshot()
+        if scenario in {"cancel", "stale"}:
+            assert not snapshot.entries and not snapshot.excluded_corruption
+            assert app._files_excluded_dialog is None and not exact
+            assert bad.read_bytes() == original
+            assert scenario != "stale" or "failed" in app.status.cget("text").lower()
+            return
+        assert len(snapshot.excluded_corruption) == (0 if scenario == "disabled" else 1)
+        assert len(snapshot.excluded_duplicates) == (0 if scenario == "independent" else 1)
+        if scenario == "disabled":
+            assert not verifies and bad.name in {entry.original_filename for entry in exact[0]}
+        elif exact:
+            assert bad.name not in {entry.original_filename for entry in exact[0]}
+        assert not perceptual and app.process_button.cget("state") == "disabled"
+        assert bad.read_bytes() == original
+        if scenario == "changed":
+            incoming = tmp_path / "replacement.png"
+            incoming.write_bytes(original)
+            incoming.replace(bad)
+        if scenario in {"purge", "changed", "unavailable"}:
+            click("Purge")
+            assert app._files_excluded_dialog is None and app._processing_phase == "purging"
+            assert app.process_button.cget("state") == "disabled"
+            assert app.cancel_button.cget("state") == "disabled"
+        else:
+            click("Deduplicate" if scenario == "deduplicate" else "OK")
+        _wait_for(root, app._process_ready)
+        snapshot = app.collection.snapshot()
+        assert tuple(str(entry.entry_id) for entry in snapshot.entries) == app.tree.get_children("")
+        assert all(
+            app.tree.set(str(entry.entry_id), "new_filename").startswith(f"{index:02}")
+            for index, entry in enumerate(snapshot.entries, 1)
+        )
+        assert not popups and good.exists() and unsupported.exists()
+        if scenario not in {"disabled", "independent"}:
+            assert len(perceptual) == 1
+            assert {row.original_filename for row in perceptual[0]} == {good.name, unsupported.name}
+        if scenario == "purge":
+            assert not bad.exists() and duplicate.exists()
+            assert not snapshot.excluded_corruption and snapshot.excluded_duplicates
+            assert [path.read_bytes() for path in (app_dir / "trash").glob("*/*.png")] == [original]
+        elif scenario in {"changed", "unavailable"}:
+            assert bad.read_bytes() == original and duplicate.exists()
+            assert snapshot.excluded_corruption and snapshot.excluded_duplicates
+            status = app.status.cget("text")
+            assert "Purged 0" in status and "1 remain excluded" in status
+            assert ("identity changed" if scenario == "changed" else "unavailable") in status
+        else:
+            assert bad.exists()
+            assert duplicate.exists() == (scenario != "deduplicate")
+            if scenario != "disabled":
+                assert snapshot.excluded_corruption
+                assert app.controls["purge"].cget("state") == "normal"
+                app.controls["purge"].invoke()
+                _wait_for(root, lambda: app._processing_phase == "idle")
+                assert not bad.exists() and not app.collection.snapshot().excluded_corruption
+                assert not popups
+    finally:
+        release.set()
+        _close_app(app, root)
+        storage.managed_trash_path.cache_clear()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_post_verification_before_auto_clean(tmp_path, monkeypatch, enabled):
+    if _run_gui_test_in_isolated_process(f"test_post_verification_before_auto_clean[{enabled}]"):
+        return
+    from PIL import Image
+
+    from tidyfiles.transaction_journal import JournalStore
+
+    folder, local = tmp_path / "import", tmp_path / "local"
+    nested = folder / "nested"
+    nested.mkdir(parents=True)
+    local.mkdir()
+    journal = JournalStore(app_dir=tmp_path / "app", local_app_data=local)
+    monkeypatch.setattr(app_module, "JournalStore", lambda: journal)
+    good, bad = nested / "good.txt", nested / "broken.png"
+    good.write_bytes(b"ordinary text")
+    with Image.new("RGB", (16, 16)) as image:
+        image.save(bad)
+    broken = bad.read_bytes()[:25]
+    bad.write_bytes(broken)
+    clutter = nested / "Thumbs.db"
+    clutter.touch()
+    config_path = tmp_path / "config.json"
+    root = create_main_window(default_config(), config_path)
+    app = root.application
+    entered, release = threading.Event(), threading.Event()
+    calls, summaries, statuses = [], [], []
+    verify = app._integrity_verifier.verify
+
+    def check(entries, tool, **options):
+        calls.extend(entries)
+        entered.set()
+        assert release.wait(10)
+        return verify(entries, tool, **options)
+
+    def display(_title, message, **_options):
+        summaries.append(message)
+        statuses.extend(app.tree.set(item, "status") for item in app.tree.get_children(""))
+
+    monkeypatch.setattr(app._integrity_verifier, "verify", check)
+    monkeypatch.setattr(app_module.messagebox, "showinfo", display)
+    monkeypatch.setattr(app_module.messagebox, "showwarning", display)
+    monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *_args, **_options: True)
+    try:
+        root.update()
+        app.open_settings()
+        settings = app.settings_window
+        assert settings is not None
+        switches = {
+            widget.cget("text"): widget for widget in _descendants(settings)
+            if isinstance(widget, ctk.CTkSwitch)
+        }
+        assert not switches["Pre-verify"].get() and not switches["Post-verify"].get()
+        if enabled:
+            switches["Post-verify"].toggle()
+            assert load_config(config_path)["global_settings"]["post_verify"] is True
+        settings.destroy()
+        monkeypatch.setattr(app_module.filedialog, "askdirectory", lambda **_: str(folder))
+        app.add_folder()
+        _wait_for(root, lambda: not app.import_controller.busy)
+        app.auto_clean_switch.select()
+        app._on_auto_clean_changed()
+        app.rename_format.set("<Name> renamed")
+        _wait_for(root, app._process_ready)
+        app.process_button.invoke()
+        success, damaged = nested / "good renamed.txt", nested / "broken renamed.png"
+        if enabled:
+            _wait_for(root, entered.is_set)
+            _wait_for(root, lambda: app._processing_phase == "post_verify")
+            assert {Path(entry.source_path) for entry in calls} == {success, damaged}
+            assert success.exists() and damaged.exists() and clutter.exists()
+            assert not summaries and app.process_button.cget("state") == "disabled"
+        release.set()
+        _wait_for(root, lambda: app._processing_phase == "idle" and bool(summaries))
+        assert good.exists() is False and bad.exists() is False
+        assert not clutter.exists() and damaged.read_bytes() == broken
+        assert not app.collection.snapshot().excluded_corruption
+        if enabled:
+            assert set(statuses) == {"Corrupted", "Verified"}
+            assert "1 verified · 1 corrupted" in summaries[0]
+            assert "broken renamed.png · Corrupted" in summaries[0]
+        else:
+            assert not calls and "Post-verify" not in summaries[0]
+        assert "Auto-clean removed 1 item(s)" in summaries[0]
+    finally:
+        release.set()
+        _close_app(app, root)
+
+
 @pytest.mark.parametrize(
     "choice", ["ok", "dialog_deduplicate", "finder_deduplicate", "failed", "finder_partial"]
 )

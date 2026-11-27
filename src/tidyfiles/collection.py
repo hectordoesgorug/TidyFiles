@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import PureWindowsPath
-from typing import Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 from uuid import UUID, uuid4
 
 from tidyfiles.sorting import (
@@ -16,6 +16,9 @@ from tidyfiles.sorting import (
     SortPreferences,
     sort_entries,
 )
+
+if TYPE_CHECKING:
+    from tidyfiles.destination_observation import PathObservation
 
 
 class ImportMode(StrEnum):
@@ -111,6 +114,13 @@ class ExcludedDuplicate:
 
 
 @dataclass(frozen=True, slots=True)
+class ExcludedCorruption:
+    entry: CollectionEntry
+    observation: PathObservation
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class ImportRootRecord:
     root_id: UUID
     path: str
@@ -143,6 +153,7 @@ class PreparedImportOrder:
     revision: int
     entry_ids: tuple[UUID, ...]
     duplicate_pairs: tuple[tuple[UUID, UUID], ...] = ()
+    corrupted: tuple[ExcludedCorruption, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +184,7 @@ class CollectionSnapshot:
     sort_preferences: SortPreferences
     capabilities: CollectionCapabilities
     excluded_duplicates: tuple[ExcludedDuplicate, ...] = ()
+    excluded_corruption: tuple[ExcludedCorruption, ...] = ()
 
     @property
     def finalized_entries(self) -> tuple[CollectionEntry, ...]:
@@ -198,6 +210,7 @@ class WorkingCollection:
         self._collection_id = uuid4()
         self._entries: dict[UUID, CollectionEntry] = {}
         self._excluded_duplicates: dict[UUID, ExcludedDuplicate] = {}
+        self._excluded_corruption: dict[UUID, ExcludedCorruption] = {}
         self._excluded_probable: dict[UUID, CollectionEntry] = {}
         self._entry_order: list[UUID] = []
         self._path_entries: dict[str, UUID] = {}
@@ -214,6 +227,10 @@ class WorkingCollection:
     @property
     def collection_id(self) -> UUID:
         return self._collection_id
+
+    @property
+    def has_corruption(self) -> bool:
+        return bool(self._excluded_corruption)
 
     @property
     def revision(self) -> int:
@@ -287,6 +304,8 @@ class WorkingCollection:
         existing_id = self._path_entries.get(path_key)
         if existing_id is not None:
             existing = self._entries.get(existing_id) or self._excluded_probable.get(existing_id)
+            if existing is None and (corrupt := self._excluded_corruption.get(existing_id)):
+                existing = corrupt.entry
             if existing is None:
                 existing = self._excluded_duplicates[existing_id].entry
             return RegistrationResult(existing, added=False)
@@ -340,6 +359,10 @@ class WorkingCollection:
         session = self._require_open_session(session_id)
         pairs = prepared_order.duplicate_pairs if prepared_order is not None else ()
         excluded = dict(pairs)
+        corruption = (
+            {row.entry.entry_id: row for row in prepared_order.corrupted}
+            if prepared_order is not None else {}
+        )
         if prepared_order is not None:
             if (
                 prepared_order.collection_id != self._collection_id
@@ -348,10 +371,18 @@ class WorkingCollection:
                 or len(prepared_order.entry_ids) != len(self._entry_order)
                 or set(prepared_order.entry_ids) != set(self._entry_order)
                 or len(excluded) != len(pairs)
+                or len(corruption) != len(prepared_order.corrupted)
+                or any(
+                    entry_id not in self._entries
+                    or replace(self._entries[entry_id], is_finalized=True) != row.entry
+                    for entry_id, row in corruption.items()
+                )
                 or any(
                     redundant not in self._entries
                     or keeper not in self._entries
                     or keeper in excluded
+                    or redundant in corruption
+                    or keeper in corruption
                     for redundant, keeper in pairs
                 )
             ):
@@ -378,6 +409,9 @@ class WorkingCollection:
                 *(entry.entry_id for entry in sorted_new),
             ]
         self._open_session_id = None
+        for entry_id, row in corruption.items():
+            self._excluded_corruption[entry_id] = row
+            self._entries.pop(entry_id)
         if excluded:
             for entry_id, prior in self._excluded_duplicates.items():
                 if prior.keeper.entry_id in excluded:
@@ -388,8 +422,9 @@ class WorkingCollection:
                     self._excluded_duplicates[entry_id] = ExcludedDuplicate(
                         self._entries.pop(entry_id), self._entries[excluded[entry_id]]
                     )
+        if excluded or corruption:
             self._entry_order = [
-                entry_id for entry_id in self._entry_order if entry_id not in excluded
+                entry_id for entry_id in self._entry_order if entry_id in self._entries
             ]
         self._revision += 1
 
@@ -664,6 +699,16 @@ class WorkingCollection:
                 self._path_entries.pop(entry.normalized_path_key)
                 self._revision += 1
 
+    def forget_purged(self, entry_ids: Sequence[UUID]) -> None:
+        self._require_idle("forget purged files")
+        changed = False
+        for entry_id in entry_ids:
+            if (row := self._excluded_corruption.pop(entry_id, None)) is not None:
+                self._path_entries.pop(row.entry.normalized_path_key)
+                changed = True
+        if changed:
+            self._revision += 1
+
     def clear_all(self) -> bool:
         """Clear collection-owned in-memory state; retain sort preferences."""
         self._require_idle("clear all")
@@ -671,6 +716,7 @@ class WorkingCollection:
             return False
         self._entries.clear()
         self._excluded_duplicates.clear()
+        self._excluded_corruption.clear()
         self._excluded_probable.clear()
         self._entry_order.clear()
         self._path_entries.clear()
@@ -699,6 +745,7 @@ class WorkingCollection:
             sort_preferences=self._sort_preferences,
             capabilities=capabilities,
             excluded_duplicates=tuple(self._excluded_duplicates.values()),
+            excluded_corruption=tuple(self._excluded_corruption.values()),
         )
 
     def is_current(self, snapshot: CollectionSnapshot) -> bool:

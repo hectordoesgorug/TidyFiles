@@ -18,6 +18,7 @@ from tidyfiles.perceptual_analysis import (
     perceptual_similarity,
 )
 from tidyfiles.storage import application_directory
+from tidyfiles.verification import IntegrityVerifier, VerificationStatus
 
 
 @pytest.fixture
@@ -38,6 +39,26 @@ def _create_video(ffmpeg: Path, output: Path, *inputs: str) -> None:
         "-c:v", "mpeg4", "-threads", "1", str(output),
     )
     media.run_media_command(ffmpeg, arguments, timeout=15)
+
+
+def test_real_video_verification_and_missing_probe(local_tools, tmp_path):
+    _, tools = local_tools
+    assert tools.ffmpeg.path is not None
+    good, truncated = tmp_path / "good.mp4", tmp_path / "truncated.mp4"
+    _create_video(tools.ffmpeg.path, good, "testsrc2=s=64x48:r=5:d=1")
+    contents = good.read_bytes()
+    assert contents[4:8] == b"ftyp"
+    truncated.write_bytes(contents[:int.from_bytes(contents[:4], "big")])
+    entries = _collection(good, truncated).snapshot().entries
+    verifier = IntegrityVerifier()
+    verified, corrupt = verifier.verify(entries, tools.ffprobe)
+    assert verified.status is VerificationStatus.VERIFIED, verified
+    assert corrupt.status is VerificationStatus.CORRUPTED, corrupt
+    assert "moov" in corrupt.reason
+    assert all(
+        result.status is VerificationStatus.UNSUPPORTED for result in verifier.verify(entries, None)
+    )
+    assert good.read_bytes() == contents and truncated.stat().st_size < len(contents)
 
 
 @pytest.mark.parametrize("duration,rate", [(0.5, 2), (0.6, 5), (6, 10), (12, 10)])

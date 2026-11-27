@@ -115,6 +115,7 @@ class RenameEntryResult:
     outcome: RenameOutcome
     actual_path: str | None = None
     detail: str | None = None
+    observation: PathObservation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,7 +533,10 @@ class _RenameRun:
             reason = detail if row.entry_id == self.failed_entry else None
             if status is RenameOutcome.RECOVERY_REQUIRED and reason is None:
                 reason = "The expected file location or staging vacancy could not be verified"
-            outcomes.append(RenameEntryResult(row.entry_id, status, target, reason))
+            outcomes.append(RenameEntryResult(
+                row.entry_id, status, target, reason,
+                proof.observation if proof is not None else None,
+            ))
             if proof is not None:
                 evidence.append(proof)
 

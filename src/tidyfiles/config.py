@@ -27,6 +27,8 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "hash_workers": 4,
         "perceptual_hashing": False,
         "phash_threshold": 80,
+        "pre_verify": False,
+        "post_verify": False,
     },
     "profiles": {},
 }
@@ -98,6 +100,11 @@ def _validate_config(config: Any) -> dict[str, Any]:
         for key in ("auto_clean", "auto_clear_trash_on_exit")
     ):
         raise ConfigError("Cleanup settings must be booleans.")
+    if any(
+        type(config["global_settings"].get(key, False)) is not bool
+        for key in ("pre_verify", "post_verify")
+    ):
+        raise ConfigError("Verification settings must be booleans.")
     profiles = config.get("profiles")
     if not isinstance(profiles, dict):
         raise ConfigError("Configuration profiles must be an object.")

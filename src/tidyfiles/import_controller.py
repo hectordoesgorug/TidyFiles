@@ -10,7 +10,7 @@ from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
-from tidyfiles.collection import PreparedImportOrder, WorkingCollection
+from tidyfiles.collection import CollectionEntry, PreparedImportOrder, WorkingCollection
 from tidyfiles.config import DuplicatePreferences
 from tidyfiles.discovery import (
     DiscoveryDisposition,
@@ -26,12 +26,20 @@ from tidyfiles.duplicate_analysis import (
     DuplicateAnalyzer,
     DuplicateProgress,
 )
+from tidyfiles.verification import VerificationResult
 
 ViewState = tuple[tuple[UUID, ...], tuple[UUID, ...]]
 ActivityCallback = Callable[[str, DiscoverySession | None], None]
 ItemsCallback = Callable[[tuple[DiscoveryItem, ...]], None]
 OrderCallback = Callable[[tuple[UUID, ...], int, int, bool], None]
 RemoveCallback = Callable[[tuple[UUID, ...]], None]
+VerifyImport = Callable[
+    [
+        tuple[CollectionEntry, ...], Callable[[], bool],
+        Callable[[int, int, VerificationResult], None],
+    ],
+    tuple[VerificationResult, ...],
+]
 
 
 class ImportController:
@@ -61,6 +69,7 @@ class ImportController:
         discovery: FilesystemDiscovery | None = None,
         duplicate_preferences: Callable[[], DuplicatePreferences] | None = None,
         duplicate_analyzer: DuplicateAnalyzer | None = None,
+        pre_verify: Callable[[], VerifyImport | None] | None = None,
     ) -> None:
         self.root = root
         self.collection = collection
@@ -77,6 +86,11 @@ class ImportController:
         self.on_shutdown = on_shutdown
         self._duplicate_preferences = duplicate_preferences
         self._duplicate_analyzer = duplicate_analyzer
+        self._pre_verify = pre_verify
+        self._verify_import: VerifyImport | None = None
+        self.verification_progress: tuple[int, int] | None = None
+        self.verification_results: tuple[VerificationResult, ...] = ()
+        self._prepared_verification: tuple[VerificationResult, ...] = ()
         self.duplicate_result: DuplicateAnalysisResult | None = None
         self.duplicate_progress: DuplicateProgress | None = None
         self._prepared_duplicates: DuplicateAnalysisResult | None = None
@@ -150,6 +164,7 @@ class ImportController:
         try:
             prior_view = self.capture_view_state()
             preferences = self._duplicate_preferences() if self._duplicate_preferences else None
+            verify = self._pre_verify() if self._pre_verify else None
             session = begin()
         except Exception as error:
             self.on_error(str(error))
@@ -163,6 +178,10 @@ class ImportController:
         self._prepared_duplicates = None
         self.duplicate_progress = None
         self._import_duplicate_preferences = preferences
+        self._verify_import = verify
+        self.verification_progress = None
+        self.verification_results = ()
+        self._prepared_verification = ()
         self._prepare_error = None
         self._prepare_done = None
         self._render_order = ()
@@ -292,6 +311,7 @@ class ImportController:
         session_id = session.session_id
         preferences = self._import_duplicate_preferences
         analyzer = self._duplicate_analyzer
+        verify = self._verify_import
         done = threading.Event()
         self._phase = "preparing"
         self._order_started_at = time.perf_counter()
@@ -301,8 +321,31 @@ class ImportController:
         def prepare() -> None:
             try:
                 order = self.collection.prepare_import_order(session_id)
+                if verify is None and (
+                    preferences is None or not preferences.enabled or analyzer is None
+                ):
+                    self._prepared_order = order
+                    return
+                snapshot = self.collection.duplicate_analysis_snapshot(order)
+                if verify is not None:
+                    self.verification_progress = (0, len(snapshot.entries))
+                    verified = verify(
+                        snapshot.entries, session.cancellation_requested, self._verify_progress
+                    )
+                    if session.cancellation_requested():
+                        return
+                    if tuple(row.entry for row in verified) != snapshot.entries:
+                        raise ValueError("Pre-verification results are stale or incomplete")
+                    self._prepared_verification = verified
+                    corrupted = tuple(
+                        evidence for row in verified if (evidence := row.corruption()) is not None
+                    )
+                    order = replace(order, corrupted=corrupted)
+                    ids = {row.entry.entry_id for row in corrupted}
+                    snapshot = replace(snapshot, entries=tuple(
+                        entry for entry in snapshot.entries if entry.entry_id not in ids
+                    ))
                 if preferences is not None and preferences.enabled and analyzer is not None:
-                    snapshot = self.collection.duplicate_analysis_snapshot(order)
                     result = analyzer.analyze(
                         snapshot,
                         algorithm=preferences.algorithm,
@@ -337,6 +380,9 @@ class ImportController:
     def _duplicate_progress(self, progress: DuplicateProgress) -> None:
         self.duplicate_progress = progress
 
+    def _verify_progress(self, done: int, total: int, _result: VerificationResult) -> None:
+        self.verification_progress = (done, total)
+
     def _poll_preparation(self) -> None:
         assert self.session is not None and self._prepare_done is not None
         session = self.session
@@ -356,6 +402,7 @@ class ImportController:
             return
         assert self._prepared_order is not None
         excluded = {entry_id for entry_id, _ in self._prepared_order.duplicate_pairs}
+        excluded.update(row.entry.entry_id for row in self._prepared_order.corrupted)
         order = self._prepared_order.entry_ids
         self._render_order = tuple(entry_id for entry_id in order if entry_id not in excluded)
         self._phase = "rendering"
@@ -386,6 +433,7 @@ class ImportController:
             self._handle_terminal()
             return
         self.duplicate_result = self._prepared_duplicates
+        self.verification_results = self._prepared_verification
         if self._started_at is not None:
             self._time_to_all_rows_rendered_seconds = time.perf_counter() - self._started_at
         self._handle_terminal()
