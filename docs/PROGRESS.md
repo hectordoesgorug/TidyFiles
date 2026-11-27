@@ -7,8 +7,9 @@ The M1 parser, evaluator, extension resolution, and pure filename validation
 include M1-D.12's DD-061 parser diagnostic correction. They remain
 pure filename-engine components; M2-D and M2-E4 connect them to read-only
 evaluation and GUI previews. M3-G connects reviewed, journaled Bulk Rename and
-managed Trash cleanup to the desktop interface. Duplicate analysis and media
-repacking remain unavailable.
+managed Trash cleanup to the desktop interface. M4-A implements standalone exact
+duplicate analysis. Desktop integration for duplicate analysis and media
+repacking remains pending.
 See `docs/FILENAME_ENGINE_COVERAGE.md` for the decision-by-decision audit and
 historical verification record.
 
@@ -55,7 +56,8 @@ controls remain disabled.
 | M3-E | Complete | Standalone recoverable deletion, guarded cross-volume copying, and managed Trash discovery exclusions. |
 | M3-F | Complete | Read-only recovery observations, overlap guards, temporary artifact cleanup, Auto-clean, and guarded managed Trash clearing (DD-087). |
 | M3-G | Complete | Confirmed Bulk Rename execution, startup recovery notice, Auto-clean, manual Trash clearing, and normal-exit Auto-Clear Trash. |
-| M4 | Planned | Duplicate analysis and verification. |
+| M4 | In progress | Duplicate analysis and verification. |
+| M4-A | Implemented | Read-only exact duplicate detection, deterministic keepers, and session-scoped evidence. |
 | M5 | Planned | Media repacking and external-tool integration. |
 | M6 | Planned | Complete GUI workflows, settings, profiles, shortcuts, themes, and persistent layout. |
 | M6.1 | Planned | Targeted maintainability review after M6 and before M7. Use implemented features and their dependencies to determine which changes are justified. |
@@ -1016,6 +1018,35 @@ Recovery inspection per cleanup candidate (O1) and large Tk review and
 completion updates (O3) remain deferred. Revisit recovery inspection only with
 evidence that a shorter path preserves current recovery checks. Profile the Tk
 paths before changing rendering. Journal persistence remains under DD-086.
+
+## M4-A — Exact duplicate detection engine
+
+The read-only engine analyzes the complete finalized collection snapshot and
+reports confirmed groups, analyzed entries, file failures, cancellation, and
+progress without changing the collection or source files. Size filtering,
+xxHash64 and xxHash128, bounded byte comparison, and session-scoped evidence
+support cumulative imports and keeper selection in current effective order.
+DD-018 remains in progress. Duplicate Finder integration and Deduplicate
+execution still need current-result checks and independent validation before
+transfer. Hard-linked paths are kept distinct, with their transfer eligibility
+still to be decided.
+
+The focused suite covers both algorithms, forced hash collisions, worker and
+collection ordering, cache invalidation, removals, inaccessible and changing
+sources, zero-byte files, cancellation, bounded reads, and file preservation.
+On November 27, 2026, Python 3.13.17 on Windows passed 26 engine tests, 120
+collection, sorting, discovery, import, and preflight regression tests, and all
+697 tests in the full suite. There were no failures, skips, or deselections.
+Ruff, compileall, and Git whitespace checks passed.
+
+In an instrumented local run with 12 shared-size files and 24 unique-size files,
+only 12 files were hashed. Four workers returned the same groups and keepers
+as one worker, with at most four outstanding tasks. Four-worker cold runs took
+0.241 s for 12 MiB of hash input and 0.306 s for 96 MiB, with traced Python
+allocation peaks of 5.31 and 8.19 MiB. Reordering took 0.120 s with no content
+reads. Adding four matching files took 0.219 s and hashed only those four new
+files. Cancellation after the first content read submitted four of 16 possible
+hash tasks and returned no groups. These measurements are local observations.
 
 ## M6.1 — Targeted maintainability review
 

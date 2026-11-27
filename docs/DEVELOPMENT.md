@@ -6,8 +6,9 @@
 - Python 3.13 x64
 - Git
 
-The project uses CustomTkinter and the standard-library `ttk.Treeview`. Ruff and
-pytest are development dependencies declared in `pyproject.toml`.
+The project uses CustomTkinter and the standard-library `ttk.Treeview`. The exact
+duplicate engine uses the `xxhash` runtime dependency. Ruff and pytest are
+development dependencies declared in `pyproject.toml`.
 
 ## Create the environment and install
 
@@ -29,8 +30,8 @@ well as pytest and Ruff.
 
 The window opens with an empty file table. Add Files and Add Folder populate
 the shared collection. Bulk Rename supports live previews, background preflight,
-and journaled execution, including Single Folder. Duplicate analysis and
-repacking are planned. In a source checkout, writable repository storage is
+and journaled execution, including Single Folder. Duplicate Finder integration
+and repacking are planned. In a source checkout, writable repository storage is
 preferred for the log. Git ignores configuration and log files. Close the
 window normally to release the single-instance guard.
 

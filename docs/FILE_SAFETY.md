@@ -343,14 +343,24 @@ inspection and deletion safeguards. No ownership manifest was added. The GUI
 provides manual confirmation, startup recovery notification, Explorer access to
 recorded locations, and normal-exit invocation.
 
+## Exact duplicate analysis
+
+The standalone engine opens only read handles, compares full content in bounded
+chunks where hashes match, and reports files that cannot be validated. It
+rechecks discovery identity, current object metadata, and the selected path
+before accepting evidence. The collection and source locations are left intact.
+Results are scoped to the analyzed collection revision and reflect observations
+made during analysis. Deduplicate must independently revalidate identity and
+byte equality before moving any file. Hard-linked paths can appear in exact
+groups. Their eligibility for a Trash transfer needs an execution decision.
+
 ## Planned safety components
 
 The following remain unimplemented:
 
-- Duplicate analysis and confirmation.
 - Protected staging for other processing workflows.
 - Safe original retention and verified installation during repacking.
-- Duplicate verification before any deletion action.
+- Duplicate revalidation and managed Trash transfer on explicit Deduplicate.
 - Operator-directed resolution of interrupted transactions.
 
 Future filesystem work must independently validate a complete destination plan,

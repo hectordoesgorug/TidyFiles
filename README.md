@@ -21,7 +21,8 @@ previews, three built-in formats, token insertion, a scrollable token reference,
 and an explicit refresh for physical directory-count metadata. The format is
 session-only. Expression and file-specific errors are shown in the preview;
 Process uses the live filename preview as the review interface and runs fresh
-preflight before renaming. Duplicate analysis and repacking are not available.
+preflight before renaming. A standalone exact-duplicate engine is implemented.
+Duplicate analysis and repacking are unavailable through the desktop interface.
 The application is not production-ready.
 
 Collection controls are shared across Bulk Rename, Duplicate Finder, and
@@ -57,8 +58,6 @@ Auto-clean and Auto-Clear Trash are separate,
 default-off settings. Auto-clean runs only after complete rename success from
 explicit Add Folder roots; Auto-Clear Trash runs only after normal exit and
 warns only if it encounters errors or leaves content behind.
-Duplicate analysis and media repacking are not implemented, and their controls
-remain disabled.
 
 ## Run locally
 

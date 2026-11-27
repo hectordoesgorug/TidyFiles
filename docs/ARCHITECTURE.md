@@ -62,6 +62,7 @@ not implemented.
 | `src/tidyfiles/destination_observation.py` | Literal local Windows path, ancestor, volume, directory case, and occupancy observations. |
 | `src/tidyfiles/execution_preflight.py` | Review-time identity capture, full-batch refresh, and read-only identity, destination and exact-set revalidation. |
 | `src/tidyfiles/preflight_service.py` | A bounded preflight worker with replacement, cancellation, progress, and current-result tracking. |
+| `src/tidyfiles/duplicate_analysis.py` | Read-only exact duplicate analysis of finalized collection snapshots, with bounded hashing, byte confirmation, ordered results, progress, and session-scoped evidence. |
 | `src/tidyfiles/transaction_record.py` | Versioned transaction records, Windows identity encoding, and finalization evidence validation. |
 | `src/tidyfiles/transaction_journal.py` | Pinned journal sessions, atomic persistence, the independent recovery locator, read-only discovery, and explicitly authorized recovery-record dismissal. |
 | `src/tidyfiles/recovery.py` | Read-only current recovery observations and path/identity overlap protection for modifying services. |
@@ -77,8 +78,8 @@ not implemented.
 The GUI imports selected files and recursively selected folders by reading
 metadata, without opening file contents. Import updates the shared collection
 and table progressively. After the import is finalized, Bulk Rename can evaluate
-the complete ordered collection without reading file contents. No mode hashes
-duplicates, repacks media, or modifies the filesystem.
+the complete ordered collection without reading file contents. Duplicate Finder
+and Repacker currently share the collection controls and table.
 `collection.py` stores the selected path spelling and a separate
 case-insensitive, normalized Windows path key without resolving paths or
 accessing the filesystem. Filesystem object identity is optional metadata and
@@ -642,8 +643,38 @@ recovery-record dismissal, manual Trash clearing, and the independent
 Auto-Clear Trash setting for normal exit. Settings windows are raised and
 deiconified when opened or reused. A delayed visibility restore handles the
 temporary withdrawal used by CustomTkinter's Windows titlebar update.
-These controls do not implement duplicate analysis, repacking, or M4
-verification.
+The Duplicate Finder and Repacker processing controls remain disabled.
+
+## Exact duplicate analysis
+
+`DuplicateAnalyzer.analyze()` accepts a finalized `CollectionSnapshot` and
+reports its collection ID and revision, exact groups, analyzed entry IDs, and
+file-specific failures. The caller owns one analyzer per session and runs calls
+serially off the UI thread. Progress callbacks report inspection, hashing,
+comparison, and revalidation on the calling thread. Cancellation publishes no
+partial result or new cache evidence. A blocked filesystem call may finish
+before cancellation is observed.
+
+The engine verifies that files are readable and match their discovery identities
+and available metadata. Only shared-size files enter content hashing, including
+zero-byte files. The default is xxHash128, with xxHash64 also supported. Hashing
+uses 1 MiB reads with at most one outstanding task per configured worker. Each
+equal-size, equal-hash bucket is partitioned by bounded byte comparisons, and
+the first current collection member in each confirmed group is the keeper.
+Groups and redundant members follow effective collection order.
+
+Read-only, no-reparse handles are bound to observed objects and checked before
+and after content reads. A fresh metadata pass excludes failures and changes
+observed before completion. Cache reuse requires a matching entry, Windows
+path and object observation including change time, collection, and hash algorithm.
+It preserves valid hashes and known content partitions across cumulative
+imports and reorderings. Removed entries leave the cache on the next completed
+analysis. Distinct hard-link paths remain distinct collection entries.
+
+GUI integration must check the result against the current collection revision.
+Deduplicate will need fresh identity and content validation before transferring
+files to Trash. The engine currently uses the supported local Windows paths and
+metadata from the existing Windows observer.
 
 ## Tests and CI
 
@@ -658,7 +689,8 @@ installs `.[dev]`, then runs Ruff and pytest. It does not run `compileall`.
 
 ## Planned components
 
-Duplicate verification and repacking are future components.
+Duplicate Finder integration, Deduplicate execution, media verification,
+perceptual similarity, and repacking are future components.
 
 ## Deferred maintainability review
 
